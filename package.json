@@ -16,7 +16,8 @@
     "sync:chains": "dotenv -e .env.local -- tsx workers/chains/sync.ts",
     "sync:yields": "dotenv -e .env.local -- tsx workers/yields/sync.ts",
     "sync:prices": "dotenv -e .env.local -- tsx workers/prices/sync.ts",
-    "sync:all": "npm run sync:chains && npm run sync:protocols && npm run sync:yields && npm run sync:prices",
+    "sync:tokens": "dotenv -e .env.local -- tsx workers/tokens/sync.ts",
+    "sync:all": "npm run sync:chains && npm run sync:protocols && npm run sync:yields && npm run sync:prices && npm run sync:tokens",
     "check:alerts": "dotenv -e .env.local -- tsx workers/alerts/check.ts"
   },
   "dependencies": {

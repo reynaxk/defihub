@@ -16,6 +16,7 @@ const NAV_LINKS = [
   { href: "/protocols", label: "Protocols" },
   { href: "/chains", label: "Chains" },
   { href: "/yields", label: "Yields" },
+  { href: "/tokens", label: "Tokens" },
 ];
 
 export async function Navbar() {

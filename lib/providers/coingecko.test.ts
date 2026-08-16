@@ -125,4 +125,83 @@ describe("CoinGeckoProvider", () => {
       await expect(provider.getPrices(["ethereum"])).rejects.toThrow(ProviderUnavailableError);
     });
   });
+
+  describe("getTopMarketTokens", () => {
+    function mockMarketsAndList(markets: unknown[], list: unknown[]) {
+      // getTopMarketTokens invokes fetch() for /coins/markets before
+      // /coins/list (both synchronously, inside the Promise.all array), so
+      // mockResolvedValueOnce queues in that same order regardless of which
+      // response actually resolves first.
+      fetchMock.mockResolvedValueOnce(jsonResponse(markets)).mockResolvedValueOnce(jsonResponse(list));
+    }
+
+    it("cross-references market data with platform contract addresses", async () => {
+      mockMarketsAndList(
+        [
+          {
+            id: "usd-coin",
+            symbol: "usdc",
+            name: "USD Coin",
+            image: "https://example.com/usdc.png",
+            current_price: 1.0,
+            market_cap: 32_000_000_000,
+            total_volume: 4_500_000_000,
+          },
+        ],
+        [
+          {
+            id: "usd-coin",
+            platforms: { ethereum: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "arbitrum-one": "0xaf88d065e77c8cc2239327c5edb3a432268e5831" },
+          },
+        ],
+      );
+
+      const provider = new CoinGeckoProvider("test-key");
+      const [token] = await provider.getTopMarketTokens(250);
+
+      expect(token.coingeckoId).toBe("usd-coin");
+      expect(token.symbol).toBe("USDC");
+      expect(token.priceUsd).toBe(1.0);
+      expect(token.platforms.ethereum).toBe("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+      expect(token.platforms["arbitrum-one"]).toBe("0xaf88d065e77c8cc2239327c5edb3a432268e5831");
+    });
+
+    it("defaults platforms to {} when the coin is missing from /coins/list", async () => {
+      mockMarketsAndList(
+        [
+          {
+            id: "bitcoin",
+            symbol: "btc",
+            name: "Bitcoin",
+            image: null,
+            current_price: 60000,
+            market_cap: 1_000_000_000_000,
+            total_volume: 20_000_000_000,
+          },
+        ],
+        [], // /coins/list didn't include this id
+      );
+
+      const provider = new CoinGeckoProvider("test-key");
+      const [token] = await provider.getTopMarketTokens(250);
+
+      expect(token.platforms).toEqual({});
+      expect(token.logoUrl).toBeNull();
+    });
+
+    it("caps per_page at 250 even when a larger limit is requested", async () => {
+      mockMarketsAndList([], []);
+      const provider = new CoinGeckoProvider("test-key");
+      await provider.getTopMarketTokens(1000);
+
+      const marketsUrl = fetchMock.mock.calls[0][0] as string;
+      expect(new URL(marketsUrl).searchParams.get("per_page")).toBe("250");
+    });
+
+    it("throws ProviderUnavailableError on an unexpected /coins/markets shape", async () => {
+      mockMarketsAndList([{ id: "bad" }], []); // missing required fields
+      const provider = new CoinGeckoProvider("test-key");
+      await expect(provider.getTopMarketTokens(250)).rejects.toThrow(ProviderUnavailableError);
+    });
+  });
 });

@@ -1,7 +1,7 @@
 "use client";
 
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { formatUsd } from "@/lib/format";
+import { formatTokenPrice, formatUsd } from "@/lib/format";
 
 export interface TvlPoint {
   timestamp: string | Date;
@@ -11,9 +11,11 @@ export interface TvlPoint {
 function TooltipContent({
   active,
   payload,
+  valueFormatter,
 }: {
   active?: boolean;
   payload?: { value: number; payload: { timestamp: string } }[];
+  valueFormatter: (value: number) => string;
 }) {
   if (!active || !payload?.length) return null;
   const point = payload[0];
@@ -26,12 +28,37 @@ function TooltipContent({
           year: "numeric",
         })}
       </div>
-      <div className="mt-0.5 font-medium tabular-nums text-foreground">{formatUsd(point.value, { compact: false })}</div>
+      <div className="mt-0.5 font-medium tabular-nums text-foreground">{valueFormatter(point.value)}</div>
     </div>
   );
 }
 
-export function TvlAreaChart({ data, height = 280 }: { data: TvlPoint[]; height?: number }) {
+// A formatter function can't be passed as a prop from a Server Component
+// (not serializable across the RSC boundary) - a string discriminant that
+// this client component resolves locally sidesteps that entirely.
+export type ChartValueKind = "usd" | "tokenPrice";
+
+const VALUE_FORMATTERS: Record<ChartValueKind, (v: number) => string> = {
+  usd: (v) => formatUsd(v, { compact: false }),
+  tokenPrice: formatTokenPrice,
+};
+
+const AXIS_FORMATTERS: Record<ChartValueKind, (v: number) => string> = {
+  usd: formatUsd,
+  tokenPrice: formatTokenPrice,
+};
+
+export function TvlAreaChart({
+  data,
+  height = 280,
+  valueKind = "usd",
+}: {
+  data: TvlPoint[];
+  height?: number;
+  valueKind?: ChartValueKind;
+}) {
+  const valueFormatter = VALUE_FORMATTERS[valueKind];
+  const axisFormatter = AXIS_FORMATTERS[valueKind];
   const chartData = data
     .filter((d) => d.value != null)
     .map((d) => ({ timestamp: typeof d.timestamp === "string" ? d.timestamp : d.timestamp.toISOString(), value: d.value }));
@@ -72,9 +99,12 @@ export function TvlAreaChart({ data, height = 280 }: { data: TvlPoint[]; height?
           tickLine={false}
           width={64}
           tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
-          tickFormatter={(value: number) => formatUsd(value)}
+          tickFormatter={(value: number) => axisFormatter(value)}
         />
-        <Tooltip content={<TooltipContent />} cursor={{ stroke: "var(--border)", strokeWidth: 1 }} />
+        <Tooltip
+          content={<TooltipContent valueFormatter={valueFormatter} />}
+          cursor={{ stroke: "var(--border)", strokeWidth: 1 }}
+        />
         <Area
           type="monotone"
           dataKey="value"

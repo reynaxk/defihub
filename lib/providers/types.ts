@@ -85,3 +85,24 @@ export interface NormalizedPrice {
 export interface PriceProvider {
   getPrices(coingeckoIds: string[]): Promise<NormalizedPrice[]>;
 }
+
+export interface NormalizedMarketToken {
+  coingeckoId: string;
+  symbol: string;
+  name: string;
+  logoUrl: string | null;
+  priceUsd: number | null;
+  marketCap: number | null;
+  volume24h: number | null;
+  // CoinGecko asset-platform id (e.g. "ethereum", "arbitrum-one") -> contract
+  // address on that chain. Native/no-platform assets (BTC, etc.) have {}.
+  platforms: Record<string, string>;
+}
+
+/**
+ * Token discovery by market cap, with per-chain contract addresses.
+ * Implemented by `coingecko.ts` today.
+ */
+export interface TokenDiscoveryProvider {
+  getTopMarketTokens(limit: number): Promise<NormalizedMarketToken[]>;
+}

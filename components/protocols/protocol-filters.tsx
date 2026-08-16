@@ -48,7 +48,9 @@ export function ProtocolFilters({
         onValueChange={(value) => updateParam("category", value)}
       >
         <SelectTrigger className="sm:w-44">
-          <SelectValue placeholder="Category" />
+          <SelectValue placeholder="Category">
+            {(value: string) => (value === ALL ? "All categories" : value)}
+          </SelectValue>
         </SelectTrigger>
         <SelectContent>
           <SelectItem value={ALL}>All categories</SelectItem>
@@ -62,7 +64,9 @@ export function ProtocolFilters({
 
       <Select defaultValue={searchParams.get("chain") ?? ALL} onValueChange={(value) => updateParam("chain", value)}>
         <SelectTrigger className="sm:w-44">
-          <SelectValue placeholder="Chain" />
+          <SelectValue placeholder="Chain">
+            {(value: string) => (value === ALL ? "All chains" : (chains.find((c) => c.slug === value)?.name ?? value))}
+          </SelectValue>
         </SelectTrigger>
         <SelectContent>
           <SelectItem value={ALL}>All chains</SelectItem>

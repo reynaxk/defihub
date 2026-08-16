@@ -83,6 +83,12 @@ export function TvlAreaChart({ data, height = 280 }: { data: TvlPoint[]; height?
           fill="url(#tvlFill)"
           dot={false}
           activeDot={{ r: 4, fill: "var(--chart-1)", stroke: "var(--card)", strokeWidth: 2 }}
+          // Recharts' entrance animation sets `stroke` imperatively outside
+          // React's normal commit; a CSS custom property in that attribute
+          // doesn't reliably repaint (confirmed via headless screenshot
+          // testing - grid/axis, which render through normal React, were
+          // unaffected). Disabling the animation avoids that path entirely.
+          isAnimationActive={false}
         />
       </AreaChart>
     </ResponsiveContainer>

@@ -24,7 +24,9 @@ export function YieldFilters({ chains }: { chains: { slug: string; name: string 
     <div className="flex flex-wrap items-center gap-4">
       <Select defaultValue={searchParams.get("chain") ?? ALL} onValueChange={(value) => updateParam("chain", value)}>
         <SelectTrigger className="w-44">
-          <SelectValue placeholder="Chain" />
+          <SelectValue placeholder="Chain">
+            {(value: string) => (value === ALL ? "All chains" : (chains.find((c) => c.slug === value)?.name ?? value))}
+          </SelectValue>
         </SelectTrigger>
         <SelectContent>
           <SelectItem value={ALL}>All chains</SelectItem>

@@ -67,6 +67,7 @@ export async function syncTokens() {
             priceUsd: token.priceUsd.toString(),
             marketCap: token.marketCap != null ? token.marketCap.toString() : null,
             volume24h: token.volume24h != null ? token.volume24h.toString() : null,
+            priceChange24h: token.priceChange24h != null ? token.priceChange24h.toString() : null,
           })
           .onConflictDoNothing();
         priced++;

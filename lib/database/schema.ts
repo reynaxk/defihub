@@ -141,6 +141,10 @@ export const tokenPrices = pgTable(
     priceUsd: numeric("price_usd", { precision: 24, scale: 8 }).notNull(),
     marketCap: numeric("market_cap", { precision: 24, scale: 2 }),
     volume24h: numeric("volume_24h", { precision: 24, scale: 2 }),
+    // Percent, as reported directly by the price provider (e.g. CoinGecko's
+    // own trailing-24h computation) - not derived from our own snapshots,
+    // which would need two sync runs a day apart to mean anything.
+    priceChange24h: numeric("price_change_24h", { precision: 10, scale: 4 }),
   },
   (table) => [primaryKey({ columns: [table.tokenId, table.timestamp] })],
 );

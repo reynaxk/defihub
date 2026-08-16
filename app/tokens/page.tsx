@@ -11,7 +11,14 @@ export const metadata: Metadata = {
 
 export const revalidate = 300;
 
-const VALID_SORTS: TokenSort[] = ["marketCap", "price", "volume24h"];
+const VALID_SORTS: TokenSort[] = ["marketCap", "price", "volume24h", "priceChange24h"];
+
+const SORT_DESCRIPTIONS: Record<TokenSort, string> = {
+  marketCap: "market cap",
+  price: "price",
+  volume24h: "24h volume",
+  priceChange24h: "24h change",
+};
 
 export default async function TokensPage({
   searchParams,
@@ -30,7 +37,7 @@ export default async function TokensPage({
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <h1 className="text-2xl font-semibold tracking-tight">Tokens</h1>
       <p className="mt-1 text-muted-foreground">
-        {tokens.length} tokens tracked across supported chains, ranked by {sort === "price" ? "price" : sort === "volume24h" ? "24h volume" : "market cap"}
+        {tokens.length} tokens tracked across supported chains, ranked by {SORT_DESCRIPTIONS[sort]}
       </p>
 
       <div className="mt-6">

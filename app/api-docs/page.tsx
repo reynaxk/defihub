@@ -143,6 +143,7 @@ export default function ApiDocsPage() {
       "chainName": "Ethereum",
       "chainSlug": "ethereum",
       "priceUsd": 0.999208,
+      "priceChange24h": -0.03,
       "marketCap": 183009723480,
       "volume24h": 16210930386
     }
@@ -167,8 +168,8 @@ export default function ApiDocsPage() {
     "decimals": 18,
     "coingeckoId": "usd-coin",
     "chain": "ethereum",
-    "current": { "timestamp": "2026-08-16T22:07:32.005Z", "priceUsd": 0.999552, "marketCap": 71813542628, "volume24h": 2882213425 },
-    "history": [{ "timestamp": "2026-08-16T22:07:32.005Z", "priceUsd": 0.999552, "marketCap": 71813542628, "volume24h": 2882213425 }, "..."]
+    "current": { "timestamp": "2026-08-16T22:07:32.005Z", "priceUsd": 0.999552, "priceChange24h": -0.02, "marketCap": 71813542628, "volume24h": 2882213425 },
+    "history": [{ "timestamp": "2026-08-16T22:07:32.005Z", "priceUsd": 0.999552, "priceChange24h": -0.02, "marketCap": 71813542628, "volume24h": 2882213425 }, "..."]
   }
 }`}
         />

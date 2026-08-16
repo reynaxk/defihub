@@ -13,6 +13,7 @@ const latestPricePerToken = db
     priceUsd: tokenPrices.priceUsd,
     marketCap: tokenPrices.marketCap,
     volume24h: tokenPrices.volume24h,
+    priceChange24h: tokenPrices.priceChange24h,
   })
   .from(tokenPrices)
   .orderBy(tokenPrices.tokenId, desc(tokenPrices.timestamp))
@@ -29,9 +30,10 @@ export interface TokenListItem {
   priceUsd: number | null;
   marketCap: number | null;
   volume24h: number | null;
+  priceChange24h: number | null;
 }
 
-export type TokenSort = "marketCap" | "price" | "volume24h";
+export type TokenSort = "marketCap" | "price" | "volume24h" | "priceChange24h";
 
 export async function getTokensList(
   opts: { chainSlug?: string; sort?: TokenSort } = {},
@@ -43,7 +45,9 @@ export async function getTokensList(
       ? latestPricePerToken.priceUsd
       : opts.sort === "volume24h"
         ? latestPricePerToken.volume24h
-        : latestPricePerToken.marketCap;
+        : opts.sort === "priceChange24h"
+          ? latestPricePerToken.priceChange24h
+          : latestPricePerToken.marketCap;
 
   const rows = await db
     .select({
@@ -57,6 +61,7 @@ export async function getTokensList(
       priceUsd: latestPricePerToken.priceUsd,
       marketCap: latestPricePerToken.marketCap,
       volume24h: latestPricePerToken.volume24h,
+      priceChange24h: latestPricePerToken.priceChange24h,
     })
     .from(tokens)
     .innerJoin(chains, eq(chains.id, tokens.chainId))
@@ -69,6 +74,7 @@ export async function getTokensList(
     priceUsd: r.priceUsd != null ? Number(r.priceUsd) : null,
     marketCap: r.marketCap != null ? Number(r.marketCap) : null,
     volume24h: r.volume24h != null ? Number(r.volume24h) : null,
+    priceChange24h: r.priceChange24h != null ? Number(r.priceChange24h) : null,
   }));
 }
 
@@ -77,6 +83,7 @@ export interface TokenPricePoint {
   priceUsd: number | null;
   marketCap: number | null;
   volume24h: number | null;
+  priceChange24h: number | null;
 }
 
 export interface TokenDetail {
@@ -109,6 +116,7 @@ export async function getTokenByAddress(address: string, chainSlug?: string): Pr
       priceUsd: tokenPrices.priceUsd,
       marketCap: tokenPrices.marketCap,
       volume24h: tokenPrices.volume24h,
+      priceChange24h: tokenPrices.priceChange24h,
     })
     .from(tokenPrices)
     .where(eq(tokenPrices.tokenId, row.token.id))
@@ -119,6 +127,7 @@ export async function getTokenByAddress(address: string, chainSlug?: string): Pr
     priceUsd: h.priceUsd != null ? Number(h.priceUsd) : null,
     marketCap: h.marketCap != null ? Number(h.marketCap) : null,
     volume24h: h.volume24h != null ? Number(h.volume24h) : null,
+    priceChange24h: h.priceChange24h != null ? Number(h.priceChange24h) : null,
   }));
 
   return {

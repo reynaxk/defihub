@@ -1,10 +1,22 @@
 import Link from "next/link";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EntityLogo } from "@/components/shared/entity-logo";
-import { formatTokenPrice, formatUsd } from "@/lib/format";
+import { formatPercent, formatTokenPrice, formatUsd } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import type { getTokensList } from "@/lib/database/queries/tokens";
 
 type TokenListItem = Awaited<ReturnType<typeof getTokensList>>[number];
+
+function PriceChangeCell({ value }: { value: number | null }) {
+  if (value == null) return <TableCell className="text-right tabular-nums text-muted-foreground">—</TableCell>;
+  return (
+    <TableCell
+      className={cn("text-right tabular-nums", value >= 0 ? "text-[var(--success-text)]" : "text-destructive")}
+    >
+      {formatPercent(value, { signed: true })}
+    </TableCell>
+  );
+}
 
 export function TokensTable({ tokens }: { tokens: TokenListItem[] }) {
   return (
@@ -15,6 +27,7 @@ export function TokensTable({ tokens }: { tokens: TokenListItem[] }) {
             <TableHead>Token</TableHead>
             <TableHead>Chain</TableHead>
             <TableHead className="text-right">Price</TableHead>
+            <TableHead className="text-right">24h</TableHead>
             <TableHead className="text-right">Market cap</TableHead>
             <TableHead className="text-right">24h volume</TableHead>
           </TableRow>
@@ -40,13 +53,14 @@ export function TokensTable({ tokens }: { tokens: TokenListItem[] }) {
                 </Link>
               </TableCell>
               <TableCell className="text-right tabular-nums">{formatTokenPrice(token.priceUsd)}</TableCell>
+              <PriceChangeCell value={token.priceChange24h} />
               <TableCell className="text-right tabular-nums">{formatUsd(token.marketCap)}</TableCell>
               <TableCell className="text-right tabular-nums">{formatUsd(token.volume24h)}</TableCell>
             </TableRow>
           ))}
           {tokens.length === 0 && (
             <TableRow>
-              <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
+              <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
                 No tokens match these filters.
               </TableCell>
             </TableRow>

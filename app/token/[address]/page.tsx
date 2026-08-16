@@ -9,7 +9,7 @@ import { TvlAreaChart } from "@/components/charts/tvl-area-chart";
 import { getTokenByAddress } from "@/lib/database/queries/tokens";
 import { isWatchingToken } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
-import { formatTokenPrice, formatUsd } from "@/lib/format";
+import { formatPercent, formatTokenPrice, formatUsd } from "@/lib/format";
 
 export const revalidate = 300;
 
@@ -72,8 +72,19 @@ export default async function TokenDetailPage({
         </p>
       )}
 
-      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3">
+      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatTile label="Price" value={formatTokenPrice(latest?.priceUsd)} />
+        <StatTile
+          label="24h change"
+          value={formatPercent(latest?.priceChange24h, { signed: true })}
+          valueClassName={
+            latest?.priceChange24h == null
+              ? undefined
+              : latest.priceChange24h >= 0
+                ? "text-[var(--success-text)]"
+                : "text-destructive"
+          }
+        />
         <StatTile label="Market cap" value={formatUsd(latest?.marketCap)} />
         <StatTile label="24h volume" value={formatUsd(latest?.volume24h)} />
       </div>

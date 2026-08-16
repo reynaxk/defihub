@@ -13,7 +13,7 @@ export default function Loading() {
       </div>
       <Skeleton className="mt-4 h-4 w-80" />
       <div className="mt-6">
-        <StatTilesSkeleton count={3} />
+        <StatTilesSkeleton count={4} />
       </div>
       <Skeleton className="mt-8 h-72 w-full rounded-lg" />
     </div>

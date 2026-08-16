@@ -42,6 +42,7 @@ export async function syncPrices() {
         priceUsd: price.priceUsd.toString(),
         marketCap: price.marketCap != null ? price.marketCap.toString() : null,
         volume24h: price.volume24h != null ? price.volume24h.toString() : null,
+        priceChange24h: price.priceChange24h != null ? price.priceChange24h.toString() : null,
       };
     })
     .filter((r) => r !== null);

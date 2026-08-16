@@ -11,6 +11,10 @@ const simplePriceSchema = z.record(
     usd: z.number().optional(),
     usd_market_cap: z.number().optional(),
     usd_24h_vol: z.number().optional(),
+    // CoinGecko can return an explicit `null` here (not just omit the key)
+    // for tokens without enough trailing-24h history - nullable(), not just
+    // optional(), or every batch containing one such token is rejected.
+    usd_24h_change: z.number().nullable().optional(),
   }),
 );
 
@@ -23,6 +27,7 @@ const marketsSchema = z.array(
     current_price: z.number().nullable(),
     market_cap: z.number().nullable(),
     total_volume: z.number().nullable(),
+    price_change_percentage_24h: z.number().nullable().optional(),
   }),
 );
 
@@ -78,6 +83,7 @@ export class CoinGeckoProvider implements PriceProvider, TokenDiscoveryProvider 
         vs_currencies: "usd",
         include_market_cap: "true",
         include_24hr_vol: "true",
+        include_24hr_change: "true",
       });
 
       const json = await this.fetchJson(`/simple/price?${params.toString()}`);
@@ -96,6 +102,7 @@ export class CoinGeckoProvider implements PriceProvider, TokenDiscoveryProvider 
           priceUsd: entry.usd,
           marketCap: entry.usd_market_cap ?? null,
           volume24h: entry.usd_24h_vol ?? null,
+          priceChange24h: entry.usd_24h_change ?? null,
         });
       }
     }
@@ -144,6 +151,7 @@ export class CoinGeckoProvider implements PriceProvider, TokenDiscoveryProvider 
       priceUsd: m.current_price,
       marketCap: m.market_cap,
       volume24h: m.total_volume,
+      priceChange24h: m.price_change_percentage_24h ?? null,
       platforms: platformsById.get(m.id) ?? {},
     }));
   }

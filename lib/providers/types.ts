@@ -77,6 +77,7 @@ export interface NormalizedPrice {
   priceUsd: number;
   marketCap: number | null;
   volume24h: number | null;
+  priceChange24h: number | null; // percent, e.g. 3.45 = +3.45%
 }
 
 /**
@@ -94,6 +95,7 @@ export interface NormalizedMarketToken {
   priceUsd: number | null;
   marketCap: number | null;
   volume24h: number | null;
+  priceChange24h: number | null; // percent, e.g. 3.45 = +3.45%
   // CoinGecko asset-platform id (e.g. "ethereum", "arbitrum-one") -> contract
   // address on that chain. Native/no-platform assets (BTC, etc.) have {}.
   platforms: Record<string, string>;

@@ -10,6 +10,7 @@ const SORT_LABELS: Record<string, string> = {
   marketCap: "Market cap",
   price: "Price",
   volume24h: "24h volume",
+  priceChange24h: "24h change",
 };
 
 export function TokenFilters({ chains }: { chains: { slug: string; name: string }[] }) {
@@ -55,6 +56,7 @@ export function TokenFilters({ chains }: { chains: { slug: string; name: string 
           <SelectItem value="marketCap">Market cap</SelectItem>
           <SelectItem value="price">Price</SelectItem>
           <SelectItem value="volume24h">24h volume</SelectItem>
+          <SelectItem value="priceChange24h">24h change</SelectItem>
         </SelectContent>
       </Select>
     </div>

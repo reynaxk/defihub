@@ -26,7 +26,12 @@ describe("CoinGeckoProvider", () => {
   it("normalizes a real-shaped /simple/price response", async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({
-        ethereum: { usd: 4109.5, usd_market_cap: 494_000_000_000, usd_24h_vol: 18_000_000_000 },
+        ethereum: {
+          usd: 4109.5,
+          usd_market_cap: 494_000_000_000,
+          usd_24h_vol: 18_000_000_000,
+          usd_24h_change: 2.34,
+        },
       }),
     );
 
@@ -34,7 +39,13 @@ describe("CoinGeckoProvider", () => {
     const prices = await provider.getPrices(["ethereum"]);
 
     expect(prices).toEqual([
-      { id: "ethereum", priceUsd: 4109.5, marketCap: 494_000_000_000, volume24h: 18_000_000_000 },
+      {
+        id: "ethereum",
+        priceUsd: 4109.5,
+        marketCap: 494_000_000_000,
+        volume24h: 18_000_000_000,
+        priceChange24h: 2.34,
+      },
     ]);
   });
 
@@ -61,12 +72,25 @@ describe("CoinGeckoProvider", () => {
     expect(prices[0].id).toBe("ethereum");
   });
 
-  it("defaults marketCap/volume24h to null when absent", async () => {
+  it("defaults marketCap/volume24h/priceChange24h to null when absent", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ ethereum: { usd: 4109.5 } }));
     const provider = new CoinGeckoProvider("test-key");
     const [price] = await provider.getPrices(["ethereum"]);
     expect(price.marketCap).toBeNull();
     expect(price.volume24h).toBeNull();
+    expect(price.priceChange24h).toBeNull();
+  });
+
+  it("treats an explicit null usd_24h_change the same as an absent one", async () => {
+    // CoinGecko sends a literal `null` (not just an omitted key) for tokens
+    // without enough trailing-24h history - caught live via `npm run
+    // sync:prices` returning a real batch containing exactly this shape.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ "hashnote-usyc": { usd: 1.05, usd_24h_change: null } }),
+    );
+    const provider = new CoinGeckoProvider("test-key");
+    const [price] = await provider.getPrices(["hashnote-usyc"]);
+    expect(price.priceChange24h).toBeNull();
   });
 
   it("includes the demo API key header when one is configured", async () => {

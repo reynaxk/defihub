@@ -24,7 +24,7 @@ export default function ErrorBoundary({
       <AlertTriangle className="size-10 text-muted-foreground" />
       <h1 className="text-xl font-semibold tracking-tight">Something went wrong</h1>
       <p className="text-muted-foreground">
-        That's on us, not you. Try again, or head back to the homepage.
+        That&apos;s on us, not you. Try again, or head back to the homepage.
       </p>
       <div className="flex items-center gap-3 pt-2">
         <Button onClick={reset}>Try again</Button>

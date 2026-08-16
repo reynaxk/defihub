@@ -31,9 +31,9 @@ export function EntityLogo({
   }
 
   return (
-    // eslint-disable-next-line @next/next/no-img-element -- logos come from an
-    // external, only-loosely-controlled provider; next/image's optimizer
-    // errors hard on the 404s that are routine here.
+    // Logos come from an external, only-loosely-controlled provider;
+    // next/image's optimizer errors hard on the 404s that are routine here.
+    // eslint-disable-next-line @next/next/no-img-element
     <img
       src={src}
       alt=""

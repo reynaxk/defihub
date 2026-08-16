@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ThemeToggle } from "@/components/navigation/theme-toggle";
+import { MobileNav } from "@/components/navigation/mobile-nav";
 
 const NAV_LINKS = [
   { href: "/protocols", label: "Protocols" },
@@ -21,11 +22,13 @@ const NAV_LINKS = [
 
 export async function Navbar() {
   const session = await auth();
+  const mobileLinks = session?.user ? [...NAV_LINKS, { href: "/dashboard", label: "Dashboard" }] : NAV_LINKS;
 
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6">
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-3 sm:gap-6">
+          <MobileNav links={mobileLinks} />
           <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight">
             <LineChart className="size-5 text-primary" strokeWidth={2.5} />
             <span>ChainScope</span>

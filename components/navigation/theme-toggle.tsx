@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { useTheme } from "next-themes";
 import { Monitor, Moon, Sun } from "lucide-react";
 import {
@@ -9,7 +9,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Button } from "@/components/ui/button";
 
 const OPTIONS = [
   { value: "light", label: "Light", icon: Sun },
@@ -17,13 +16,21 @@ const OPTIONS = [
   { value: "system", label: "System", icon: Monitor },
 ] as const;
 
+// Avoids a hydration mismatch: the server has no notion of the client's OS
+// preference or stored choice, so the icon is only meaningful once mounted
+// on the client. useSyncExternalStore's server/client snapshot split is the
+// React-sanctioned way to express "false during SSR and the first client
+// render, true after" without setState-in-effect's cascading-render smell.
+function subscribe() {
+  return () => {};
+}
+function useMounted() {
+  return useSyncExternalStore(subscribe, () => true, () => false);
+}
+
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme();
-  // Avoids a hydration mismatch: the server has no notion of the client's
-  // OS preference or stored choice, so the icon is only meaningful once
-  // mounted on the client.
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  const mounted = useMounted();
 
   const current = OPTIONS.find((o) => o.value === theme) ?? OPTIONS[2];
   const Icon = mounted ? current.icon : Monitor;

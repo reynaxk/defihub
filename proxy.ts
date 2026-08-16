@@ -23,7 +23,10 @@ function buildCsp(nonce: string): string {
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}'${isDev ? " 'unsafe-eval'" : ""}`,
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: https://icons.llamao.fi",
+    // icons.llamao.fi serves protocol/chain logos (DefiLlama); coin-images.
+    // coingecko.com serves token logos (CoinGecko) - both are real, live
+    // image sources this app renders, not a speculative allowance.
+    "img-src 'self' data: https://icons.llamao.fi https://coin-images.coingecko.com",
     "font-src 'self' data:",
     "connect-src 'self'",
     "object-src 'none'",

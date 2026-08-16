@@ -35,6 +35,9 @@ export function Footer() {
           <Link href="/yields" className="hover:text-foreground">
             Yields
           </Link>
+          <Link href="/api-docs" className="hover:text-foreground">
+            API
+          </Link>
         </nav>
       </div>
     </footer>

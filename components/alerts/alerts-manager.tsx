@@ -122,7 +122,7 @@ export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) 
                 name="type"
                 render={({ field }) => (
                   <Select value={field.value} onValueChange={field.onChange}>
-                    <SelectTrigger>
+                    <SelectTrigger aria-label="Alert type">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -150,7 +150,7 @@ export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) 
                 name="condition"
                 render={({ field }) => (
                   <Select value={field.value} onValueChange={field.onChange}>
-                    <SelectTrigger>
+                    <SelectTrigger aria-label="Alert condition">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -210,7 +210,12 @@ export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) 
                   {alert.lastTriggeredAt ? new Date(alert.lastTriggeredAt).toLocaleString() : "Never"}
                 </TableCell>
                 <TableCell>
-                  <Button variant="ghost" size="icon" onClick={() => deleteAlert(alert.id)}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Delete alert for ${alert.target}`}
+                    onClick={() => deleteAlert(alert.id)}
+                  >
                     <Trash2 className="size-4" />
                   </Button>
                 </TableCell>

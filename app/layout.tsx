@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Navbar } from "@/components/navigation/navbar";
 import { Footer } from "@/components/navigation/footer";
 import { Toaster } from "@/components/ui/sonner";
+import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -31,7 +33,9 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
+
   return (
     <html
       lang="en"
@@ -39,10 +43,18 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       suppressHydrationWarning
     >
       <body className="flex min-h-full flex-col bg-background text-foreground">
-        <Navbar />
-        <main className="flex-1">{children}</main>
-        <Footer />
-        <Toaster />
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+          nonce={nonce}
+        >
+          <Navbar />
+          <main className="flex-1">{children}</main>
+          <Footer />
+          <Toaster />
+        </ThemeProvider>
       </body>
     </html>
   );

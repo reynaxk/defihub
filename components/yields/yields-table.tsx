@@ -46,7 +46,7 @@ export function YieldsTable({ pools }: { pools: YieldPool[] }) {
                 </Link>
               </TableCell>
               <TableCell className="text-right tabular-nums">{formatUsd(pool.tvlUsd)}</TableCell>
-              <TableCell className="text-right tabular-nums font-medium text-[var(--chart-3)]">
+              <TableCell className="text-right tabular-nums font-medium text-[var(--success-text)]">
                 {formatApy(pool.apy)}
               </TableCell>
             </TableRow>

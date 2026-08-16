@@ -11,9 +11,17 @@ function buildCsp(nonce: string): string {
   // tags/elements present in markup, not runtime style mutations) - the
   // realistic alternative to 'unsafe-inline' here is breaking every
   // floating-UI component, not a meaningfully more secure app.
+  //
+  // script-src deliberately omits 'strict-dynamic': verified via a real
+  // dark-mode QA pass that Turbopack's dynamically-injected chunk scripts
+  // don't propagate the nonce in a way strict-dynamic's trust model
+  // accepts, so legitimate same-origin chunks (e.g. the table component)
+  // were being blocked outright. 'self' + the nonce (no strict-dynamic)
+  // still blocks third-party and injected inline scripts - the actual XSS
+  // defense goal - without breaking the app's own bundle.
   return [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}`,
+    `script-src 'self' 'nonce-${nonce}'${isDev ? " 'unsafe-eval'" : ""}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: https://icons.llamao.fi",
     "font-src 'self' data:",

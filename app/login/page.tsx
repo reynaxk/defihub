@@ -60,7 +60,7 @@ export default async function LoginPage({
             </p>
           )}
           {params.registered && (
-            <p className="rounded-md bg-[var(--chart-3)]/10 px-3 py-2 text-sm text-[var(--chart-3)]">
+            <p className="rounded-md bg-[var(--success-text)]/10 px-3 py-2 text-sm text-[var(--success-text)]">
               Account created — sign in below.
             </p>
           )}

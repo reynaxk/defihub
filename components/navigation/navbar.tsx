@@ -10,6 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { ThemeToggle } from "@/components/navigation/theme-toggle";
 
 const NAV_LINKS = [
   { href: "/protocols", label: "Protocols" },
@@ -42,40 +43,46 @@ export async function Navbar() {
           </nav>
         </div>
 
-        {session?.user ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger className="flex items-center gap-2 rounded-full outline-none ring-ring/50 focus-visible:ring-2">
-              <Avatar className="size-8">
-                <AvatarFallback className="text-xs">
-                  {(session.user.name ?? session.user.email ?? "?").slice(0, 1).toUpperCase()}
-                </AvatarFallback>
-              </Avatar>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
-              <div className="truncate px-2 py-1.5 text-sm text-muted-foreground">{session.user.email}</div>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem render={<Link href="/dashboard">Dashboard</Link>} />
-              <DropdownMenuItem render={<Link href="/alerts">Alerts</Link>} />
-              <DropdownMenuItem render={<Link href="/settings">Settings</Link>} />
-              <DropdownMenuSeparator />
-              <form
-                action={async () => {
-                  "use server";
-                  await signOut({ redirectTo: "/" });
-                }}
+        <div className="flex items-center gap-3">
+          <ThemeToggle />
+          {session?.user ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                aria-label="Account menu"
+                className="flex items-center gap-2 rounded-full outline-none ring-ring/50 focus-visible:ring-2"
               >
-                <button type="submit" className="w-full px-2 py-1.5 text-left text-sm">
-                  Sign out
-                </button>
-              </form>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : (
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" render={<Link href="/login">Sign in</Link>} />
-            <Button size="sm" render={<Link href="/register">Get started</Link>} />
-          </div>
-        )}
+                <Avatar className="size-8">
+                  <AvatarFallback className="text-xs">
+                    {(session.user.name ?? session.user.email ?? "?").slice(0, 1).toUpperCase()}
+                  </AvatarFallback>
+                </Avatar>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                <div className="truncate px-2 py-1.5 text-sm text-muted-foreground">{session.user.email}</div>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem render={<Link href="/dashboard">Dashboard</Link>} />
+                <DropdownMenuItem render={<Link href="/alerts">Alerts</Link>} />
+                <DropdownMenuItem render={<Link href="/settings">Settings</Link>} />
+                <DropdownMenuSeparator />
+                <form
+                  action={async () => {
+                    "use server";
+                    await signOut({ redirectTo: "/" });
+                  }}
+                >
+                  <button type="submit" className="w-full px-2 py-1.5 text-left text-sm">
+                    Sign out
+                  </button>
+                </form>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" render={<Link href="/login">Sign in</Link>} />
+              <Button size="sm" render={<Link href="/register">Get started</Link>} />
+            </div>
+          )}
+        </div>
       </div>
     </header>
   );

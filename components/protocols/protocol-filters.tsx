@@ -30,8 +30,12 @@ export function ProtocolFilters({
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
       <div className="relative sm:w-64">
-        <Search className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+        <Search
+          aria-hidden="true"
+          className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
+        />
         <Input
+          aria-label="Search protocols"
           placeholder="Search protocols..."
           value={search}
           className="pl-8"
@@ -47,7 +51,7 @@ export function ProtocolFilters({
         defaultValue={searchParams.get("category") ?? ALL}
         onValueChange={(value) => updateParam("category", value)}
       >
-        <SelectTrigger className="sm:w-44">
+        <SelectTrigger aria-label="Filter by category" className="sm:w-44">
           <SelectValue placeholder="Category">
             {(value: string) => (value === ALL ? "All categories" : value)}
           </SelectValue>
@@ -63,7 +67,7 @@ export function ProtocolFilters({
       </Select>
 
       <Select defaultValue={searchParams.get("chain") ?? ALL} onValueChange={(value) => updateParam("chain", value)}>
-        <SelectTrigger className="sm:w-44">
+        <SelectTrigger aria-label="Filter by chain" className="sm:w-44">
           <SelectValue placeholder="Chain">
             {(value: string) => (value === ALL ? "All chains" : (chains.find((c) => c.slug === value)?.name ?? value))}
           </SelectValue>

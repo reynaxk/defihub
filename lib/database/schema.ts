@@ -1,0 +1,359 @@
+import {
+  pgTable,
+  pgEnum,
+  uuid,
+  text,
+  varchar,
+  integer,
+  numeric,
+  boolean,
+  timestamp,
+  jsonb,
+  primaryKey,
+  uniqueIndex,
+  index,
+} from "drizzle-orm/pg-core";
+import { relations } from "drizzle-orm";
+
+// ---------------------------------------------------------------------------
+// Chains
+// ---------------------------------------------------------------------------
+
+export const chains = pgTable("chains", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: text("name").notNull(),
+  slug: varchar("slug", { length: 64 }).notNull().unique(),
+  chainId: integer("chain_id"), // EVM chain id; null for non-EVM chains (e.g. Solana)
+  nativeToken: varchar("native_token", { length: 32 }).notNull(),
+  logoUrl: text("logo_url"),
+  explorerUrl: text("explorer_url"),
+  defillamaSlug: varchar("defillama_slug", { length: 64 }).unique(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const chainMetrics = pgTable(
+  "chain_metrics",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    chainId: uuid("chain_id")
+      .notNull()
+      .references(() => chains.id, { onDelete: "cascade" }),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
+    tvl: numeric("tvl", { precision: 24, scale: 2 }),
+  },
+  (table) => [
+    index("chain_metrics_chain_ts_idx").on(table.chainId, table.timestamp),
+    uniqueIndex("chain_metrics_unique_snapshot").on(table.chainId, table.timestamp),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Protocols
+// ---------------------------------------------------------------------------
+
+export const protocols = pgTable(
+  "protocols",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    name: text("name").notNull(),
+    slug: varchar("slug", { length: 128 }).notNull().unique(),
+    description: text("description"),
+    website: text("website"),
+    logoUrl: text("logo_url"),
+    category: varchar("category", { length: 64 }),
+    // Maps this row to the upstream provider's identifier so sync jobs can
+    // upsert deterministically without fuzzy name-matching.
+    defillamaSlug: varchar("defillama_slug", { length: 128 }).unique(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index("protocols_category_idx").on(table.category)],
+);
+
+export const protocolChains = pgTable(
+  "protocol_chains",
+  {
+    protocolId: uuid("protocol_id")
+      .notNull()
+      .references(() => protocols.id, { onDelete: "cascade" }),
+    chainId: uuid("chain_id")
+      .notNull()
+      .references(() => chains.id, { onDelete: "cascade" }),
+    contractAddresses: jsonb("contract_addresses").$type<Record<string, string>>(),
+  },
+  (table) => [primaryKey({ columns: [table.protocolId, table.chainId] })],
+);
+
+export const protocolMetrics = pgTable(
+  "protocol_metrics",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    protocolId: uuid("protocol_id")
+      .notNull()
+      .references(() => protocols.id, { onDelete: "cascade" }),
+    // null = aggregate across all chains the protocol is deployed on
+    chainId: uuid("chain_id").references(() => chains.id, { onDelete: "cascade" }),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
+    tvl: numeric("tvl", { precision: 24, scale: 2 }),
+    volume24h: numeric("volume_24h", { precision: 24, scale: 2 }),
+    fees24h: numeric("fees_24h", { precision: 24, scale: 2 }),
+    revenue24h: numeric("revenue_24h", { precision: 24, scale: 2 }),
+  },
+  (table) => [
+    index("protocol_metrics_protocol_ts_idx").on(table.protocolId, table.timestamp),
+    uniqueIndex("protocol_metrics_unique_snapshot").on(
+      table.protocolId,
+      table.chainId,
+      table.timestamp,
+    ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Tokens & prices
+// ---------------------------------------------------------------------------
+
+export const tokens = pgTable(
+  "tokens",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    chainId: uuid("chain_id")
+      .notNull()
+      .references(() => chains.id, { onDelete: "cascade" }),
+    address: varchar("address", { length: 128 }).notNull(),
+    symbol: varchar("symbol", { length: 32 }).notNull(),
+    name: text("name"),
+    decimals: integer("decimals").notNull().default(18),
+    logoUrl: text("logo_url"),
+    // Identifier used to query the CoinGecko price provider.
+    coingeckoId: varchar("coingecko_id", { length: 128 }),
+  },
+  (table) => [uniqueIndex("tokens_chain_address_unique").on(table.chainId, table.address)],
+);
+
+export const tokenPrices = pgTable(
+  "token_prices",
+  {
+    tokenId: uuid("token_id")
+      .notNull()
+      .references(() => tokens.id, { onDelete: "cascade" }),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
+    priceUsd: numeric("price_usd", { precision: 24, scale: 8 }).notNull(),
+    marketCap: numeric("market_cap", { precision: 24, scale: 2 }),
+    volume24h: numeric("volume_24h", { precision: 24, scale: 2 }),
+  },
+  (table) => [primaryKey({ columns: [table.tokenId, table.timestamp] })],
+);
+
+// ---------------------------------------------------------------------------
+// Yield pools
+// ---------------------------------------------------------------------------
+
+export const yieldPools = pgTable(
+  "yield_pools",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    externalPoolId: varchar("external_pool_id", { length: 128 }).notNull().unique(),
+    protocolId: uuid("protocol_id").references(() => protocols.id, { onDelete: "set null" }),
+    chainId: uuid("chain_id")
+      .notNull()
+      .references(() => chains.id, { onDelete: "cascade" }),
+    symbol: varchar("symbol", { length: 128 }).notNull(),
+    underlyingTokens: jsonb("underlying_tokens").$type<string[]>(),
+    apy: numeric("apy", { precision: 10, scale: 4 }),
+    apyBase: numeric("apy_base", { precision: 10, scale: 4 }),
+    apyReward: numeric("apy_reward", { precision: 10, scale: 4 }),
+    tvlUsd: numeric("tvl_usd", { precision: 24, scale: 2 }),
+    stablecoin: boolean("stablecoin").default(false).notNull(),
+    ilRisk: varchar("il_risk", { length: 16 }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("yield_pools_chain_idx").on(table.chainId),
+    index("yield_pools_apy_idx").on(table.apy),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Auth.js (users / OAuth accounts / verification tokens)
+// JWT session strategy is used (required by the Credentials provider), so no
+// `sessions` table is needed.
+// ---------------------------------------------------------------------------
+
+export const users = pgTable("users", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: text("name"),
+  email: text("email").notNull().unique(),
+  emailVerified: timestamp("email_verified", { withTimezone: true }),
+  image: text("image"),
+  // null for OAuth-only accounts
+  passwordHash: text("password_hash"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const accounts = pgTable(
+  "accounts",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    type: text("type").$type<"oauth" | "oidc" | "email" | "webauthn">().notNull(),
+    provider: text("provider").notNull(),
+    providerAccountId: text("provider_account_id").notNull(),
+    // These JS property names must stay snake_case (not camelCase) - the
+    // Auth.js DrizzleAdapter accesses them by these exact keys.
+    refresh_token: text("refresh_token"),
+    access_token: text("access_token"),
+    expires_at: integer("expires_at"),
+    token_type: text("token_type"),
+    scope: text("scope"),
+    id_token: text("id_token"),
+    session_state: text("session_state"),
+  },
+  (table) => [primaryKey({ columns: [table.provider, table.providerAccountId] })],
+);
+
+export const verificationTokens = pgTable(
+  "verification_token",
+  {
+    identifier: text("identifier").notNull(),
+    token: text("token").notNull(),
+    expires: timestamp("expires", { withTimezone: true }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.identifier, table.token] })],
+);
+
+// ---------------------------------------------------------------------------
+// Watchlist & Alerts
+// ---------------------------------------------------------------------------
+
+export const watchlist = pgTable(
+  "watchlist",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    protocolId: uuid("protocol_id").references(() => protocols.id, { onDelete: "cascade" }),
+    chainId: uuid("chain_id").references(() => chains.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("watchlist_user_protocol_unique").on(table.userId, table.protocolId),
+    uniqueIndex("watchlist_user_chain_unique").on(table.userId, table.chainId),
+  ],
+);
+
+export const alertTypeEnum = pgEnum("alert_type", [
+  "protocol_tvl",
+  "chain_tvl",
+  "token_price",
+  "pool_apy",
+]);
+
+export const alertConditionEnum = pgEnum("alert_condition", [
+  "above",
+  "below",
+  "percent_change_up",
+  "percent_change_down",
+]);
+
+export const alerts = pgTable(
+  "alerts",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    type: alertTypeEnum("type").notNull(),
+    // slug/address/id of the protocol|chain|token|pool being watched
+    target: text("target").notNull(),
+    condition: alertConditionEnum("condition").notNull(),
+    threshold: numeric("threshold", { precision: 24, scale: 8 }).notNull(),
+    enabled: boolean("enabled").default(true).notNull(),
+    lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("alerts_user_idx").on(table.userId),
+    index("alerts_enabled_idx").on(table.enabled),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Relations (enables db.query.* relational API)
+// ---------------------------------------------------------------------------
+
+export const chainsRelations = relations(chains, ({ many }) => ({
+  protocolChains: many(protocolChains),
+  metrics: many(chainMetrics),
+  tokens: many(tokens),
+  yieldPools: many(yieldPools),
+}));
+
+export const protocolsRelations = relations(protocols, ({ many }) => ({
+  protocolChains: many(protocolChains),
+  metrics: many(protocolMetrics),
+  yieldPools: many(yieldPools),
+}));
+
+export const protocolChainsRelations = relations(protocolChains, ({ one }) => ({
+  protocol: one(protocols, {
+    fields: [protocolChains.protocolId],
+    references: [protocols.id],
+  }),
+  chain: one(chains, {
+    fields: [protocolChains.chainId],
+    references: [chains.id],
+  }),
+}));
+
+export const protocolMetricsRelations = relations(protocolMetrics, ({ one }) => ({
+  protocol: one(protocols, {
+    fields: [protocolMetrics.protocolId],
+    references: [protocols.id],
+  }),
+  chain: one(chains, {
+    fields: [protocolMetrics.chainId],
+    references: [chains.id],
+  }),
+}));
+
+export const chainMetricsRelations = relations(chainMetrics, ({ one }) => ({
+  chain: one(chains, { fields: [chainMetrics.chainId], references: [chains.id] }),
+}));
+
+export const tokensRelations = relations(tokens, ({ one, many }) => ({
+  chain: one(chains, { fields: [tokens.chainId], references: [chains.id] }),
+  prices: many(tokenPrices),
+}));
+
+export const tokenPricesRelations = relations(tokenPrices, ({ one }) => ({
+  token: one(tokens, { fields: [tokenPrices.tokenId], references: [tokens.id] }),
+}));
+
+export const yieldPoolsRelations = relations(yieldPools, ({ one }) => ({
+  protocol: one(protocols, { fields: [yieldPools.protocolId], references: [protocols.id] }),
+  chain: one(chains, { fields: [yieldPools.chainId], references: [chains.id] }),
+}));
+
+export const usersRelations = relations(users, ({ many }) => ({
+  accounts: many(accounts),
+  watchlist: many(watchlist),
+  alerts: many(alerts),
+}));
+
+export const accountsRelations = relations(accounts, ({ one }) => ({
+  user: one(users, { fields: [accounts.userId], references: [users.id] }),
+}));
+
+export const watchlistRelations = relations(watchlist, ({ one }) => ({
+  user: one(users, { fields: [watchlist.userId], references: [users.id] }),
+  protocol: one(protocols, { fields: [watchlist.protocolId], references: [protocols.id] }),
+  chain: one(chains, { fields: [watchlist.chainId], references: [chains.id] }),
+}));
+
+export const alertsRelations = relations(alerts, ({ one }) => ({
+  user: one(users, { fields: [alerts.userId], references: [users.id] }),
+}));

@@ -1,36 +1,105 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ChainScope
 
-## Getting Started
+A DeFi analytics platform — protocols, chains and yield pools tracked with real data, plus accounts, watchlists and threshold alerts.
 
-First, run the development server:
+This is **Phase 1 (MVP)** of the product. See [`.claude` plan history] or ask for the roadmap for what's deliberately deferred: token/wallet explorers, AI protocol analysis, the public API, billing, and Redis-backed caching.
+
+## Stack
+
+- **Frontend**: Next.js (App Router) + React + TypeScript + Tailwind CSS v4 + shadcn/ui
+- **Backend**: Next.js Route Handlers, Drizzle ORM, PostgreSQL
+- **Auth**: Auth.js v5 (email/password + optional Google OAuth), JWT sessions
+- **Data**: DefiLlama's free public API (protocol/chain TVL, fees, revenue, volume, yields) and CoinGecko (token prices), behind a provider-abstraction layer in `lib/providers`
+- **Email**: Resend (optional — logs to console in dev if unconfigured)
+
+## Getting started
+
+### 1. Prerequisites
+
+- Node.js 20+
+- A PostgreSQL 16 database (a local instance works fine for development)
+
+### 2. Install
+
+```bash
+npm install
+```
+
+### 3. Configure environment
+
+```bash
+cp .env.example .env.local
+```
+
+Fill in `DATABASE_URL` at minimum. Everything else is optional:
+
+| Variable | Required? | Effect if missing |
+|---|---|---|
+| `DATABASE_URL` | **Yes** | App won't start |
+| `AUTH_SECRET` | **Yes** | Generate with `npx auth secret` |
+| `CRON_SECRET` | **Yes** | Protects `/api/cron/*`; generate any random string |
+| `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` | No | "Sign in with Google" is hidden |
+| `COINGECKO_API_KEY` | No | Price sync uses the public rate limit (~5-15 req/min) instead of the free Demo plan's 100 req/min |
+| `RESEND_API_KEY` | No | Alert emails are logged to the console instead of sent |
+
+### 4. Set up the database
+
+```bash
+npm run db:migrate   # create tables
+npm run seed          # seed the 5 supported chains + their native tokens
+```
+
+### 5. Pull in real data
+
+```bash
+npm run sync:chains
+npm run sync:protocols
+npm run sync:yields
+npm run sync:prices
+```
+
+(Or `npm run sync:all` for everything except chains, which is run separately since it backfills full history.)
+
+### 6. Run it
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Keeping data fresh
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+In production, `vercel.json` schedules the same sync scripts via Vercel Cron, hitting `/api/cron/*` routes protected by `CRON_SECRET` (Vercel sends this automatically as `Authorization: Bearer $CRON_SECRET` — see [Vercel's cron docs](https://vercel.com/docs/cron-jobs/manage-cron-jobs)). Note Vercel's Hobby plan limits cron frequency; adjust `vercel.json` or upgrade if you need the schedules as configured.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Locally, re-run the `npm run sync:*` scripts whenever you want fresher data, or set up your own scheduler.
 
-## Learn More
+## Project structure
 
-To learn more about Next.js, take a look at the following resources:
+```
+app/                  Routes (App Router) - pages + API route handlers
+components/           UI components (ui/ = shadcn primitives)
+lib/
+  auth/                Auth.js config
+  database/            Drizzle schema, migrations, client, query modules
+  providers/           DefiLlama + CoinGecko adapters behind provider interfaces
+  alerts/              Pure alert-condition evaluation logic (unit tested)
+  notifications/       Email abstraction (Resend or console fallback)
+  cron/                Cron route auth helper
+  config/chains.ts     The 5 supported chains - add a chain here to extend
+workers/               Standalone ingestion scripts, also callable from app/api/cron/*
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Testing
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+npm run test        # Vitest - alert condition logic
+npx tsc --noEmit     # type-check
+npm run build        # production build
+```
 
-## Deploy on Vercel
+## Adding a chain
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Add an entry to `lib/config/chains.ts` (needs the DefiLlama chain name for `defillamaSlug`), then `npm run seed && npm run sync:all`.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Adding a data provider
+
+Implement `DefiDataProvider` or `PriceProvider` from `lib/providers/types.ts` and swap the instance in `lib/providers/index.ts` — nothing else in the app touches provider internals directly.

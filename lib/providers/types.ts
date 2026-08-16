@@ -1,0 +1,87 @@
+// Provider-agnostic types. Nothing outside /lib/providers should ever see a
+// raw DefiLlama or CoinGecko response shape — adapters normalize into these.
+
+export class ProviderUnavailableError extends Error {
+  constructor(
+    public readonly provider: string,
+    message: string,
+    public readonly cause?: unknown,
+  ) {
+    super(`[${provider}] ${message}`);
+    this.name = "ProviderUnavailableError";
+  }
+}
+
+export interface NormalizedProtocol {
+  externalId: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  website: string | null;
+  logoUrl: string | null;
+  category: string | null;
+  chains: string[]; // provider chain names, e.g. "Ethereum", "BSC"
+  tvl: number | null;
+  tvlByChain: Record<string, number>;
+}
+
+export interface NormalizedProtocolFinancials {
+  externalId: string;
+  fees24h: number | null;
+  revenue24h: number | null;
+  volume24h: number | null;
+}
+
+export interface NormalizedChain {
+  name: string; // provider chain name, used as the join key to our `chains` table
+  tvl: number;
+  tokenSymbol: string | null;
+  chainId: number | null;
+}
+
+export interface ChainTvlPoint {
+  timestamp: Date;
+  tvl: number;
+}
+
+export interface NormalizedYieldPool {
+  externalPoolId: string;
+  protocolExternalSlug: string | null; // provider's protocol slug, e.g. "lido"
+  chain: string; // provider chain name
+  symbol: string;
+  underlyingTokens: string[];
+  apy: number | null;
+  apyBase: number | null;
+  apyReward: number | null;
+  tvlUsd: number | null;
+  stablecoin: boolean;
+  ilRisk: string | null;
+}
+
+/**
+ * Aggregated DeFi data (TVL, fees, revenue, volume, yields). Implemented by
+ * `defillama.ts` today; swappable for another aggregator without touching
+ * callers.
+ */
+export interface DefiDataProvider {
+  getProtocols(): Promise<NormalizedProtocol[]>;
+  getProtocolFees(): Promise<NormalizedProtocolFinancials[]>;
+  getProtocolVolume(): Promise<Map<string, number>>; // externalId -> 24h volume
+  getChains(): Promise<NormalizedChain[]>;
+  getChainTvlHistory(chainName: string): Promise<ChainTvlPoint[]>;
+  getYieldPools(): Promise<NormalizedYieldPool[]>;
+}
+
+export interface NormalizedPrice {
+  id: string; // the id passed in (coingeckoId)
+  priceUsd: number;
+  marketCap: number | null;
+  volume24h: number | null;
+}
+
+/**
+ * Token price data. Implemented by `coingecko.ts` today.
+ */
+export interface PriceProvider {
+  getPrices(coingeckoIds: string[]): Promise<NormalizedPrice[]>;
+}

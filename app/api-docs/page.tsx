@@ -123,6 +123,55 @@ export default function ApiDocsPage() {
   ]
 }`}
         />
+
+        <EndpointDoc
+          method="GET"
+          path="/api/v1/tokens"
+          description="Top ~250 tokens by market cap, cross-referenced onto supported chains. One row per chain a token is deployed on."
+          params={[
+            { name: "chain", type: "string", description: "Filter to a chain slug, e.g. ethereum" },
+            { name: "sort", type: "marketCap | price | volume24h", description: "Sort order (default marketCap)" },
+          ]}
+          exampleResponse={`{
+  "data": [
+    {
+      "id": "50ab0c49-...",
+      "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "symbol": "USDT",
+      "name": "Tether",
+      "logoUrl": "https://coin-images.coingecko.com/coins/images/325/large/Tether.png",
+      "chainName": "Ethereum",
+      "chainSlug": "ethereum",
+      "priceUsd": 0.999208,
+      "marketCap": 183009723480,
+      "volume24h": 16210930386
+    }
+  ]
+}`}
+        />
+
+        <EndpointDoc
+          method="GET"
+          path="/api/v1/tokens/{address}"
+          description="A single token's detail, including its full price/market-cap/volume history. A contract address is only unique per-chain, so pass ?chain when the same address exists on more than one supported chain."
+          params={[
+            { name: "address", type: "string", description: "Token contract address, e.g. 0xa0b8...eb48", required: true },
+            { name: "chain", type: "string", description: "Chain slug to disambiguate, e.g. ethereum" },
+          ]}
+          exampleResponse={`{
+  "data": {
+    "symbol": "USDC",
+    "name": "USDC",
+    "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "logoUrl": "https://coin-images.coingecko.com/coins/images/6319/large/USDC.png",
+    "decimals": 18,
+    "coingeckoId": "usd-coin",
+    "chain": "ethereum",
+    "current": { "timestamp": "2026-08-16T22:07:32.005Z", "priceUsd": 0.999552, "marketCap": 71813542628, "volume24h": 2882213425 },
+    "history": [{ "timestamp": "2026-08-16T22:07:32.005Z", "priceUsd": 0.999552, "marketCap": 71813542628, "volume24h": 2882213425 }, "..."]
+  }
+}`}
+        />
       </div>
     </div>
   );

@@ -20,6 +20,7 @@
     "check:alerts": "dotenv -e .env.local -- tsx workers/alerts/check.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.117.1",
     "@auth/drizzle-adapter": "^1.11.3",
     "@base-ui/react": "^1.7.0",
     "@hookform/resolvers": "^5.9.0",

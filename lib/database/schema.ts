@@ -174,6 +174,15 @@ export const yieldPools = pgTable(
   ],
 );
 
+export const protocolAiSummaries = pgTable("protocol_ai_summaries", {
+  protocolId: uuid("protocol_id")
+    .primaryKey()
+    .references(() => protocols.id, { onDelete: "cascade" }),
+  content: text("content").notNull(),
+  model: varchar("model", { length: 64 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 // ---------------------------------------------------------------------------
 // Auth.js (users / OAuth accounts / verification tokens)
 // JWT session strategy is used (required by the Credentials provider), so no

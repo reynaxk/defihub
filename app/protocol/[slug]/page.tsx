@@ -7,10 +7,12 @@ import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchlistButton } from "@/components/shared/watchlist-button";
 import { StatTile } from "@/components/stats/stat-tile";
 import { TvlAreaChart } from "@/components/charts/tvl-area-chart";
+import { AiSummaryCard } from "@/components/protocols/ai-summary-card";
 import { getProtocolBySlug } from "@/lib/database/queries/protocols";
 import { isWatchingProtocol } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
 import { formatUsd } from "@/lib/format";
+import { getCachedProtocolSummary, isAiSummaryAvailable } from "@/lib/ai/protocol-summary";
 
 export const revalidate = 300;
 
@@ -36,7 +38,10 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
   if (!data) notFound();
 
   const { protocol, chains, history, latest } = data;
-  const watching = await isWatchingProtocol(session?.user?.id, protocol.id);
+  const [watching, cachedSummary] = await Promise.all([
+    isWatchingProtocol(session?.user?.id, protocol.id),
+    getCachedProtocolSummary(protocol.id),
+  ]);
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -83,6 +88,17 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
         <TvlAreaChart data={history.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))} />
       </div>
+
+      <AiSummaryCard
+        slug={protocol.slug}
+        isSignedIn={Boolean(session?.user)}
+        aiAvailable={isAiSummaryAvailable()}
+        initialSummary={
+          cachedSummary
+            ? { ...cachedSummary, createdAt: cachedSummary.createdAt.toISOString() }
+            : null
+        }
+      />
     </div>
   );
 }

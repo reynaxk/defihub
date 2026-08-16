@@ -8,6 +8,13 @@
       "when": 1786891484984,
       "tag": "0000_tricky_human_robot",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1786917201222,
+      "tag": "0001_add_protocol_ai_summaries",
+      "breakpoints": true
     }
   ]
 }

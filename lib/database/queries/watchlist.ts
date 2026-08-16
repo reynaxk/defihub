@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chainMetrics, chains, protocolMetrics, protocols, watchlist } from "@/lib/database/schema";
 
@@ -36,42 +36,65 @@ export async function getWatchlistWithDetails(userId: string): Promise<Watchlist
     .where(eq(watchlist.userId, userId))
     .orderBy(desc(watchlist.createdAt));
 
-  const entries: WatchlistEntry[] = [];
+  if (items.length === 0) return [];
 
+  const protocolIds = items.map((i) => i.protocolId).filter((id) => id != null);
+  const chainIds = items.map((i) => i.chainId).filter((id) => id != null);
+
+  // Fixed number of queries regardless of watchlist size (previously N+1:
+  // one pair of queries per item, in a loop). DISTINCT ON gets exactly the
+  // latest row per id in one pass instead of pulling full history and
+  // picking the first row client-side.
+  const [protocolRows, protocolTvlRows, chainRows, chainTvlRows] = await Promise.all([
+    protocolIds.length > 0 ? db.select().from(protocols).where(inArray(protocols.id, protocolIds)) : [],
+    protocolIds.length > 0
+      ? db
+          .selectDistinctOn([protocolMetrics.protocolId], {
+            protocolId: protocolMetrics.protocolId,
+            tvl: protocolMetrics.tvl,
+          })
+          .from(protocolMetrics)
+          .where(and(inArray(protocolMetrics.protocolId, protocolIds), isNull(protocolMetrics.chainId)))
+          .orderBy(protocolMetrics.protocolId, desc(protocolMetrics.timestamp))
+      : [],
+    chainIds.length > 0 ? db.select().from(chains).where(inArray(chains.id, chainIds)) : [],
+    chainIds.length > 0
+      ? db
+          .selectDistinctOn([chainMetrics.chainId], { chainId: chainMetrics.chainId, tvl: chainMetrics.tvl })
+          .from(chainMetrics)
+          .where(inArray(chainMetrics.chainId, chainIds))
+          .orderBy(chainMetrics.chainId, desc(chainMetrics.timestamp))
+      : [],
+  ]);
+
+  const protocolById = new Map(protocolRows.map((p) => [p.id, p]));
+  const chainById = new Map(chainRows.map((c) => [c.id, c]));
+  const protocolTvlById = new Map(protocolTvlRows.map((r) => [r.protocolId, r.tvl != null ? Number(r.tvl) : null]));
+  const chainTvlById = new Map(chainTvlRows.map((r) => [r.chainId, r.tvl != null ? Number(r.tvl) : null]));
+
+  const entries: WatchlistEntry[] = [];
   for (const item of items) {
     if (item.protocolId) {
-      const [protocol] = await db.select().from(protocols).where(eq(protocols.id, item.protocolId));
+      const protocol = protocolById.get(item.protocolId);
       if (!protocol) continue;
-      const [latest] = await db
-        .select({ tvl: protocolMetrics.tvl })
-        .from(protocolMetrics)
-        .where(and(eq(protocolMetrics.protocolId, protocol.id), isNull(protocolMetrics.chainId)))
-        .orderBy(desc(protocolMetrics.timestamp))
-        .limit(1);
       entries.push({
         id: item.id,
         kind: "protocol",
         name: protocol.name,
         slug: protocol.slug,
         logoUrl: protocol.logoUrl,
-        tvl: latest?.tvl != null ? Number(latest.tvl) : null,
+        tvl: protocolTvlById.get(item.protocolId) ?? null,
       });
     } else if (item.chainId) {
-      const [chain] = await db.select().from(chains).where(eq(chains.id, item.chainId));
+      const chain = chainById.get(item.chainId);
       if (!chain) continue;
-      const [latest] = await db
-        .select({ tvl: chainMetrics.tvl })
-        .from(chainMetrics)
-        .where(eq(chainMetrics.chainId, chain.id))
-        .orderBy(desc(chainMetrics.timestamp))
-        .limit(1);
       entries.push({
         id: item.id,
         kind: "chain",
         name: chain.name,
         slug: chain.slug,
         logoUrl: chain.logoUrl,
-        tvl: latest?.tvl != null ? Number(latest.tvl) : null,
+        tvl: chainTvlById.get(item.chainId) ?? null,
       });
     }
   }

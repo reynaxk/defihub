@@ -24,6 +24,9 @@ export function ProtocolFilters({
     const params = new URLSearchParams(searchParams.toString());
     if (value && value !== ALL) params.set(key, value);
     else params.delete(key);
+    // Any filter change invalidates the current page number (e.g. page 5
+    // of an unfiltered list may not exist once a filter narrows results).
+    params.delete("page");
     startTransition(() => router.push(`/protocols?${params.toString()}`));
   }
 

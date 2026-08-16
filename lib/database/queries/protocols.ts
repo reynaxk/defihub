@@ -1,6 +1,7 @@
 import { and, count, desc, eq, ilike, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, protocolChains, protocolMetrics, protocols } from "@/lib/database/schema";
+import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
 
 // All protocols get upserted with the same `timestamp` value within a single
 // sync run, so "the most recent sync's rows" is just "rows at MAX(timestamp)"
@@ -56,14 +57,26 @@ export interface ProtocolFilters {
   category?: string;
   chainSlug?: string;
   search?: string;
+  page?: number;
+  pageSize?: number;
 }
 
-export async function getProtocolsList(filters: ProtocolFilters = {}): Promise<ProtocolListItem[]> {
+export interface PaginatedProtocols {
+  items: ProtocolListItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export async function getProtocolsList(filters: ProtocolFilters = {}): Promise<PaginatedProtocols> {
+  const { page, pageSize } = normalizePagination(filters);
+
   const conditions = [isNull(protocolMetrics.chainId)];
   if (filters.category) conditions.push(eq(protocols.category, filters.category));
   if (filters.search) conditions.push(ilike(protocols.name, `%${filters.search}%`));
 
-  let query = db
+  let itemsQuery = db
     .select({
       id: protocols.id,
       name: protocols.name,
@@ -80,30 +93,50 @@ export async function getProtocolsList(filters: ProtocolFilters = {}): Promise<P
     .innerJoin(latestAggregateTimestamp, eq(protocolMetrics.timestamp, latestAggregateTimestamp.ts))
     .$dynamic();
 
+  let countQuery = db
+    .select({ value: count() })
+    .from(protocolMetrics)
+    .innerJoin(protocols, eq(protocolMetrics.protocolId, protocols.id))
+    .innerJoin(latestAggregateTimestamp, eq(protocolMetrics.timestamp, latestAggregateTimestamp.ts))
+    .$dynamic();
+
   if (filters.chainSlug) {
-    query = query
+    // A single chain slug can join at most one protocol_chains row per
+    // protocol (protocol_id, chain_id) is a composite PK, so this never
+    // multiplies rows - no de-dupe needed after the fact.
+    itemsQuery = itemsQuery
+      .innerJoin(protocolChains, eq(protocolChains.protocolId, protocols.id))
+      .innerJoin(chains, eq(chains.id, protocolChains.chainId));
+    countQuery = countQuery
       .innerJoin(protocolChains, eq(protocolChains.protocolId, protocols.id))
       .innerJoin(chains, eq(chains.id, protocolChains.chainId));
     conditions.push(eq(chains.slug, filters.chainSlug));
   }
 
-  const rows = await query
-    .where(and(...conditions))
-    .orderBy(desc(protocolMetrics.tvl))
-    .limit(500);
+  const [rows, countRows] = await Promise.all([
+    itemsQuery
+      .where(and(...conditions))
+      .orderBy(desc(protocolMetrics.tvl))
+      .limit(pageSize)
+      .offset((page - 1) * pageSize),
+    countQuery.where(and(...conditions)),
+  ]);
 
-  // chain filter can join-duplicate rows (a protocol can be on multiple
-  // matching chains via the extra join); de-dupe by protocol id.
-  const seen = new Set<string>();
-  const deduped = rows.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+  const total = countRows[0]?.value ?? 0;
 
-  return deduped.map((r) => ({
-    ...r,
-    tvl: r.tvl != null ? Number(r.tvl) : null,
-    volume24h: r.volume24h != null ? Number(r.volume24h) : null,
-    fees24h: r.fees24h != null ? Number(r.fees24h) : null,
-    revenue24h: r.revenue24h != null ? Number(r.revenue24h) : null,
-  }));
+  return {
+    items: rows.map((r) => ({
+      ...r,
+      tvl: r.tvl != null ? Number(r.tvl) : null,
+      volume24h: r.volume24h != null ? Number(r.volume24h) : null,
+      fees24h: r.fees24h != null ? Number(r.fees24h) : null,
+      revenue24h: r.revenue24h != null ? Number(r.revenue24h) : null,
+    })),
+    page,
+    pageSize,
+    total,
+    totalPages: computeTotalPages(total, pageSize),
+  };
 }
 
 export async function getProtocolCount(): Promise<number> {

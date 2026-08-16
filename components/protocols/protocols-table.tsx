@@ -5,7 +5,13 @@ import { EntityLogo } from "@/components/shared/entity-logo";
 import { formatUsd } from "@/lib/format";
 import type { ProtocolListItem } from "@/lib/database/queries/protocols";
 
-export function ProtocolsTable({ protocols }: { protocols: ProtocolListItem[] }) {
+export function ProtocolsTable({
+  protocols,
+  rankOffset = 0,
+}: {
+  protocols: ProtocolListItem[];
+  rankOffset?: number;
+}) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <Table>
@@ -23,7 +29,7 @@ export function ProtocolsTable({ protocols }: { protocols: ProtocolListItem[] })
         <TableBody>
           {protocols.map((protocol, i) => (
             <TableRow key={protocol.id}>
-              <TableCell className="text-muted-foreground">{i + 1}</TableCell>
+              <TableCell className="text-muted-foreground">{rankOffset + i + 1}</TableCell>
               <TableCell>
                 <Link href={`/protocol/${protocol.slug}`} className="flex items-center gap-2 font-medium">
                   <EntityLogo src={protocol.logoUrl} name={protocol.name} size={24} />

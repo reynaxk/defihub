@@ -57,6 +57,15 @@ export default async function TokenDetailPage({
       </div>
 
       <p className="mt-4 max-w-3xl break-all font-mono text-xs text-muted-foreground">{token.address}</p>
+      {token.coingeckoId && (
+        <p className="mt-1 text-xs text-muted-foreground">
+          Alert target ID: <code className="font-mono">{token.coingeckoId}</code> — use this on the{" "}
+          <Link href="/alerts" className="underline underline-offset-2 hover:text-foreground">
+            alerts page
+          </Link>{" "}
+          to get notified on price moves.
+        </p>
+      )}
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3">
         <StatTile label="Price" value={formatTokenPrice(latest?.priceUsd)} />

@@ -9,8 +9,9 @@ import { db } from "@/lib/database/client";
 import { alerts } from "@/lib/database/schema";
 import { eq } from "drizzle-orm";
 import { formatUsd } from "@/lib/format";
+import { NOINDEX } from "@/lib/seo";
 
-export const metadata: Metadata = { title: "Dashboard" };
+export const metadata: Metadata = { title: "Dashboard", robots: NOINDEX };
 
 export default async function DashboardPage() {
   const session = await auth();

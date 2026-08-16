@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { AuthError } from "next-auth";
+import { AuthError, CredentialsSignin } from "next-auth";
 import { signIn, googleSignInEnabled } from "@/lib/auth/config";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,7 +29,8 @@ export default async function LoginPage({
       });
     } catch (error) {
       if (error instanceof AuthError) {
-        redirect(`/login?error=invalid&callbackUrl=${encodeURIComponent(callbackUrl)}`);
+        const code = error instanceof CredentialsSignin && error.code === "rate_limited" ? "rate_limited" : "invalid";
+        redirect(`/login?error=${code}&callbackUrl=${encodeURIComponent(callbackUrl)}`);
       }
       throw error;
     }
@@ -48,7 +49,12 @@ export default async function LoginPage({
           <CardDescription>Access your dashboard, watchlist and alerts.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          {params.error && (
+          {params.error === "rate_limited" && (
+            <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              Too many sign-in attempts. Wait a few minutes and try again.
+            </p>
+          )}
+          {params.error && params.error !== "rate_limited" && (
             <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
               Invalid email or password.
             </p>

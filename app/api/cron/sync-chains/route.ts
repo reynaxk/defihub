@@ -13,6 +13,6 @@ export async function GET(request: Request) {
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error("[cron:sync-chains]", err);
-    return NextResponse.json({ ok: false, error: String(err) }, { status: 500 });
+    return NextResponse.json({ ok: false, error: "Sync failed - see server logs" }, { status: 500 });
   }
 }

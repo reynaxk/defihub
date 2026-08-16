@@ -2,8 +2,9 @@ import type { Metadata } from "next";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SettingsForm } from "@/components/settings/settings-form";
 import { auth } from "@/lib/auth/config";
+import { NOINDEX } from "@/lib/seo";
 
-export const metadata: Metadata = { title: "Settings" };
+export const metadata: Metadata = { title: "Settings", robots: NOINDEX };
 
 export default async function SettingsPage() {
   const session = await auth();

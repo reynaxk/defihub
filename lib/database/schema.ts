@@ -245,11 +245,13 @@ export const watchlist = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     protocolId: uuid("protocol_id").references(() => protocols.id, { onDelete: "cascade" }),
     chainId: uuid("chain_id").references(() => chains.id, { onDelete: "cascade" }),
+    tokenId: uuid("token_id").references(() => tokens.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
     uniqueIndex("watchlist_user_protocol_unique").on(table.userId, table.protocolId),
     uniqueIndex("watchlist_user_chain_unique").on(table.userId, table.chainId),
+    uniqueIndex("watchlist_user_token_unique").on(table.userId, table.tokenId),
   ],
 );
 
@@ -361,6 +363,7 @@ export const watchlistRelations = relations(watchlist, ({ one }) => ({
   user: one(users, { fields: [watchlist.userId], references: [users.id] }),
   protocol: one(protocols, { fields: [watchlist.protocolId], references: [protocols.id] }),
   chain: one(chains, { fields: [watchlist.chainId], references: [chains.id] }),
+  token: one(tokens, { fields: [watchlist.tokenId], references: [tokens.id] }),
 }));
 
 export const alertsRelations = relations(alerts, ({ one }) => ({

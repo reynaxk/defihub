@@ -3,9 +3,12 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { EntityLogo } from "@/components/shared/entity-logo";
+import { WatchlistButton } from "@/components/shared/watchlist-button";
 import { StatTile } from "@/components/stats/stat-tile";
 import { TvlAreaChart } from "@/components/charts/tvl-area-chart";
 import { getTokenByAddress } from "@/lib/database/queries/tokens";
+import { isWatchingToken } from "@/lib/database/queries/watchlist";
+import { auth } from "@/lib/auth/config";
 import { formatTokenPrice, formatUsd } from "@/lib/format";
 
 export const revalidate = 300;
@@ -31,11 +34,12 @@ export default async function TokenDetailPage({
   params: Promise<{ address: string }>;
   searchParams: Promise<{ chain?: string }>;
 }) {
-  const [{ address }, { chain: chainSlug }] = await Promise.all([params, searchParams]);
+  const [{ address }, { chain: chainSlug }, session] = await Promise.all([params, searchParams, auth()]);
   const data = await getTokenByAddress(address, chainSlug);
   if (!data) notFound();
 
   const { token, chain, history, latest } = data;
+  const watching = await isWatchingToken(session?.user?.id, token.id);
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -54,6 +58,7 @@ export default async function TokenDetailPage({
             </div>
           </div>
         </div>
+        <WatchlistButton isSignedIn={Boolean(session?.user)} initialWatching={watching} tokenId={token.id} />
       </div>
 
       <p className="mt-4 max-w-3xl break-all font-mono text-xs text-muted-foreground">{token.address}</p>

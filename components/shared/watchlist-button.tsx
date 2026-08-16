@@ -12,11 +12,13 @@ export function WatchlistButton({
   initialWatching,
   protocolId,
   chainId,
+  tokenId,
 }: {
   isSignedIn: boolean;
   initialWatching: boolean;
   protocolId?: string;
   chainId?: string;
+  tokenId?: string;
 }) {
   const router = useRouter();
   const [watching, setWatching] = useState(initialWatching);
@@ -32,7 +34,7 @@ export function WatchlistButton({
       const res = await fetch("/api/watchlist", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ protocolId, chainId }),
+        body: JSON.stringify({ protocolId, chainId, tokenId }),
       });
       if (!res.ok) {
         toast.error("Couldn't update your watchlist");

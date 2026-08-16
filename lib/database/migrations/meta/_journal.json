@@ -15,6 +15,13 @@
       "when": 1786917201222,
       "tag": "0001_add_protocol_ai_summaries",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786921043474,
+      "tag": "0002_add_watchlist_tokens",
+      "breakpoints": true
     }
   ]
 }

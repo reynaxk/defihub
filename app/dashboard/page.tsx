@@ -37,14 +37,20 @@ export default async function DashboardPage() {
 
       {watchlist.length === 0 ? (
         <p className="mt-3 text-sm text-muted-foreground">
-          Nothing watched yet. Star a protocol or chain to track it here.
+          Nothing watched yet. Star a protocol, chain or token to track it here.
         </p>
       ) : (
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
           {watchlist.map((item) => (
             <Link
               key={item.id}
-              href={item.kind === "protocol" ? `/protocol/${item.slug}` : `/chain/${item.slug}`}
+              href={
+                item.kind === "protocol"
+                  ? `/protocol/${item.slug}`
+                  : item.kind === "chain"
+                    ? `/chain/${item.slug}`
+                    : `/token/${item.slug}?chain=${item.chainSlug}`
+              }
               className="flex items-center justify-between rounded-lg border border-border bg-card p-3 hover:border-primary/40"
             >
               <div className="flex items-center gap-2">

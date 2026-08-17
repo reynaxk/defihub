@@ -139,6 +139,59 @@ export async function getProtocolsList(filters: ProtocolFilters = {}): Promise<P
   };
 }
 
+// CSV export wants every row matching the active filters, not one page of
+// them - getProtocolsList's pageSize is clamped to 100 (shared with the
+// public API, where that cap is load-bearing), so this mirrors its
+// filtering logic without pagination instead of trying to bypass that cap.
+// EXPORT_MAX_ROWS is a defense-in-depth ceiling, not a expected limit -
+// the real protocol count (~3000) sits comfortably under it.
+const EXPORT_MAX_ROWS = 5000;
+
+export async function getProtocolsForExport(
+  filters: Pick<ProtocolFilters, "category" | "chainSlug" | "search"> = {},
+): Promise<ProtocolListItem[]> {
+  const conditions = [isNull(protocolMetrics.chainId)];
+  if (filters.category) conditions.push(eq(protocols.category, filters.category));
+  if (filters.search) conditions.push(ilike(protocols.name, `%${filters.search}%`));
+
+  let itemsQuery = db
+    .select({
+      id: protocols.id,
+      name: protocols.name,
+      slug: protocols.slug,
+      logoUrl: protocols.logoUrl,
+      category: protocols.category,
+      tvl: protocolMetrics.tvl,
+      volume24h: protocolMetrics.volume24h,
+      fees24h: protocolMetrics.fees24h,
+      revenue24h: protocolMetrics.revenue24h,
+    })
+    .from(protocolMetrics)
+    .innerJoin(protocols, eq(protocolMetrics.protocolId, protocols.id))
+    .innerJoin(latestAggregateTimestamp, eq(protocolMetrics.timestamp, latestAggregateTimestamp.ts))
+    .$dynamic();
+
+  if (filters.chainSlug) {
+    itemsQuery = itemsQuery
+      .innerJoin(protocolChains, eq(protocolChains.protocolId, protocols.id))
+      .innerJoin(chains, eq(chains.id, protocolChains.chainId));
+    conditions.push(eq(chains.slug, filters.chainSlug));
+  }
+
+  const rows = await itemsQuery
+    .where(and(...conditions))
+    .orderBy(desc(protocolMetrics.tvl))
+    .limit(EXPORT_MAX_ROWS);
+
+  return rows.map((r) => ({
+    ...r,
+    tvl: r.tvl != null ? Number(r.tvl) : null,
+    volume24h: r.volume24h != null ? Number(r.volume24h) : null,
+    fees24h: r.fees24h != null ? Number(r.fees24h) : null,
+    revenue24h: r.revenue24h != null ? Number(r.revenue24h) : null,
+  }));
+}
+
 export async function getProtocolCount(): Promise<number> {
   const [row] = await db.select({ value: count() }).from(protocols);
   return row?.value ?? 0;

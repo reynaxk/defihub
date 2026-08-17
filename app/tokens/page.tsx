@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { TokensTable } from "@/components/tokens/tokens-table";
 import { TokenFilters } from "@/components/tokens/token-filters";
+import { ExportCsvButton } from "@/components/shared/export-csv-button";
 import { getTokensList, type TokenSort } from "@/lib/database/queries/tokens";
 import { getAllChains } from "@/lib/database/queries/chains";
 
@@ -40,8 +41,9 @@ export default async function TokensPage({
         {tokens.length} tokens tracked across supported chains, ranked by {SORT_DESCRIPTIONS[sort]}
       </p>
 
-      <div className="mt-6">
+      <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <TokenFilters chains={chains} />
+        <ExportCsvButton endpoint="/api/export/tokens" />
       </div>
 
       <div className="mt-4">

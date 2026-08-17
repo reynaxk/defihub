@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { ProtocolsTable } from "@/components/protocols/protocols-table";
 import { ProtocolFilters } from "@/components/protocols/protocol-filters";
+import { ExportCsvButton } from "@/components/shared/export-csv-button";
 import { Pagination } from "@/components/shared/pagination";
 import { getAllCategories, getProtocolsList } from "@/lib/database/queries/protocols";
 import { getAllChains } from "@/lib/database/queries/chains";
@@ -48,8 +49,9 @@ export default async function ProtocolsPage({
           : `Showing ${firstRow.toLocaleString()}–${lastRow.toLocaleString()} of ${result.total.toLocaleString()} protocols`}
       </p>
 
-      <div className="mt-6">
+      <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <ProtocolFilters categories={categories} chains={chains} />
+        <ExportCsvButton endpoint="/api/export/protocols" />
       </div>
 
       <div className="mt-4">

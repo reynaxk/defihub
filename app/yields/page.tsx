@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { YieldsTable } from "@/components/yields/yields-table";
 import { YieldFilters } from "@/components/yields/yield-filters";
+import { ExportCsvButton } from "@/components/shared/export-csv-button";
 import { getYieldPools } from "@/lib/database/queries/yields";
 import { getAllChains } from "@/lib/database/queries/chains";
 
@@ -29,8 +30,9 @@ export default async function YieldsPage({
         {pools.length} pools with at least $10K TVL, ranked by APY
       </p>
 
-      <div className="mt-6">
+      <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <YieldFilters chains={chains} />
+        <ExportCsvButton endpoint="/api/export/yields" />
       </div>
 
       <div className="mt-4">

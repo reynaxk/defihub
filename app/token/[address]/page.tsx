@@ -5,8 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchlistButton } from "@/components/shared/watchlist-button";
 import { StatTile } from "@/components/stats/stat-tile";
-import { TvlAreaChart } from "@/components/charts/tvl-area-chart";
-import { getTokenByAddress } from "@/lib/database/queries/tokens";
+import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
+import { getTokenByAddress, getTokenChainPresence } from "@/lib/database/queries/tokens";
 import { isWatchingToken } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
 import { formatPercent, formatTokenPrice, formatUsd } from "@/lib/format";
@@ -39,7 +39,13 @@ export default async function TokenDetailPage({
   if (!data) notFound();
 
   const { token, chain, history, latest } = data;
-  const watching = await isWatchingToken(session?.user?.id, token.id);
+  const [watching, otherChains] = await Promise.all([
+    isWatchingToken(session?.user?.id, token.id),
+    getTokenChainPresence(token.coingeckoId, token.id),
+  ]);
+
+  const priceHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.priceUsd }));
+  const marketCapHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.marketCap }));
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -55,6 +61,16 @@ export default async function TokenDetailPage({
               <Link href={`/chain/${chain.slug}`}>
                 <Badge variant="outline">{chain.name}</Badge>
               </Link>
+              {otherChains.length > 0 && (
+                <>
+                  <span className="text-xs text-muted-foreground">Also on:</span>
+                  {otherChains.map((c) => (
+                    <Link key={c.chainSlug} href={`/token/${c.address}?chain=${c.chainSlug}`}>
+                      <Badge variant="outline">{c.chainName}</Badge>
+                    </Link>
+                  ))}
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -106,11 +122,15 @@ export default async function TokenDetailPage({
 
       <div className="mt-8 rounded-lg border border-border bg-card p-4">
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">Price history</h2>
-        <TvlAreaChart
-          data={history.map((h) => ({ timestamp: h.timestamp, value: h.priceUsd }))}
-          valueKind="tokenPrice"
-        />
+        <RangedAreaChart data={priceHistory} valueKind="tokenPrice" />
       </div>
+
+      {marketCapHistory.some((h) => h.value != null) && (
+        <div className="mt-8 rounded-lg border border-border bg-card p-4">
+          <h2 className="mb-2 text-sm font-medium text-muted-foreground">Market cap history</h2>
+          <RangedAreaChart data={marketCapHistory} valueKind="usd" />
+        </div>
+      )}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, tokenPrices, tokens } from "@/lib/database/schema";
 
@@ -259,4 +259,26 @@ export async function getTokenByAddress(address: string, chainSlug?: string): Pr
     history: normalizedHistory,
     latest: normalizedHistory.length > 0 ? normalizedHistory[normalizedHistory.length - 1] : null,
   };
+}
+
+export interface TokenChainPresence {
+  chainName: string;
+  chainSlug: string;
+  address: string;
+}
+
+// Same coingeckoId showing up under more than one of our tokens rows means
+// the same asset is deployed (natively or bridged) on more than one
+// supported chain - real cross-chain presence, not a guess.
+export async function getTokenChainPresence(
+  coingeckoId: string | null,
+  excludeTokenId: string,
+): Promise<TokenChainPresence[]> {
+  if (!coingeckoId) return [];
+  const rows = await db
+    .select({ chainName: chains.name, chainSlug: chains.slug, address: tokens.address })
+    .from(tokens)
+    .innerJoin(chains, eq(chains.id, tokens.chainId))
+    .where(and(eq(tokens.coingeckoId, coingeckoId), ne(tokens.id, excludeTokenId)));
+  return rows;
 }

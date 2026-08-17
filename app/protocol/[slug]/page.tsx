@@ -3,17 +3,21 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchlistButton } from "@/components/shared/watchlist-button";
 import { StatTile } from "@/components/stats/stat-tile";
 import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
 import { AiSummaryCard } from "@/components/protocols/ai-summary-card";
 import { OnchainVerificationCard } from "@/components/protocols/onchain-verification-card";
+import { ChainDistribution } from "@/components/protocols/chain-distribution";
 import { PercentChange } from "@/components/shared/percent-change";
-import { getProtocolBySlug } from "@/lib/database/queries/protocols";
+import { YieldsTable } from "@/components/yields/yields-table";
+import { getProtocolBySlug, getProtocolChainBreakdown } from "@/lib/database/queries/protocols";
+import { getYieldPools } from "@/lib/database/queries/yields";
 import { isWatchingProtocol } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
-import { formatUsd } from "@/lib/format";
+import { formatDate, formatUsd } from "@/lib/format";
 import { getCachedProtocolSummary, isAiSummaryAvailable } from "@/lib/ai/protocol-summary";
 import { getVerificationsForProtocol } from "@/lib/onchain/verify-pool";
 
@@ -35,17 +39,52 @@ export async function generateMetadata({
   };
 }
 
+function MetricTab({
+  label,
+  latestValue,
+  history,
+  metric,
+}: {
+  label: string;
+  latestValue: number | null | undefined;
+  history: { timestamp: string; value: number | null }[];
+  metric: string;
+}) {
+  return (
+    <div>
+      <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-1 sm:w-48">
+        <StatTile
+          label={`Latest 24h ${metric}`}
+          value={formatUsd(latestValue)}
+          animate={latestValue != null ? { value: latestValue, format: "usd" } : undefined}
+        />
+      </div>
+      <div className="rounded-lg border border-border bg-card p-4">
+        <h2 className="mb-2 text-sm font-medium text-muted-foreground">{label} history</h2>
+        <RangedAreaChart data={history} />
+      </div>
+    </div>
+  );
+}
+
 export default async function ProtocolDetailPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const [data, session] = await Promise.all([getProtocolBySlug(slug), auth()]);
   if (!data) notFound();
 
   const { protocol, chains, history, latest } = data;
-  const [watching, cachedSummary, verifications] = await Promise.all([
+  const [watching, cachedSummary, verifications, chainBreakdown, protocolYields] = await Promise.all([
     isWatchingProtocol(session?.user?.id, protocol.id),
     getCachedProtocolSummary(protocol.id),
     getVerificationsForProtocol(protocol.id),
+    getProtocolChainBreakdown(protocol.id),
+    getYieldPools({ protocolSlug: protocol.slug }),
   ]);
+
+  const tvlHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.tvl }));
+  const feesHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.fees24h }));
+  const revenueHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.revenue24h }));
+  const volumeHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.volume24h }));
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -106,23 +145,79 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
         />
       </div>
 
-      <div className="mt-8 rounded-lg border border-border bg-card p-4">
-        <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
-        <RangedAreaChart data={history.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))} />
-      </div>
+      <Tabs defaultValue="overview" className="mt-8">
+        <TabsList variant="line" className="w-full justify-start overflow-x-auto">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="tvl">TVL</TabsTrigger>
+          <TabsTrigger value="fees">Fees</TabsTrigger>
+          <TabsTrigger value="revenue">Revenue</TabsTrigger>
+          <TabsTrigger value="volume">Volume</TabsTrigger>
+          <TabsTrigger value="chains">Chains</TabsTrigger>
+          <TabsTrigger value="yields">Yields</TabsTrigger>
+        </TabsList>
 
-      <OnchainVerificationCard verifications={verifications} />
+        <TabsContent value="overview" className="mt-4">
+          <div className="rounded-lg border border-border bg-card p-4">
+            <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
+            <RangedAreaChart data={tvlHistory} />
+          </div>
+          <OnchainVerificationCard verifications={verifications} />
+          <AiSummaryCard
+            slug={protocol.slug}
+            isSignedIn={Boolean(session?.user)}
+            aiAvailable={isAiSummaryAvailable()}
+            initialSummary={
+              cachedSummary ? { ...cachedSummary, createdAt: cachedSummary.createdAt.toISOString() } : null
+            }
+          />
+          {latest && (
+            <p className="mt-4 text-xs text-muted-foreground">Last updated {formatDate(latest.timestamp)}</p>
+          )}
+        </TabsContent>
 
-      <AiSummaryCard
-        slug={protocol.slug}
-        isSignedIn={Boolean(session?.user)}
-        aiAvailable={isAiSummaryAvailable()}
-        initialSummary={
-          cachedSummary
-            ? { ...cachedSummary, createdAt: cachedSummary.createdAt.toISOString() }
-            : null
-        }
-      />
+        <TabsContent value="tvl" className="mt-4">
+          <div className="mb-4 grid grid-cols-3 gap-3 sm:w-96">
+            <StatTile
+              label="TVL"
+              value={formatUsd(latest?.tvl)}
+              animate={latest?.tvl != null ? { value: latest.tvl, format: "usd" } : undefined}
+            />
+            <StatTile label="24h" customValue={<PercentChange value={latest?.tvlChange1d} />} />
+            <StatTile label="7d" customValue={<PercentChange value={latest?.tvlChange7d} />} />
+          </div>
+          <div className="rounded-lg border border-border bg-card p-4">
+            <RangedAreaChart data={tvlHistory} />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="fees" className="mt-4">
+          <MetricTab label="Fees" metric="fees" latestValue={latest?.fees24h} history={feesHistory} />
+        </TabsContent>
+
+        <TabsContent value="revenue" className="mt-4">
+          <MetricTab label="Revenue" metric="revenue" latestValue={latest?.revenue24h} history={revenueHistory} />
+        </TabsContent>
+
+        <TabsContent value="volume" className="mt-4">
+          <MetricTab label="Volume" metric="volume" latestValue={latest?.volume24h} history={volumeHistory} />
+        </TabsContent>
+
+        <TabsContent value="chains" className="mt-4">
+          <div className="rounded-lg border border-border bg-card p-4">
+            <ChainDistribution chains={chainBreakdown} />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="yields" className="mt-4">
+          {protocolYields.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No yield pools tracked for {protocol.name} yet.
+            </p>
+          ) : (
+            <YieldsTable pools={protocolYields} />
+          )}
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

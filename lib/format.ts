@@ -51,3 +51,13 @@ export function formatApy(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return "—";
   return `${value.toFixed(2)}%`;
 }
+
+const dateTimeFormat = new Intl.DateTimeFormat("en-US", {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+export function formatDate(value: Date | string | null | undefined): string {
+  if (value == null) return "—";
+  return dateTimeFormat.format(new Date(value));
+}

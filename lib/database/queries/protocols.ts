@@ -1,4 +1,4 @@
-import { and, count, desc, eq, ilike, isNull, sql } from "drizzle-orm";
+import { and, count, desc, eq, ilike, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, protocolChains, protocolMetrics, protocols } from "@/lib/database/schema";
 import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
@@ -287,4 +287,45 @@ export async function getProtocolBySlug(slug: string) {
     history: normalizedHistory,
     latest: normalizedHistory.length > 0 ? normalizedHistory[normalizedHistory.length - 1] : null,
   };
+}
+
+export interface ProtocolChainBreakdownItem {
+  chainName: string;
+  chainSlug: string;
+  chainLogoUrl: string | null;
+  tvl: number | null;
+}
+
+// Per-chain TVL rows share the same sync-run timestamp as the protocol's
+// aggregate row (both written in one pass by workers/protocols/sync.ts), so
+// "latest per-chain breakdown" is just "chain-scoped rows at the protocol's
+// most recent timestamp" - no separate latest-per-chain logic needed.
+export async function getProtocolChainBreakdown(protocolId: string): Promise<ProtocolChainBreakdownItem[]> {
+  const [latestTs] = await db
+    .select({ ts: sql<Date>`max(${protocolMetrics.timestamp})`.as("ts") })
+    .from(protocolMetrics)
+    .where(and(eq(protocolMetrics.protocolId, protocolId), isNotNull(protocolMetrics.chainId)));
+
+  if (!latestTs?.ts) return [];
+
+  // A raw sql<Date> aggregate result comes back from the postgres driver as
+  // a string despite the type hint (same gotcha as getGlobalTvlHistory) -
+  // coerce before using it in a typed timestamp comparison below, or
+  // drizzle's PgTimestamp serializer throws trying to call .toISOString()
+  // on a string.
+  const latestTimestamp = new Date(latestTs.ts);
+
+  const rows = await db
+    .select({
+      chainName: chains.name,
+      chainSlug: chains.slug,
+      chainLogoUrl: chains.logoUrl,
+      tvl: protocolMetrics.tvl,
+    })
+    .from(protocolMetrics)
+    .innerJoin(chains, eq(chains.id, protocolMetrics.chainId))
+    .where(and(eq(protocolMetrics.protocolId, protocolId), eq(protocolMetrics.timestamp, latestTimestamp)))
+    .orderBy(desc(protocolMetrics.tvl));
+
+  return rows.map((r) => ({ ...r, tvl: r.tvl != null ? Number(r.tvl) : null }));
 }

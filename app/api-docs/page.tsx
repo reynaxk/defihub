@@ -32,6 +32,8 @@ export default function ApiDocsPage() {
             { name: "category", type: "string", description: "Filter to an exact category, e.g. Lending" },
             { name: "chain", type: "string", description: "Filter to a chain slug, e.g. ethereum" },
             { name: "q", type: "string", description: "Case-insensitive name search" },
+            { name: "sort", type: "tvl | change1d | change7d | fees | revenue | volume", description: "Sort field (default tvl)" },
+            { name: "dir", type: "asc | desc", description: "Sort direction (default desc)" },
           ]}
           exampleResponse={`{
   "data": [
@@ -44,7 +46,9 @@ export default function ApiDocsPage() {
       "tvl": 14150000000,
       "volume24h": null,
       "fees24h": 989380,
-      "revenue24h": 137480
+      "revenue24h": 137480,
+      "tvlChange1d": 0.97,
+      "tvlChange7d": 0.26
     }
   ],
   "pagination": { "page": 1, "pageSize": 50, "total": 2967, "totalPages": 60 }

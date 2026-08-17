@@ -59,12 +59,33 @@ export async function getTopProtocols(limit = 100): Promise<ProtocolListItem[]> 
   }));
 }
 
+export type ProtocolSort = "tvl" | "change1d" | "change7d" | "fees" | "revenue" | "volume";
+
 export interface ProtocolFilters {
   category?: string;
   chainSlug?: string;
   search?: string;
+  sortBy?: ProtocolSort;
+  sortDir?: "asc" | "desc";
   page?: number;
   pageSize?: number;
+}
+
+function protocolSortColumn(sortBy: ProtocolSort | undefined) {
+  switch (sortBy) {
+    case "change1d":
+      return protocolMetrics.tvlChange1d;
+    case "change7d":
+      return protocolMetrics.tvlChange7d;
+    case "fees":
+      return protocolMetrics.fees24h;
+    case "revenue":
+      return protocolMetrics.revenue24h;
+    case "volume":
+      return protocolMetrics.volume24h;
+    default:
+      return protocolMetrics.tvl;
+  }
 }
 
 export interface PaginatedProtocols {
@@ -121,10 +142,13 @@ export async function getProtocolsList(filters: ProtocolFilters = {}): Promise<P
     conditions.push(eq(chains.slug, filters.chainSlug));
   }
 
+  const sortColumn = protocolSortColumn(filters.sortBy);
+  const sortDir = filters.sortDir === "asc" ? sql`asc` : sql`desc`;
+
   const [rows, countRows] = await Promise.all([
     itemsQuery
       .where(and(...conditions))
-      .orderBy(desc(protocolMetrics.tvl))
+      .orderBy(sql`${sortColumn} ${sortDir} nulls last`)
       .limit(pageSize)
       .offset((page - 1) * pageSize),
     countQuery.where(and(...conditions)),

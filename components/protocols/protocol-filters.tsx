@@ -8,6 +8,18 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 
 const ALL = "__all__";
 
+const SORT_OPTIONS = [
+  { value: "tvl-desc", label: "Highest TVL" },
+  { value: "tvl-asc", label: "Lowest TVL" },
+  { value: "change1d-desc", label: "Biggest 24h gainers" },
+  { value: "change1d-asc", label: "Biggest 24h losers" },
+  { value: "change7d-desc", label: "Biggest 7d gainers" },
+  { value: "change7d-asc", label: "Biggest 7d losers" },
+  { value: "fees-desc", label: "Highest 24h fees" },
+  { value: "revenue-desc", label: "Highest 24h revenue" },
+  { value: "volume-desc", label: "Highest 24h volume" },
+] as const;
+
 export function ProtocolFilters({
   categories,
   chains,
@@ -29,6 +41,20 @@ export function ProtocolFilters({
     params.delete("page");
     startTransition(() => router.push(`/protocols?${params.toString()}`));
   }
+
+  function updateSort(value: string | null) {
+    if (!value) return;
+    const [sortBy, dir] = value.split("-");
+    const params = new URLSearchParams(searchParams.toString());
+    if (sortBy === "tvl") params.delete("sort");
+    else params.set("sort", sortBy);
+    if (dir === "asc") params.set("dir", dir);
+    else params.delete("dir");
+    params.delete("page");
+    startTransition(() => router.push(`/protocols?${params.toString()}`));
+  }
+
+  const currentSort = `${searchParams.get("sort") ?? "tvl"}-${searchParams.get("dir") ?? "desc"}`;
 
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -80,6 +106,19 @@ export function ProtocolFilters({
           {chains.map((chain) => (
             <SelectItem key={chain.slug} value={chain.slug}>
               {chain.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+
+      <Select value={currentSort} onValueChange={updateSort}>
+        <SelectTrigger aria-label="Sort by" className="sm:w-48">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {SORT_OPTIONS.map((opt) => (
+            <SelectItem key={opt.value} value={opt.value}>
+              {opt.label}
             </SelectItem>
           ))}
         </SelectContent>

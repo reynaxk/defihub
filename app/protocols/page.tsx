@@ -13,16 +13,36 @@ export const metadata: Metadata = {
 
 export const revalidate = 300;
 
+const VALID_SORTS = ["tvl", "change1d", "change7d", "fees", "revenue", "volume"] as const;
+
 export default async function ProtocolsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ category?: string; chain?: string; q?: string; page?: string }>;
+  searchParams: Promise<{
+    category?: string;
+    chain?: string;
+    q?: string;
+    page?: string;
+    sort?: string;
+    dir?: string;
+  }>;
 }) {
   const params = await searchParams;
   const page = Math.max(1, Number(params.page) || 1);
+  const sortBy = (VALID_SORTS as readonly string[]).includes(params.sort ?? "")
+    ? (params.sort as (typeof VALID_SORTS)[number])
+    : "tvl";
+  const sortDir = params.dir === "asc" ? "asc" : "desc";
 
   const [result, categories, chains] = await Promise.all([
-    getProtocolsList({ category: params.category, chainSlug: params.chain, search: params.q, page }),
+    getProtocolsList({
+      category: params.category,
+      chainSlug: params.chain,
+      search: params.q,
+      sortBy,
+      sortDir,
+      page,
+    }),
     getAllCategories(),
     getAllChains(),
   ]);
@@ -35,6 +55,8 @@ export default async function ProtocolsPage({
     if (params.category) query.set("category", params.category);
     if (params.chain) query.set("chain", params.chain);
     if (params.q) query.set("q", params.q);
+    if (params.sort) query.set("sort", params.sort);
+    if (params.dir) query.set("dir", params.dir);
     if (targetPage > 1) query.set("page", String(targetPage));
     const qs = query.toString();
     return qs ? `/protocols?${qs}` : "/protocols";

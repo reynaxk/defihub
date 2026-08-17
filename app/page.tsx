@@ -8,10 +8,11 @@ import { ProtocolsTable } from "@/components/protocols/protocols-table";
 import { ChainsTable } from "@/components/chains/chains-table";
 import { TopMovers } from "@/components/tokens/top-movers";
 import { getGlobal24hTotals, getProtocolCount, getTopProtocols } from "@/lib/database/queries/protocols";
-import { getGlobalTvlChanges, getGlobalTvlHistory, getTopChains } from "@/lib/database/queries/chains";
+import { getGlobalTvlHistory, getTopChains } from "@/lib/database/queries/chains";
 import { getYieldPoolCount } from "@/lib/database/queries/yields";
 import { getTopMovers } from "@/lib/database/queries/tokens";
 import { getWatchedChainIds, getWatchedProtocolIds } from "@/lib/database/queries/watchlist";
+import { computeTvlChanges } from "@/lib/database/queries/tvl-change";
 import { auth } from "@/lib/auth/config";
 import { formatUsd } from "@/lib/format";
 import { SUPPORTED_CHAINS } from "@/lib/config/chains";
@@ -28,7 +29,6 @@ export default async function HomePage() {
     movers24h,
     movers7d,
     globalHistory,
-    globalChanges,
     global24h,
   ] = await Promise.all([
     getTopProtocols(10),
@@ -38,9 +38,12 @@ export default async function HomePage() {
     getTopMovers(5, "24h"),
     getTopMovers(5, "7d"),
     getGlobalTvlHistory(),
-    getGlobalTvlChanges(),
     getGlobal24hTotals(),
   ]);
+  // Derived from the history already fetched above, rather than a second
+  // call to a function that would re-run the same expensive date_trunc/SUM
+  // aggregate query over chain_metrics from scratch.
+  const globalChanges = computeTvlChanges(globalHistory);
 
   const [watchedProtocolIds, watchedChainIds] = await Promise.all([
     getWatchedProtocolIds(session?.user?.id, topProtocols.map((p) => p.id)),

@@ -1,7 +1,7 @@
 import { desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chainMetrics, chains, protocolMetrics, protocols } from "@/lib/database/schema";
-import { computeTvlChanges, type TvlChanges } from "./tvl-change";
+import { computeTvlChanges } from "./tvl-change";
 
 export interface ChainListItem {
   id: string;
@@ -65,11 +65,6 @@ export async function getGlobalTvlHistory(): Promise<{ timestamp: Date; tvl: num
   // as a string, not a parsed Date, despite the sql<Date> type hint -
   // coerce explicitly rather than trusting that annotation at runtime.
   return rows.map((r) => ({ timestamp: new Date(r.day), tvl: Number(r.tvl) }));
-}
-
-export async function getGlobalTvlChanges(): Promise<TvlChanges> {
-  const history = await getGlobalTvlHistory();
-  return computeTvlChanges(history);
 }
 
 export async function getChainBySlug(slug: string) {

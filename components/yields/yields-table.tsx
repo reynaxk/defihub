@@ -3,7 +3,7 @@ import { TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EntityLogo } from "@/components/shared/entity-logo";
-import { PoolWatchButton } from "@/components/yields/pool-watch-button";
+import { WatchIconButton } from "@/components/shared/watch-icon-button";
 import { cn } from "@/lib/utils";
 import { formatApy, formatUsd } from "@/lib/format";
 import type { getYieldPools } from "@/lib/database/queries/yields";
@@ -77,10 +77,11 @@ export function YieldsTable({
             <TableRow key={pool.id}>
               {watchedPoolIds && (
                 <TableCell>
-                  <PoolWatchButton
-                    poolId={pool.id}
+                  <WatchIconButton
+                    target={{ yieldPoolId: pool.id }}
                     isSignedIn={isSignedIn}
                     initialWatching={watchedPoolIds.has(pool.id)}
+                    label={`the ${pool.symbol} pool`}
                   />
                 </TableCell>
               )}

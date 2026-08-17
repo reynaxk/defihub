@@ -11,12 +11,15 @@ import { getGlobal24hTotals, getProtocolCount, getTopProtocols } from "@/lib/dat
 import { getGlobalTvlChanges, getGlobalTvlHistory, getTopChains } from "@/lib/database/queries/chains";
 import { getYieldPoolCount } from "@/lib/database/queries/yields";
 import { getTopMovers } from "@/lib/database/queries/tokens";
+import { getWatchedChainIds, getWatchedProtocolIds } from "@/lib/database/queries/watchlist";
+import { auth } from "@/lib/auth/config";
 import { formatUsd } from "@/lib/format";
 import { SUPPORTED_CHAINS } from "@/lib/config/chains";
 
 export const revalidate = 300;
 
 export default async function HomePage() {
+  const session = await auth();
   const [
     topProtocols,
     topChains,
@@ -37,6 +40,11 @@ export default async function HomePage() {
     getGlobalTvlHistory(),
     getGlobalTvlChanges(),
     getGlobal24hTotals(),
+  ]);
+
+  const [watchedProtocolIds, watchedChainIds] = await Promise.all([
+    getWatchedProtocolIds(session?.user?.id, topProtocols.map((p) => p.id)),
+    getWatchedChainIds(session?.user?.id, topChains.map((c) => c.id)),
   ]);
 
   const totalTvl = topChains.reduce((sum, c) => sum + (c.tvl ?? 0), 0);
@@ -138,7 +146,11 @@ export default async function HomePage() {
             View all
           </Link>
         </div>
-        <ProtocolsTable protocols={topProtocols} />
+        <ProtocolsTable
+          protocols={topProtocols}
+          isSignedIn={Boolean(session?.user)}
+          watchedProtocolIds={watchedProtocolIds}
+        />
       </section>
 
       <section className="py-8">
@@ -148,7 +160,7 @@ export default async function HomePage() {
             View all
           </Link>
         </div>
-        <ChainsTable chains={topChains} />
+        <ChainsTable chains={topChains} isSignedIn={Boolean(session?.user)} watchedChainIds={watchedChainIds} />
       </section>
     </div>
   );

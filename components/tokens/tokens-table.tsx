@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EntityLogo } from "@/components/shared/entity-logo";
+import { WatchIconButton } from "@/components/shared/watch-icon-button";
 import { formatPercent, formatTokenPrice, formatUsd } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { getTokensList } from "@/lib/database/queries/tokens";
@@ -18,12 +19,21 @@ function PriceChangeCell({ value }: { value: number | null }) {
   );
 }
 
-export function TokensTable({ tokens }: { tokens: TokenListItem[] }) {
+export function TokensTable({
+  tokens,
+  isSignedIn = false,
+  watchedTokenIds,
+}: {
+  tokens: TokenListItem[];
+  isSignedIn?: boolean;
+  watchedTokenIds?: Set<string>;
+}) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <Table>
         <TableHeader>
           <TableRow>
+            {watchedTokenIds && <TableHead className="w-8" />}
             <TableHead>Token</TableHead>
             <TableHead>Chain</TableHead>
             <TableHead className="text-right">Price</TableHead>
@@ -35,6 +45,16 @@ export function TokensTable({ tokens }: { tokens: TokenListItem[] }) {
         <TableBody>
           {tokens.map((token) => (
             <TableRow key={token.id}>
+              {watchedTokenIds && (
+                <TableCell>
+                  <WatchIconButton
+                    target={{ tokenId: token.id }}
+                    isSignedIn={isSignedIn}
+                    initialWatching={watchedTokenIds.has(token.id)}
+                    label={token.symbol}
+                  />
+                </TableCell>
+              )}
               <TableCell className="font-medium">
                 <Link
                   href={`/token/${token.address}?chain=${token.chainSlug}`}
@@ -60,7 +80,7 @@ export function TokensTable({ tokens }: { tokens: TokenListItem[] }) {
           ))}
           {tokens.length === 0 && (
             <TableRow>
-              <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
+              <TableCell colSpan={watchedTokenIds ? 7 : 6} className="py-10 text-center text-muted-foreground">
                 No tokens match these filters.
               </TableCell>
             </TableRow>

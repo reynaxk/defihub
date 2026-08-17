@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { ChainsTable } from "@/components/chains/chains-table";
 import { ExportCsvButton } from "@/components/shared/export-csv-button";
 import { getTopChains } from "@/lib/database/queries/chains";
+import { getWatchedChainIds } from "@/lib/database/queries/watchlist";
+import { auth } from "@/lib/auth/config";
 
 export const metadata: Metadata = {
   title: "Chains",
@@ -11,7 +13,12 @@ export const metadata: Metadata = {
 export const revalidate = 300;
 
 export default async function ChainsPage() {
+  const session = await auth();
   const chains = await getTopChains();
+  const watchedChainIds = await getWatchedChainIds(
+    session?.user?.id,
+    chains.map((c) => c.id),
+  );
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -23,7 +30,7 @@ export default async function ChainsPage() {
         <ExportCsvButton endpoint="/api/export/chains" />
       </div>
       <div className="mt-6">
-        <ChainsTable chains={chains} />
+        <ChainsTable chains={chains} isSignedIn={Boolean(session?.user)} watchedChainIds={watchedChainIds} />
       </div>
     </div>
   );

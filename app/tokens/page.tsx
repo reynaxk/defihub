@@ -5,6 +5,8 @@ import { ExportCsvButton } from "@/components/shared/export-csv-button";
 import { Pagination } from "@/components/shared/pagination";
 import { getTokensPageList, type TokenSort } from "@/lib/database/queries/tokens";
 import { getAllChains } from "@/lib/database/queries/chains";
+import { getWatchedTokenIds } from "@/lib/database/queries/watchlist";
+import { auth } from "@/lib/auth/config";
 
 export const metadata: Metadata = {
   title: "Tokens",
@@ -31,10 +33,15 @@ export default async function TokensPage({
   const sort = VALID_SORTS.includes(params.sort as TokenSort) ? (params.sort as TokenSort) : "marketCap";
   const page = Math.max(1, Number(params.page) || 1);
 
+  const session = await auth();
   const [result, chains] = await Promise.all([
     getTokensPageList({ chainSlug: params.chain, sort, page }),
     getAllChains(),
   ]);
+  const watchedTokenIds = await getWatchedTokenIds(
+    session?.user?.id,
+    result.items.map((t) => t.id),
+  );
 
   const firstRow = (page - 1) * result.pageSize + 1;
   const lastRow = Math.min(result.total, page * result.pageSize);
@@ -63,7 +70,11 @@ export default async function TokensPage({
       </div>
 
       <div className="mt-4">
-        <TokensTable tokens={result.items} />
+        <TokensTable
+          tokens={result.items}
+          isSignedIn={Boolean(session?.user)}
+          watchedTokenIds={watchedTokenIds}
+        />
       </div>
 
       <Pagination page={page} totalPages={result.totalPages} buildHref={buildHref} />

@@ -6,14 +6,26 @@ import { Star } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
-export function PoolWatchButton({
-  poolId,
+type WatchTarget =
+  | { protocolId: string }
+  | { chainId: string }
+  | { tokenId: string }
+  | { yieldPoolId: string };
+
+// Compact icon-only star toggle for table rows - WatchlistButton (a full
+// labeled button) is meant for detail-page headers, too wide for a table
+// cell. One component parameterized by target kind rather than one per
+// entity type, since the toggle logic is identical either way.
+export function WatchIconButton({
+  target,
   isSignedIn,
   initialWatching,
+  label,
 }: {
-  poolId: string;
+  target: WatchTarget;
   isSignedIn: boolean;
   initialWatching: boolean;
+  label: string;
 }) {
   const router = useRouter();
   const [watching, setWatching] = useState(initialWatching);
@@ -30,7 +42,7 @@ export function PoolWatchButton({
       const res = await fetch("/api/watchlist", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ yieldPoolId: poolId }),
+        body: JSON.stringify(target),
       });
       if (!res.ok) {
         toast.error("Couldn't update your watchlist");
@@ -47,7 +59,7 @@ export function PoolWatchButton({
       type="button"
       onClick={toggle}
       disabled={isPending}
-      aria-label={watching ? "Remove pool from watchlist" : "Add pool to watchlist"}
+      aria-label={watching ? `Remove ${label} from watchlist` : `Add ${label} to watchlist`}
       aria-pressed={watching}
       className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
     >

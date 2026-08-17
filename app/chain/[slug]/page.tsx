@@ -10,7 +10,11 @@ import { TokensTable } from "@/components/tokens/tokens-table";
 import { PercentChange } from "@/components/shared/percent-change";
 import { getChainBySlug } from "@/lib/database/queries/chains";
 import { getTokensList } from "@/lib/database/queries/tokens";
-import { isWatchingChain } from "@/lib/database/queries/watchlist";
+import {
+  getWatchedProtocolIds,
+  getWatchedTokenIds,
+  isWatchingChain,
+} from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
 import { formatPercent, formatUsd } from "@/lib/format";
 
@@ -41,6 +45,12 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
   const [watching, chainTokens] = await Promise.all([
     isWatchingChain(session?.user?.id, chain.id),
     getTokensList({ chainSlug: chain.slug, sort: "marketCap" }),
+  ]);
+  const topChainTokens = chainTokens.slice(0, TOP_TOKENS_LIMIT);
+
+  const [watchedProtocolIds, watchedTokenIds] = await Promise.all([
+    getWatchedProtocolIds(session?.user?.id, topProtocols.map((p) => p.id)),
+    getWatchedTokenIds(session?.user?.id, topChainTokens.map((t) => t.id)),
   ]);
 
   // Free to compute from topProtocols (already fetched, up to 50 rows) -
@@ -130,7 +140,11 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
 
       <div className="mt-8">
         <h2 className="mb-4 text-xl font-semibold tracking-tight">Top protocols on {chain.name}</h2>
-        <ProtocolsTable protocols={topProtocols} />
+        <ProtocolsTable
+          protocols={topProtocols}
+          isSignedIn={Boolean(session?.user)}
+          watchedProtocolIds={watchedProtocolIds}
+        />
       </div>
 
       {chainTokens.length > 0 && (
@@ -141,7 +155,11 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
               View all
             </Link>
           </div>
-          <TokensTable tokens={chainTokens.slice(0, TOP_TOKENS_LIMIT)} />
+          <TokensTable
+            tokens={topChainTokens}
+            isSignedIn={Boolean(session?.user)}
+            watchedTokenIds={watchedTokenIds}
+          />
         </div>
       )}
     </div>

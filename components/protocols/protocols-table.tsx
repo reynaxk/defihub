@@ -3,21 +3,27 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { PercentChange } from "@/components/shared/percent-change";
+import { WatchIconButton } from "@/components/shared/watch-icon-button";
 import { formatUsd } from "@/lib/format";
 import type { ProtocolListItem } from "@/lib/database/queries/protocols";
 
 export function ProtocolsTable({
   protocols,
   rankOffset = 0,
+  isSignedIn = false,
+  watchedProtocolIds,
 }: {
   protocols: ProtocolListItem[];
   rankOffset?: number;
+  isSignedIn?: boolean;
+  watchedProtocolIds?: Set<string>;
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <Table>
         <TableHeader>
           <TableRow>
+            {watchedProtocolIds && <TableHead className="w-8" />}
             <TableHead className="w-10">#</TableHead>
             <TableHead>Protocol</TableHead>
             <TableHead className="hidden sm:table-cell">Category</TableHead>
@@ -32,6 +38,16 @@ export function ProtocolsTable({
         <TableBody>
           {protocols.map((protocol, i) => (
             <TableRow key={protocol.id}>
+              {watchedProtocolIds && (
+                <TableCell>
+                  <WatchIconButton
+                    target={{ protocolId: protocol.id }}
+                    isSignedIn={isSignedIn}
+                    initialWatching={watchedProtocolIds.has(protocol.id)}
+                    label={protocol.name}
+                  />
+                </TableCell>
+              )}
               <TableCell className="text-muted-foreground">{rankOffset + i + 1}</TableCell>
               <TableCell>
                 <Link href={`/protocol/${protocol.slug}`} className="flex items-center gap-2 font-medium">
@@ -62,7 +78,7 @@ export function ProtocolsTable({
           ))}
           {protocols.length === 0 && (
             <TableRow>
-              <TableCell colSpan={9} className="py-10 text-center text-muted-foreground">
+              <TableCell colSpan={watchedProtocolIds ? 10 : 9} className="py-10 text-center text-muted-foreground">
                 No protocols match these filters yet.
               </TableCell>
             </TableRow>

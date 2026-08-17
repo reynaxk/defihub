@@ -5,6 +5,8 @@ import { ExportCsvButton } from "@/components/shared/export-csv-button";
 import { Pagination } from "@/components/shared/pagination";
 import { getAllCategories, getProtocolsList } from "@/lib/database/queries/protocols";
 import { getAllChains } from "@/lib/database/queries/chains";
+import { getWatchedProtocolIds } from "@/lib/database/queries/watchlist";
+import { auth } from "@/lib/auth/config";
 
 export const metadata: Metadata = {
   title: "Protocols",
@@ -34,6 +36,7 @@ export default async function ProtocolsPage({
     : "tvl";
   const sortDir = params.dir === "asc" ? "asc" : "desc";
 
+  const session = await auth();
   const [result, categories, chains] = await Promise.all([
     getProtocolsList({
       category: params.category,
@@ -46,6 +49,10 @@ export default async function ProtocolsPage({
     getAllCategories(),
     getAllChains(),
   ]);
+  const watchedProtocolIds = await getWatchedProtocolIds(
+    session?.user?.id,
+    result.items.map((p) => p.id),
+  );
 
   const firstRow = (page - 1) * result.pageSize + 1;
   const lastRow = Math.min(result.total, page * result.pageSize);
@@ -77,7 +84,12 @@ export default async function ProtocolsPage({
       </div>
 
       <div className="mt-4">
-        <ProtocolsTable protocols={result.items} rankOffset={(page - 1) * result.pageSize} />
+        <ProtocolsTable
+          protocols={result.items}
+          rankOffset={(page - 1) * result.pageSize}
+          isSignedIn={Boolean(session?.user)}
+          watchedProtocolIds={watchedProtocolIds}
+        />
       </div>
 
       <Pagination page={page} totalPages={result.totalPages} buildHref={buildHref} />

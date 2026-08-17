@@ -58,6 +58,36 @@ export async function getWatchedPoolIds(userId: string | undefined, poolIds: str
   return new Set(rows.map((r) => r.yieldPoolId).filter((id): id is string => id != null));
 }
 
+// Same batched pattern for protocols/chains/tokens - lets a whole list table
+// (ProtocolsTable, ChainsTable, TokensTable) render its watch stars with one
+// query instead of one per row.
+export async function getWatchedProtocolIds(userId: string | undefined, ids: string[]): Promise<Set<string>> {
+  if (!userId || ids.length === 0) return new Set();
+  const rows = await db
+    .select({ protocolId: watchlist.protocolId })
+    .from(watchlist)
+    .where(and(eq(watchlist.userId, userId), inArray(watchlist.protocolId, ids)));
+  return new Set(rows.map((r) => r.protocolId).filter((id): id is string => id != null));
+}
+
+export async function getWatchedChainIds(userId: string | undefined, ids: string[]): Promise<Set<string>> {
+  if (!userId || ids.length === 0) return new Set();
+  const rows = await db
+    .select({ chainId: watchlist.chainId })
+    .from(watchlist)
+    .where(and(eq(watchlist.userId, userId), inArray(watchlist.chainId, ids)));
+  return new Set(rows.map((r) => r.chainId).filter((id): id is string => id != null));
+}
+
+export async function getWatchedTokenIds(userId: string | undefined, ids: string[]): Promise<Set<string>> {
+  if (!userId || ids.length === 0) return new Set();
+  const rows = await db
+    .select({ tokenId: watchlist.tokenId })
+    .from(watchlist)
+    .where(and(eq(watchlist.userId, userId), inArray(watchlist.tokenId, ids)));
+  return new Set(rows.map((r) => r.tokenId).filter((id): id is string => id != null));
+}
+
 export interface WatchlistEntry {
   id: string;
   kind: "protocol" | "chain" | "token" | "pool";

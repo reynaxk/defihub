@@ -2,10 +2,19 @@ import Link from "next/link";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { PercentChange } from "@/components/shared/percent-change";
+import { WatchIconButton } from "@/components/shared/watch-icon-button";
 import { formatPercent, formatUsd } from "@/lib/format";
 import type { ChainListItem } from "@/lib/database/queries/chains";
 
-export function ChainsTable({ chains }: { chains: ChainListItem[] }) {
+export function ChainsTable({
+  chains,
+  isSignedIn = false,
+  watchedChainIds,
+}: {
+  chains: ChainListItem[];
+  isSignedIn?: boolean;
+  watchedChainIds?: Set<string>;
+}) {
   const totalTvl = chains.reduce((sum, c) => sum + (c.tvl ?? 0), 0);
 
   return (
@@ -13,6 +22,7 @@ export function ChainsTable({ chains }: { chains: ChainListItem[] }) {
       <Table>
         <TableHeader>
           <TableRow>
+            {watchedChainIds && <TableHead className="w-8" />}
             <TableHead className="w-10">#</TableHead>
             <TableHead>Chain</TableHead>
             <TableHead className="hidden sm:table-cell">Native token</TableHead>
@@ -24,6 +34,16 @@ export function ChainsTable({ chains }: { chains: ChainListItem[] }) {
         <TableBody>
           {chains.map((chain, i) => (
             <TableRow key={chain.id}>
+              {watchedChainIds && (
+                <TableCell>
+                  <WatchIconButton
+                    target={{ chainId: chain.id }}
+                    isSignedIn={isSignedIn}
+                    initialWatching={watchedChainIds.has(chain.id)}
+                    label={chain.name}
+                  />
+                </TableCell>
+              )}
               <TableCell className="text-muted-foreground">{i + 1}</TableCell>
               <TableCell>
                 <Link href={`/chain/${chain.slug}`} className="flex items-center gap-2 font-medium">

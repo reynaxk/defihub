@@ -1,15 +1,30 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Bell, Star } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
+import { Activity, Bell, Star } from "lucide-react";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { Button } from "@/components/ui/button";
 import { auth } from "@/lib/auth/config";
 import { getWatchlistWithDetails, type WatchlistEntry } from "@/lib/database/queries/watchlist";
 import { db } from "@/lib/database/client";
 import { alerts } from "@/lib/database/schema";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { formatApy, formatUsd } from "@/lib/format";
 import { NOINDEX } from "@/lib/seo";
+
+const ALERT_TYPE_LABELS: Record<string, string> = {
+  protocol_tvl: "Protocol TVL",
+  chain_tvl: "Chain TVL",
+  token_price: "Token price",
+  pool_apy: "Pool APY",
+};
+
+const CONDITION_LABELS: Record<string, string> = {
+  above: "rose above",
+  below: "fell below",
+  percent_change_up: "increased by",
+  percent_change_down: "decreased by",
+};
 
 function watchlistHref(item: WatchlistEntry): string {
   switch (item.kind) {
@@ -34,10 +49,15 @@ export default async function DashboardPage() {
 
   const [watchlist, userAlerts] = await Promise.all([
     getWatchlistWithDetails(userId),
-    db.select().from(alerts).where(eq(alerts.userId, userId)),
+    db.select().from(alerts).where(eq(alerts.userId, userId)).orderBy(desc(alerts.lastTriggeredAt)),
   ]);
 
   const enabledAlerts = userAlerts.filter((a) => a.enabled);
+  // "Recent activity" is real, not invented: alerts that have actually
+  // fired, which is exactly "a meaningful change since your last visit."
+  // There's no separate activity-log table, and this codebase doesn't
+  // fabricate a feed where there's no real event to show.
+  const recentlyTriggered = userAlerts.filter((a) => a.lastTriggeredAt != null).slice(0, 5);
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -83,6 +103,33 @@ export default async function DashboardPage() {
       <p className="mt-3 text-sm text-muted-foreground">
         {enabledAlerts.length} active alert{enabledAlerts.length === 1 ? "" : "s"} out of {userAlerts.length} total.
       </p>
+
+      <div className="mt-10">
+        <h2 className="flex items-center gap-2 text-lg font-medium">
+          <Activity className="size-4" /> Recent activity
+        </h2>
+        {recentlyTriggered.length === 0 ? (
+          <p className="mt-3 text-sm text-muted-foreground">
+            No alerts have triggered yet — this fills in once one of your active alerts fires.
+          </p>
+        ) : (
+          <div className="mt-3 flex flex-col gap-2">
+            {recentlyTriggered.map((alert) => (
+              <div key={alert.id} className="rounded-lg border border-border bg-card p-3 text-sm">
+                <span className="font-medium">{ALERT_TYPE_LABELS[alert.type] ?? alert.type}</span> for{" "}
+                <span className="font-medium">{alert.target}</span>{" "}
+                {CONDITION_LABELS[alert.condition] ?? alert.condition}{" "}
+                {Number(alert.threshold).toLocaleString()}
+                {alert.condition.startsWith("percent_change") ? "%" : ""}
+                <span className="text-muted-foreground">
+                  {" "}
+                  — {formatDistanceToNow(alert.lastTriggeredAt!, { addSuffix: true })}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

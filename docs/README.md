@@ -17,6 +17,9 @@ exists is worse than no doc.
 - **[security.md](./security.md)** — what's implemented, what's explicitly
   not (and why), and the standing rule that wallet/private-key handling and
   real-money trade execution don't exist in this codebase at all.
+- **[monetization.md](./monetization.md)** — planning only, nothing
+  implemented: where a paid tier would attach to the existing schema/API if
+  one is ever added.
 
 The public API itself is documented live at `/api-docs`, not duplicated
 here — a hand-maintained copy would drift from the real endpoints.

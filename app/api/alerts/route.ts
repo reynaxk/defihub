@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { auth } from "@/lib/auth/config";
 import { db } from "@/lib/database/client";
@@ -33,6 +33,22 @@ export async function POST(request: Request) {
   const parsed = createAlertSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Invalid input" }, { status: 400 });
+  }
+
+  const [existing] = await db
+    .select({ id: alerts.id })
+    .from(alerts)
+    .where(
+      and(
+        eq(alerts.userId, session.user.id),
+        eq(alerts.type, parsed.data.type),
+        eq(alerts.target, parsed.data.target),
+        eq(alerts.condition, parsed.data.condition),
+        eq(alerts.threshold, parsed.data.threshold.toString()),
+      ),
+    );
+  if (existing) {
+    return NextResponse.json({ error: "You already have this exact alert set up" }, { status: 409 });
   }
 
   const [created] = await db

@@ -181,6 +181,58 @@ export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) 
         </CardContent>
       </Card>
 
+      {alertsList.length === 0 ? (
+        <p className="py-10 text-center text-muted-foreground">No alerts yet — create one above.</p>
+      ) : (
+        <>
+          <AlertGroup
+            title="Active"
+            description="Armed and watching, hasn't fired yet."
+            alerts={alertsList.filter((a) => a.enabled && !a.lastTriggeredAt)}
+            onToggle={toggleEnabled}
+            onDelete={deleteAlert}
+          />
+          <AlertGroup
+            title="Triggered"
+            description="Fired at least once and still active."
+            alerts={alertsList.filter((a) => a.enabled && a.lastTriggeredAt)}
+            onToggle={toggleEnabled}
+            onDelete={deleteAlert}
+          />
+          <AlertGroup
+            title="Disabled"
+            description="Turned off - won't be checked until re-enabled."
+            alerts={alertsList.filter((a) => !a.enabled)}
+            onToggle={toggleEnabled}
+            onDelete={deleteAlert}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function AlertGroup({
+  title,
+  description,
+  alerts,
+  onToggle,
+  onDelete,
+}: {
+  title: string;
+  description: string;
+  alerts: AlertRow[];
+  onToggle: (id: string, enabled: boolean) => void;
+  onDelete: (id: string) => void;
+}) {
+  if (alerts.length === 0) return null;
+
+  return (
+    <div>
+      <h2 className="text-sm font-medium">
+        {title} <span className="font-normal text-muted-foreground">({alerts.length})</span>
+      </h2>
+      <p className="mb-3 text-xs text-muted-foreground">{description}</p>
       <div className="overflow-x-auto rounded-lg border border-border">
         <Table>
           <TableHeader>
@@ -195,7 +247,7 @@ export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) 
             </TableRow>
           </TableHeader>
           <TableBody>
-            {alertsList.map((alert) => (
+            {alerts.map((alert) => (
               <TableRow key={alert.id}>
                 <TableCell>{ALERT_TYPES.find((t) => t.value === alert.type)?.label ?? alert.type}</TableCell>
                 <TableCell className="font-medium">{alert.target}</TableCell>
@@ -204,7 +256,7 @@ export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) 
                 </TableCell>
                 <TableCell className="text-right tabular-nums">{alert.threshold}</TableCell>
                 <TableCell>
-                  <Switch checked={alert.enabled} onCheckedChange={(checked) => toggleEnabled(alert.id, checked)} />
+                  <Switch checked={alert.enabled} onCheckedChange={(checked) => onToggle(alert.id, checked)} />
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {alert.lastTriggeredAt ? new Date(alert.lastTriggeredAt).toLocaleString() : "Never"}
@@ -214,20 +266,13 @@ export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) 
                     variant="ghost"
                     size="icon"
                     aria-label={`Delete alert for ${alert.target}`}
-                    onClick={() => deleteAlert(alert.id)}
+                    onClick={() => onDelete(alert.id)}
                   >
                     <Trash2 className="size-4" />
                   </Button>
                 </TableCell>
               </TableRow>
             ))}
-            {alertsList.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
-                  No alerts yet — create one above.
-                </TableCell>
-              </TableRow>
-            )}
           </TableBody>
         </Table>
       </div>

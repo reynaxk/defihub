@@ -103,11 +103,17 @@ export default function ApiDocsPage() {
         <EndpointDoc
           method="GET"
           path="/api/v1/yields"
-          description="Yield pools with at least $10K TVL, sorted by APY descending."
+          description="Yield pools with at least $10K TVL, sorted by APY descending by default."
           params={[
+            { name: "page", type: "number", description: "1-indexed page number (default 1)" },
+            { name: "pageSize", type: "number", description: "Results per page, max 100 (default 50)" },
             { name: "chain", type: "string", description: "Filter to a chain slug" },
+            { name: "category", type: "string", description: "Filter to an exact protocol category, e.g. Lending" },
             { name: "stable", type: "1 | 0", description: "Set to 1 to show stablecoin pools only" },
+            { name: "risk", type: "yes | no", description: "Filter by impermanent-loss risk flag" },
+            { name: "q", type: "string", description: "Case-insensitive search over pool symbol and protocol name" },
             { name: "minApy", type: "number", description: "Minimum APY percentage" },
+            { name: "minTvl", type: "number", description: "Minimum pool TVL in USD" },
           ]}
           exampleResponse={`{
   "data": [
@@ -115,12 +121,17 @@ export default function ApiDocsPage() {
       "id": "747c1d2a-...",
       "symbol": "STETH",
       "apy": 2.144,
+      "apyBase": 2.144,
+      "apyReward": 0,
       "tvlUsd": 17863335831,
       "stablecoin": false,
+      "ilRisk": "no",
       "chainName": "Ethereum",
-      "protocolName": "Lido"
+      "protocolName": "Lido",
+      "protocolCategory": "Liquid Staking"
     }
-  ]
+  ],
+  "pagination": { "page": 1, "pageSize": 50, "total": 11412, "totalPages": 229 }
 }`}
         />
 

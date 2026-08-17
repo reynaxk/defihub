@@ -9,10 +9,15 @@ export async function GET(request: Request) {
   if (limited) return limited;
 
   const { searchParams } = new URL(request.url);
+  const risk = searchParams.get("risk");
   const rows = await getYieldPools({
     chainSlug: searchParams.get("chain") ?? undefined,
+    category: searchParams.get("category") ?? undefined,
     stablecoinOnly: searchParams.get("stable") === "1",
+    ilRisk: risk === "yes" || risk === "no" ? risk : undefined,
+    search: searchParams.get("q") ?? undefined,
     minApy: searchParams.get("minApy") ? Number(searchParams.get("minApy")) : undefined,
+    minTvl: searchParams.get("minTvl") ? Number(searchParams.get("minTvl")) : undefined,
   });
 
   const csv = toCsv<YieldPool>(rows, [

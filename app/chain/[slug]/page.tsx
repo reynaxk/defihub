@@ -61,8 +61,17 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
       </div>
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <StatTile label="TVL" value={formatUsd(latestTvl)} />
-        <StatTile label="Protocols" value={String(topProtocols.length)} />
+        <StatTile
+          label="TVL"
+          value={formatUsd(latestTvl)}
+          animate={latestTvl != null ? { value: latestTvl, format: "usd" } : undefined}
+        />
+        <StatTile
+          label="Protocols"
+          value={String(topProtocols.length)}
+          animate={{ value: topProtocols.length, format: "count" }}
+        />
+        {/* Chain ID is an identifier, not a magnitude - counting up to it would misleadingly imply it's loading a real quantity */}
         <StatTile label="Chain ID" value={chain.chainId != null ? String(chain.chainId) : "—"} />
       </div>
 

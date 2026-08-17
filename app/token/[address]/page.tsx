@@ -73,10 +73,17 @@ export default async function TokenDetailPage({
       )}
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <StatTile label="Price" value={formatTokenPrice(latest?.priceUsd)} />
+        <StatTile
+          label="Price"
+          value={formatTokenPrice(latest?.priceUsd)}
+          animate={latest?.priceUsd != null ? { value: latest.priceUsd, format: "tokenPrice" } : undefined}
+        />
         <StatTile
           label="24h change"
           value={formatPercent(latest?.priceChange24h, { signed: true })}
+          animate={
+            latest?.priceChange24h != null ? { value: latest.priceChange24h, format: "percent" } : undefined
+          }
           valueClassName={
             latest?.priceChange24h == null
               ? undefined
@@ -85,8 +92,16 @@ export default async function TokenDetailPage({
                 : "text-destructive"
           }
         />
-        <StatTile label="Market cap" value={formatUsd(latest?.marketCap)} />
-        <StatTile label="24h volume" value={formatUsd(latest?.volume24h)} />
+        <StatTile
+          label="Market cap"
+          value={formatUsd(latest?.marketCap)}
+          animate={latest?.marketCap != null ? { value: latest.marketCap, format: "usd" } : undefined}
+        />
+        <StatTile
+          label="24h volume"
+          value={formatUsd(latest?.volume24h)}
+          animate={latest?.volume24h != null ? { value: latest.volume24h, format: "usd" } : undefined}
+        />
       </div>
 
       <div className="mt-8 rounded-lg border border-border bg-card p-4">

@@ -78,10 +78,26 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
       {protocol.description && <p className="mt-4 max-w-3xl text-muted-foreground">{protocol.description}</p>}
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <StatTile label="TVL" value={formatUsd(latest?.tvl)} />
-        <StatTile label="24h Volume" value={formatUsd(latest?.volume24h)} />
-        <StatTile label="24h Fees" value={formatUsd(latest?.fees24h)} />
-        <StatTile label="24h Revenue" value={formatUsd(latest?.revenue24h)} />
+        <StatTile
+          label="TVL"
+          value={formatUsd(latest?.tvl)}
+          animate={latest?.tvl != null ? { value: latest.tvl, format: "usd" } : undefined}
+        />
+        <StatTile
+          label="24h Volume"
+          value={formatUsd(latest?.volume24h)}
+          animate={latest?.volume24h != null ? { value: latest.volume24h, format: "usd" } : undefined}
+        />
+        <StatTile
+          label="24h Fees"
+          value={formatUsd(latest?.fees24h)}
+          animate={latest?.fees24h != null ? { value: latest.fees24h, format: "usd" } : undefined}
+        />
+        <StatTile
+          label="24h Revenue"
+          value={formatUsd(latest?.revenue24h)}
+          animate={latest?.revenue24h != null ? { value: latest.revenue24h, format: "usd" } : undefined}
+        />
       </div>
 
       <div className="mt-8 rounded-lg border border-border bg-card p-4">

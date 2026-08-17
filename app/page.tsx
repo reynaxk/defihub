@@ -27,7 +27,7 @@ export default async function HomePage() {
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6">
-      <section className="flex flex-col items-start gap-4 py-8 sm:py-12">
+      <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 flex flex-col items-start gap-4 py-8 duration-700 sm:py-12">
         <h1 className="max-w-2xl text-4xl font-semibold tracking-tight sm:text-5xl">
           DeFi data, tracked clearly.
         </h1>
@@ -48,11 +48,31 @@ export default async function HomePage() {
         </div>
       </section>
 
-      <section className="grid grid-cols-2 gap-3 py-6 sm:grid-cols-4">
-        <StatTile label="Total value locked" value={formatUsd(totalTvl)} icon={Wallet} />
-        <StatTile label="Protocols tracked" value={protocolCount.toLocaleString()} icon={Layers} />
-        <StatTile label="Yield pools" value={yieldPoolCount.toLocaleString()} icon={Sprout} />
-        <StatTile label="Chains supported" value={String(SUPPORTED_CHAINS.length)} icon={Coins} />
+      <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 grid grid-cols-2 gap-3 py-6 delay-150 duration-700 sm:grid-cols-4">
+        <StatTile
+          label="Total value locked"
+          value={formatUsd(totalTvl)}
+          icon={Wallet}
+          animate={{ value: totalTvl, format: "usd" }}
+        />
+        <StatTile
+          label="Protocols tracked"
+          value={protocolCount.toLocaleString()}
+          icon={Layers}
+          animate={{ value: protocolCount, format: "count" }}
+        />
+        <StatTile
+          label="Yield pools"
+          value={yieldPoolCount.toLocaleString()}
+          icon={Sprout}
+          animate={{ value: yieldPoolCount, format: "count" }}
+        />
+        <StatTile
+          label="Chains supported"
+          value={String(SUPPORTED_CHAINS.length)}
+          icon={Coins}
+          animate={{ value: SUPPORTED_CHAINS.length, format: "count" }}
+        />
       </section>
 
       <section className="py-8">

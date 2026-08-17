@@ -110,7 +110,7 @@ export function SearchBox({ className }: { className?: string }) {
       </div>
 
       {showDropdown && (
-        <div className="absolute top-full left-0 z-50 mt-1.5 w-full min-w-72 overflow-hidden rounded-lg border border-border bg-popover shadow-lg">
+        <div className="motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-top-1 absolute top-full left-0 z-50 mt-1.5 w-full min-w-72 overflow-hidden rounded-lg border border-border bg-popover shadow-lg duration-150">
           {loading && groups.length === 0 && (
             <div className="px-3 py-4 text-center text-sm text-muted-foreground">Searching…</div>
           )}

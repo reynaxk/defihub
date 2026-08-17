@@ -15,7 +15,7 @@ import { PercentChange } from "@/components/shared/percent-change";
 import { YieldsTable } from "@/components/yields/yields-table";
 import { getProtocolBySlug, getProtocolChainBreakdown } from "@/lib/database/queries/protocols";
 import { getYieldPools } from "@/lib/database/queries/yields";
-import { isWatchingProtocol } from "@/lib/database/queries/watchlist";
+import { getWatchedPoolIds, isWatchingProtocol } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
 import { formatDate, formatUsd } from "@/lib/format";
 import { getCachedProtocolSummary, isAiSummaryAvailable } from "@/lib/ai/protocol-summary";
@@ -80,6 +80,11 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
     getProtocolChainBreakdown(protocol.id),
     getYieldPools({ protocolSlug: protocol.slug }),
   ]);
+
+  const watchedPoolIds = await getWatchedPoolIds(
+    session?.user?.id,
+    protocolYields.map((p) => p.id),
+  );
 
   const tvlHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.tvl }));
   const feesHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.fees24h }));
@@ -214,7 +219,11 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
               No yield pools tracked for {protocol.name} yet.
             </p>
           ) : (
-            <YieldsTable pools={protocolYields} />
+            <YieldsTable
+              pools={protocolYields}
+              isSignedIn={Boolean(session?.user)}
+              watchedPoolIds={watchedPoolIds}
+            />
           )}
         </TabsContent>
       </Tabs>

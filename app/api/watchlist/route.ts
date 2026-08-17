@@ -10,9 +10,10 @@ const toggleSchema = z
     protocolId: z.uuid().optional(),
     chainId: z.uuid().optional(),
     tokenId: z.uuid().optional(),
+    yieldPoolId: z.uuid().optional(),
   })
-  .refine((v) => [v.protocolId, v.chainId, v.tokenId].filter(Boolean).length === 1, {
-    message: "Provide exactly one of protocolId, chainId or tokenId",
+  .refine((v) => [v.protocolId, v.chainId, v.tokenId, v.yieldPoolId].filter(Boolean).length === 1, {
+    message: "Provide exactly one of protocolId, chainId, tokenId or yieldPoolId",
   });
 
 export async function GET() {
@@ -33,12 +34,14 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Invalid input" }, { status: 400 });
   }
-  const { protocolId, chainId, tokenId } = parsed.data;
+  const { protocolId, chainId, tokenId, yieldPoolId } = parsed.data;
   const itemCondition = protocolId
     ? eq(watchlist.protocolId, protocolId)
     : chainId
       ? eq(watchlist.chainId, chainId)
-      : eq(watchlist.tokenId, tokenId!);
+      : tokenId
+        ? eq(watchlist.tokenId, tokenId)
+        : eq(watchlist.yieldPoolId, yieldPoolId!);
 
   const existing = await db
     .select({ id: watchlist.id })
@@ -50,6 +53,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ watching: false });
   }
 
-  await db.insert(watchlist).values({ userId: session.user.id, protocolId, chainId, tokenId });
+  await db.insert(watchlist).values({ userId: session.user.id, protocolId, chainId, tokenId, yieldPoolId });
   return NextResponse.json({ watching: true }, { status: 201 });
 }

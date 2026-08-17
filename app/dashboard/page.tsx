@@ -4,12 +4,27 @@ import { Bell, Star } from "lucide-react";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { Button } from "@/components/ui/button";
 import { auth } from "@/lib/auth/config";
-import { getWatchlistWithDetails } from "@/lib/database/queries/watchlist";
+import { getWatchlistWithDetails, type WatchlistEntry } from "@/lib/database/queries/watchlist";
 import { db } from "@/lib/database/client";
 import { alerts } from "@/lib/database/schema";
 import { eq } from "drizzle-orm";
-import { formatUsd } from "@/lib/format";
+import { formatApy, formatUsd } from "@/lib/format";
 import { NOINDEX } from "@/lib/seo";
+
+function watchlistHref(item: WatchlistEntry): string {
+  switch (item.kind) {
+    case "protocol":
+      return `/protocol/${item.slug}`;
+    case "chain":
+      return `/chain/${item.slug}`;
+    case "token":
+      return `/token/${item.slug}?chain=${item.chainSlug}`;
+    case "pool":
+      // Pools have no dedicated detail page - the yields search box
+      // matches on symbol, so this lands on the closest working view.
+      return `/yields?q=${encodeURIComponent(item.slug)}`;
+  }
+}
 
 export const metadata: Metadata = { title: "Dashboard", robots: NOINDEX };
 
@@ -37,27 +52,23 @@ export default async function DashboardPage() {
 
       {watchlist.length === 0 ? (
         <p className="mt-3 text-sm text-muted-foreground">
-          Nothing watched yet. Star a protocol, chain or token to track it here.
+          Nothing watched yet. Star a protocol, chain, token or yield pool to track it here.
         </p>
       ) : (
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
           {watchlist.map((item) => (
             <Link
               key={item.id}
-              href={
-                item.kind === "protocol"
-                  ? `/protocol/${item.slug}`
-                  : item.kind === "chain"
-                    ? `/chain/${item.slug}`
-                    : `/token/${item.slug}?chain=${item.chainSlug}`
-              }
+              href={watchlistHref(item)}
               className="flex items-center justify-between rounded-lg border border-border bg-card p-3 hover:border-primary/40"
             >
               <div className="flex items-center gap-2">
                 <EntityLogo src={item.logoUrl} name={item.name} size={28} />
                 <span className="font-medium">{item.name}</span>
               </div>
-              <span className="tabular-nums text-muted-foreground">{formatUsd(item.tvl)}</span>
+              <span className="tabular-nums text-muted-foreground">
+                {item.kind === "pool" ? formatApy(item.apy) : formatUsd(item.tvl)}
+              </span>
             </Link>
           ))}
         </div>

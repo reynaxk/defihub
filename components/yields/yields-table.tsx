@@ -3,6 +3,7 @@ import { TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EntityLogo } from "@/components/shared/entity-logo";
+import { PoolWatchButton } from "@/components/yields/pool-watch-button";
 import { cn } from "@/lib/utils";
 import { formatApy, formatUsd } from "@/lib/format";
 import type { getYieldPools } from "@/lib/database/queries/yields";
@@ -46,12 +47,21 @@ function ApyCell({ apy }: { apy: number | null }) {
   );
 }
 
-export function YieldsTable({ pools }: { pools: YieldPool[] }) {
+export function YieldsTable({
+  pools,
+  isSignedIn = false,
+  watchedPoolIds,
+}: {
+  pools: YieldPool[];
+  isSignedIn?: boolean;
+  watchedPoolIds?: Set<string>;
+}) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <Table>
         <TableHeader>
           <TableRow>
+            {watchedPoolIds && <TableHead className="w-8" />}
             <TableHead>Pool</TableHead>
             <TableHead className="hidden sm:table-cell">Protocol</TableHead>
             <TableHead className="hidden md:table-cell">Chain</TableHead>
@@ -65,6 +75,15 @@ export function YieldsTable({ pools }: { pools: YieldPool[] }) {
         <TableBody>
           {pools.map((pool) => (
             <TableRow key={pool.id}>
+              {watchedPoolIds && (
+                <TableCell>
+                  <PoolWatchButton
+                    poolId={pool.id}
+                    isSignedIn={isSignedIn}
+                    initialWatching={watchedPoolIds.has(pool.id)}
+                  />
+                </TableCell>
+              )}
               <TableCell className="font-medium">
                 <div className="flex items-center gap-2">
                   {pool.symbol}
@@ -110,7 +129,7 @@ export function YieldsTable({ pools }: { pools: YieldPool[] }) {
           ))}
           {pools.length === 0 && (
             <TableRow>
-              <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
+              <TableCell colSpan={watchedPoolIds ? 9 : 8} className="py-10 text-center text-muted-foreground">
                 No pools match these filters.
               </TableCell>
             </TableRow>

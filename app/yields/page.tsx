@@ -5,6 +5,8 @@ import { ExportCsvButton } from "@/components/shared/export-csv-button";
 import { Pagination } from "@/components/shared/pagination";
 import { getYieldCategories, getYieldPoolsList } from "@/lib/database/queries/yields";
 import { getAllChains } from "@/lib/database/queries/chains";
+import { getWatchedPoolIds } from "@/lib/database/queries/watchlist";
+import { auth } from "@/lib/auth/config";
 
 export const metadata: Metadata = {
   title: "Yields",
@@ -36,6 +38,8 @@ export default async function YieldsPage({
   const sortBy = params.sort === "tvl" ? "tvl" : "apy";
   const sortDir = params.dir === "asc" ? "asc" : "desc";
 
+  const session = await auth();
+
   const [result, categories, chains] = await Promise.all([
     getYieldPoolsList({
       chainSlug: params.chain,
@@ -51,6 +55,11 @@ export default async function YieldsPage({
     getYieldCategories(),
     getAllChains(),
   ]);
+
+  const watchedPoolIds = await getWatchedPoolIds(
+    session?.user?.id,
+    result.items.map((p) => p.id),
+  );
 
   const firstRow = (page - 1) * result.pageSize + 1;
   const lastRow = Math.min(result.total, page * result.pageSize);
@@ -90,7 +99,7 @@ export default async function YieldsPage({
       </div>
 
       <div className="mt-4">
-        <YieldsTable pools={result.items} />
+        <YieldsTable pools={result.items} isSignedIn={Boolean(session?.user)} watchedPoolIds={watchedPoolIds} />
       </div>
 
       <Pagination page={page} totalPages={result.totalPages} buildHref={buildHref} />

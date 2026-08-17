@@ -1,0 +1,3 @@
+ALTER TABLE "watchlist" ADD COLUMN "yield_pool_id" uuid;--> statement-breakpoint
+ALTER TABLE "watchlist" ADD CONSTRAINT "watchlist_yield_pool_id_yield_pools_id_fk" FOREIGN KEY ("yield_pool_id") REFERENCES "public"."yield_pools"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+CREATE UNIQUE INDEX "watchlist_user_yield_pool_unique" ON "watchlist" USING btree ("user_id","yield_pool_id");

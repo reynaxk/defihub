@@ -151,15 +151,23 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
       </div>
 
       <Tabs defaultValue="overview" className="mt-8">
-        <TabsList variant="line" className="w-full justify-start overflow-x-auto">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="tvl">TVL</TabsTrigger>
-          <TabsTrigger value="fees">Fees</TabsTrigger>
-          <TabsTrigger value="revenue">Revenue</TabsTrigger>
-          <TabsTrigger value="volume">Volume</TabsTrigger>
-          <TabsTrigger value="chains">Chains</TabsTrigger>
-          <TabsTrigger value="yields">Yields</TabsTrigger>
-        </TabsList>
+        <div className="relative">
+          <TabsList variant="line" className="w-full justify-start overflow-x-auto">
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="tvl">TVL</TabsTrigger>
+            <TabsTrigger value="fees">Fees</TabsTrigger>
+            <TabsTrigger value="revenue">Revenue</TabsTrigger>
+            <TabsTrigger value="volume">Volume</TabsTrigger>
+            <TabsTrigger value="chains">Chains</TabsTrigger>
+            <TabsTrigger value="yields">Yields</TabsTrigger>
+          </TabsList>
+          {/* Hints that the tab bar scrolls (no visible affordance otherwise) - only
+              matters on narrow viewports where all 7 tabs don't fit, so hidden at sm+. */}
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute top-0 right-0 h-full w-8 bg-gradient-to-l from-background to-transparent sm:hidden"
+          />
+        </div>
 
         <TabsContent value="overview" className="mt-4">
           <div className="rounded-lg border border-border bg-card p-4">

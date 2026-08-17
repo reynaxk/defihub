@@ -80,6 +80,25 @@ abstraction layer exists specifically so this can change later — a
 `DefiDataProvider` backed by an indexer is a drop-in replacement — but there
 was no reason to build and pay for that infrastructure before it's needed.
 
+### On-chain verification (the one deliberate exception)
+
+`lib/onchain/` reads two ERC-20 `balanceOf` values directly from a free
+public Ethereum RPC endpoint for one hand-picked, well-understood pool
+(Uniswap V3 USDC/WETH 0.05% — see `lib/onchain/config.ts`), and shows the
+resulting TVL on the Uniswap protocol page as an independent cross-check
+next to the DefiLlama figure. This is not the start of a general indexer:
+`VERIFIED_POOLS` is a short, hand-maintained list, each entry needs a human
+to confirm the contract addresses and that a plain balance read is actually
+the right TVL formula for that pool (true for a simple Uniswap V3 pool,
+*not* true for something like an Aave reserve, which needs aToken
+exchange-rate/debt accounting to get right — see the section above). Adding
+a new protocol here means adding a new, individually-reasoned entry, not
+extending a codebase that reads arbitrary contracts generically.
+
+Cost: zero — a public RPC endpoint, no paid tier, refreshed every 30 minutes
+by `workers/onchain/verify.ts` (`ETH_RPC_URL` env var lets you swap in a paid
+provider later if the public endpoint gets rate-limited).
+
 ## Graceful degradation
 
 No single failing dependency should take down the rest of the app. In

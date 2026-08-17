@@ -196,6 +196,27 @@ export const protocolAiSummaries = pgTable("protocol_ai_summaries", {
 });
 
 // ---------------------------------------------------------------------------
+// On-chain verification
+//
+// A small, deliberately bounded exception to "no direct RPC" (see
+// docs/architecture.md): for a handful of hand-picked, well-understood
+// on-chain reads (currently one Uniswap V3 pool's raw token balances), we
+// read directly from a public Ethereum RPC and show the result as an
+// independent cross-check next to the aggregator-sourced number. Each row is
+// keyed by a stable slug (`lib/onchain/config.ts`), not auto-discovered.
+// ---------------------------------------------------------------------------
+
+export const onchainVerifications = pgTable("onchain_verifications", {
+  key: varchar("key", { length: 64 }).primaryKey(),
+  protocolId: uuid("protocol_id").references(() => protocols.id, { onDelete: "cascade" }),
+  label: text("label").notNull(),
+  poolAddress: varchar("pool_address", { length: 128 }).notNull(),
+  tvlUsd: numeric("tvl_usd", { precision: 24, scale: 2 }).notNull(),
+  blockNumber: numeric("block_number", { precision: 20, scale: 0 }).notNull(),
+  verifiedAt: timestamp("verified_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// ---------------------------------------------------------------------------
 // Auth.js (users / OAuth accounts / verification tokens)
 // JWT session strategy is used (required by the Credentials provider), so no
 // `sessions` table is needed.
@@ -319,6 +340,7 @@ export const protocolsRelations = relations(protocols, ({ many }) => ({
   protocolChains: many(protocolChains),
   metrics: many(protocolMetrics),
   yieldPools: many(yieldPools),
+  onchainVerifications: many(onchainVerifications),
 }));
 
 export const protocolChainsRelations = relations(protocolChains, ({ one }) => ({
@@ -380,4 +402,11 @@ export const watchlistRelations = relations(watchlist, ({ one }) => ({
 
 export const alertsRelations = relations(alerts, ({ one }) => ({
   user: one(users, { fields: [alerts.userId], references: [users.id] }),
+}));
+
+export const onchainVerificationsRelations = relations(onchainVerifications, ({ one }) => ({
+  protocol: one(protocols, {
+    fields: [onchainVerifications.protocolId],
+    references: [protocols.id],
+  }),
 }));

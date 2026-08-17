@@ -8,11 +8,13 @@ import { WatchlistButton } from "@/components/shared/watchlist-button";
 import { StatTile } from "@/components/stats/stat-tile";
 import { TvlAreaChart } from "@/components/charts/tvl-area-chart";
 import { AiSummaryCard } from "@/components/protocols/ai-summary-card";
+import { OnchainVerificationCard } from "@/components/protocols/onchain-verification-card";
 import { getProtocolBySlug } from "@/lib/database/queries/protocols";
 import { isWatchingProtocol } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
 import { formatUsd } from "@/lib/format";
 import { getCachedProtocolSummary, isAiSummaryAvailable } from "@/lib/ai/protocol-summary";
+import { getVerificationsForProtocol } from "@/lib/onchain/verify-pool";
 
 export const revalidate = 300;
 
@@ -38,9 +40,10 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
   if (!data) notFound();
 
   const { protocol, chains, history, latest } = data;
-  const [watching, cachedSummary] = await Promise.all([
+  const [watching, cachedSummary, verifications] = await Promise.all([
     isWatchingProtocol(session?.user?.id, protocol.id),
     getCachedProtocolSummary(protocol.id),
+    getVerificationsForProtocol(protocol.id),
   ]);
 
   return (
@@ -104,6 +107,8 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
         <TvlAreaChart data={history.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))} />
       </div>
+
+      <OnchainVerificationCard verifications={verifications} />
 
       <AiSummaryCard
         slug={protocol.slug}

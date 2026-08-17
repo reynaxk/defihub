@@ -17,7 +17,8 @@
     "sync:yields": "dotenv -e .env.local -- tsx workers/yields/sync.ts",
     "sync:prices": "dotenv -e .env.local -- tsx workers/prices/sync.ts",
     "sync:tokens": "dotenv -e .env.local -- tsx workers/tokens/sync.ts",
-    "sync:all": "npm run sync:chains && npm run sync:protocols && npm run sync:yields && npm run sync:prices && npm run sync:tokens",
+    "verify:onchain": "dotenv -e .env.local -- tsx workers/onchain/verify.ts",
+    "sync:all": "npm run sync:chains && npm run sync:protocols && npm run sync:yields && npm run sync:prices && npm run sync:tokens && npm run verify:onchain",
     "check:alerts": "dotenv -e .env.local -- tsx workers/alerts/check.ts"
   },
   "dependencies": {

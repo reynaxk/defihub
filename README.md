@@ -43,6 +43,7 @@ Fill in `DATABASE_URL` at minimum. Everything else is optional:
 | `COINGECKO_API_KEY` | No | Price/token sync uses the public rate limit (~5-15 req/min) instead of the free Demo plan's 100 req/min |
 | `ANTHROPIC_API_KEY` | No | The "AI summary" button on protocol pages doesn't render |
 | `RESEND_API_KEY` | No | Alert emails are logged to the console instead of sent |
+| `ETH_RPC_URL` | No | Falls back to a free public Ethereum RPC endpoint for the on-chain verification check |
 
 ### 4. Set up the database
 
@@ -59,6 +60,7 @@ npm run sync:protocols
 npm run sync:yields
 npm run sync:prices
 npm run sync:tokens
+npm run verify:onchain
 ```
 
 (Or `npm run sync:all` for everything except chains, which is run separately since it backfills full history.)
@@ -93,6 +95,7 @@ lib/
   database/            Drizzle schema, migrations, client, query modules
   providers/           DefiLlama + CoinGecko adapters behind provider interfaces
   ai/                  Claude API protocol-summary generation (optional, cached)
+  onchain/             Direct-RPC read for one hand-picked pool (independent cross-check, not an indexer)
   alerts/              Pure alert-condition evaluation logic (unit tested)
   notifications/       Email abstraction (Resend or console fallback)
   security/            In-memory rate limiter

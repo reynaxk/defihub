@@ -142,10 +142,12 @@ export default function ApiDocsPage() {
         <EndpointDoc
           method="GET"
           path="/api/v1/tokens"
-          description="Top ~250 tokens by market cap, cross-referenced onto supported chains. One row per chain a token is deployed on."
+          description="Top tokens by market cap, cross-referenced onto supported chains. One row per chain a token is deployed on."
           params={[
+            { name: "page", type: "number", description: "1-indexed page number (default 1)" },
+            { name: "pageSize", type: "number", description: "Results per page, max 100 (default 50)" },
             { name: "chain", type: "string", description: "Filter to a chain slug, e.g. ethereum" },
-            { name: "sort", type: "marketCap | price | volume24h", description: "Sort order (default marketCap)" },
+            { name: "sort", type: "marketCap | price | volume24h | priceChange24h", description: "Sort order (default marketCap)" },
           ]}
           exampleResponse={`{
   "data": [
@@ -162,7 +164,8 @@ export default function ApiDocsPage() {
       "marketCap": 183009723480,
       "volume24h": 16210930386
     }
-  ]
+  ],
+  "pagination": { "page": 1, "pageSize": 50, "total": 373, "totalPages": 8 }
 }`}
         />
 

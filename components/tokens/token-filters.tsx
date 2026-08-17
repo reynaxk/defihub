@@ -22,6 +22,9 @@ export function TokenFilters({ chains }: { chains: { slug: string; name: string 
     const params = new URLSearchParams(searchParams.toString());
     if (value && value !== ALL) params.set(key, value);
     else params.delete(key);
+    // A filter/sort change can invalidate the current page number (e.g.
+    // page 5 of an unfiltered list may not exist once a filter narrows it).
+    params.delete("page");
     startTransition(() => router.push(`/tokens?${params.toString()}`));
   }
 

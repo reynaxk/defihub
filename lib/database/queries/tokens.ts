@@ -1,6 +1,7 @@
-import { and, asc, desc, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, tokenPrices, tokens } from "@/lib/database/schema";
+import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
 
 // One row per token: the most recent token_prices snapshot. Tokens sync at
 // different cadences (the tokens worker writes an initial point, the prices
@@ -49,40 +50,38 @@ export interface TokenListItem {
 
 export type TokenSort = "marketCap" | "price" | "volume24h" | "priceChange24h";
 
-export async function getTokensList(
-  opts: { chainSlug?: string; sort?: TokenSort } = {},
-): Promise<TokenListItem[]> {
-  const conditions = opts.chainSlug ? [eq(chains.slug, opts.chainSlug)] : [];
+function tokenListColumns() {
+  return {
+    id: tokens.id,
+    address: tokens.address,
+    symbol: tokens.symbol,
+    name: tokens.name,
+    logoUrl: tokens.logoUrl,
+    chainName: chains.name,
+    chainSlug: chains.slug,
+    priceUsd: latestPricePerToken.priceUsd,
+    marketCap: latestPricePerToken.marketCap,
+    volume24h: latestPricePerToken.volume24h,
+    priceChange24h: latestPricePerToken.priceChange24h,
+  };
+}
 
-  const orderColumn =
-    opts.sort === "price"
-      ? latestPricePerToken.priceUsd
-      : opts.sort === "volume24h"
-        ? latestPricePerToken.volume24h
-        : opts.sort === "priceChange24h"
-          ? latestPricePerToken.priceChange24h
-          : latestPricePerToken.marketCap;
+function tokenSortColumn(sort: TokenSort | undefined) {
+  switch (sort) {
+    case "price":
+      return latestPricePerToken.priceUsd;
+    case "volume24h":
+      return latestPricePerToken.volume24h;
+    case "priceChange24h":
+      return latestPricePerToken.priceChange24h;
+    default:
+      return latestPricePerToken.marketCap;
+  }
+}
 
-  const rows = await db
-    .select({
-      id: tokens.id,
-      address: tokens.address,
-      symbol: tokens.symbol,
-      name: tokens.name,
-      logoUrl: tokens.logoUrl,
-      chainName: chains.name,
-      chainSlug: chains.slug,
-      priceUsd: latestPricePerToken.priceUsd,
-      marketCap: latestPricePerToken.marketCap,
-      volume24h: latestPricePerToken.volume24h,
-      priceChange24h: latestPricePerToken.priceChange24h,
-    })
-    .from(tokens)
-    .innerJoin(chains, eq(chains.id, tokens.chainId))
-    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
-    .where(conditions.length ? and(...conditions) : undefined)
-    .orderBy(sql`${orderColumn} desc nulls last`);
-
+function normalizeTokenRows<T extends { priceUsd: string | null; marketCap: string | null; volume24h: string | null; priceChange24h: string | null }>(
+  rows: T[],
+) {
   return rows.map((r) => ({
     ...r,
     priceUsd: r.priceUsd != null ? Number(r.priceUsd) : null,
@@ -90,6 +89,71 @@ export async function getTokensList(
     volume24h: r.volume24h != null ? Number(r.volume24h) : null,
     priceChange24h: r.priceChange24h != null ? Number(r.priceChange24h) : null,
   }));
+}
+
+// Unpaginated - used by CSV export, the v1 API's simple mode, and the chain
+// page's "top tokens on this chain" slice, none of which want a page/total
+// envelope. ~370 tokens today across 5 chains; fine to fetch in one shot.
+export async function getTokensList(
+  opts: { chainSlug?: string; sort?: TokenSort } = {},
+): Promise<TokenListItem[]> {
+  const conditions = opts.chainSlug ? [eq(chains.slug, opts.chainSlug)] : [];
+  const orderColumn = tokenSortColumn(opts.sort);
+
+  const rows = await db
+    .select(tokenListColumns())
+    .from(tokens)
+    .innerJoin(chains, eq(chains.id, tokens.chainId))
+    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+    .where(conditions.length ? and(...conditions) : undefined)
+    .orderBy(sql`${orderColumn} desc nulls last`);
+
+  return normalizeTokenRows(rows);
+}
+
+export interface PaginatedTokens {
+  items: TokenListItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export async function getTokensPageList(
+  opts: { chainSlug?: string; sort?: TokenSort; page?: number; pageSize?: number } = {},
+): Promise<PaginatedTokens> {
+  const { page, pageSize } = normalizePagination(opts);
+  const conditions = opts.chainSlug ? [eq(chains.slug, opts.chainSlug)] : [];
+  const where = conditions.length ? and(...conditions) : undefined;
+  const orderColumn = tokenSortColumn(opts.sort);
+
+  const [rows, countRows] = await Promise.all([
+    db
+      .select(tokenListColumns())
+      .from(tokens)
+      .innerJoin(chains, eq(chains.id, tokens.chainId))
+      .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+      .where(where)
+      .orderBy(sql`${orderColumn} desc nulls last`)
+      .limit(pageSize)
+      .offset((page - 1) * pageSize),
+    db
+      .select({ value: count() })
+      .from(tokens)
+      .innerJoin(chains, eq(chains.id, tokens.chainId))
+      .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+      .where(where),
+  ]);
+
+  const total = countRows[0]?.value ?? 0;
+
+  return {
+    items: normalizeTokenRows(rows),
+    page,
+    pageSize,
+    total,
+    totalPages: computeTotalPages(total, pageSize),
+  };
 }
 
 export interface TokenMover {

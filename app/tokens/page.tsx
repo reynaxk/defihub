@@ -2,7 +2,8 @@ import type { Metadata } from "next";
 import { TokensTable } from "@/components/tokens/tokens-table";
 import { TokenFilters } from "@/components/tokens/token-filters";
 import { ExportCsvButton } from "@/components/shared/export-csv-button";
-import { getTokensList, type TokenSort } from "@/lib/database/queries/tokens";
+import { Pagination } from "@/components/shared/pagination";
+import { getTokensPageList, type TokenSort } from "@/lib/database/queries/tokens";
 import { getAllChains } from "@/lib/database/queries/chains";
 
 export const metadata: Metadata = {
@@ -24,21 +25,36 @@ const SORT_DESCRIPTIONS: Record<TokenSort, string> = {
 export default async function TokensPage({
   searchParams,
 }: {
-  searchParams: Promise<{ chain?: string; sort?: string }>;
+  searchParams: Promise<{ chain?: string; sort?: string; page?: string }>;
 }) {
   const params = await searchParams;
   const sort = VALID_SORTS.includes(params.sort as TokenSort) ? (params.sort as TokenSort) : "marketCap";
+  const page = Math.max(1, Number(params.page) || 1);
 
-  const [tokens, chains] = await Promise.all([
-    getTokensList({ chainSlug: params.chain, sort }),
+  const [result, chains] = await Promise.all([
+    getTokensPageList({ chainSlug: params.chain, sort, page }),
     getAllChains(),
   ]);
+
+  const firstRow = (page - 1) * result.pageSize + 1;
+  const lastRow = Math.min(result.total, page * result.pageSize);
+
+  function buildHref(targetPage: number) {
+    const query = new URLSearchParams();
+    if (params.chain) query.set("chain", params.chain);
+    if (params.sort) query.set("sort", params.sort);
+    if (targetPage > 1) query.set("page", String(targetPage));
+    const qs = query.toString();
+    return qs ? `/tokens?${qs}` : "/tokens";
+  }
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <h1 className="text-2xl font-semibold tracking-tight">Tokens</h1>
       <p className="mt-1 text-muted-foreground">
-        {tokens.length} tokens tracked across supported chains, ranked by {SORT_DESCRIPTIONS[sort]}
+        {result.total === 0
+          ? "No tokens match these filters"
+          : `Showing ${firstRow.toLocaleString()}–${lastRow.toLocaleString()} of ${result.total.toLocaleString()} tokens, ranked by ${SORT_DESCRIPTIONS[sort]}`}
       </p>
 
       <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -47,8 +63,10 @@ export default async function TokensPage({
       </div>
 
       <div className="mt-4">
-        <TokensTable tokens={tokens} />
+        <TokensTable tokens={result.items} />
       </div>
+
+      <Pagination page={page} totalPages={result.totalPages} buildHref={buildHref} />
     </div>
   );
 }

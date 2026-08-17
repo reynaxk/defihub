@@ -22,7 +22,7 @@ export async function generateMetadata({
   const data = await getTokenByAddress(address);
   if (!data) return {};
   return {
-    title: data.token.symbol,
+    title: `${data.token.symbol} — Price, Market Cap & Chart`,
     description: `${data.token.symbol} price and market history on ${data.chain.name}, tracked live on DeFiHub.`,
   };
 }

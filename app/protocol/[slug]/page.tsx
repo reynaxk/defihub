@@ -32,7 +32,7 @@ export async function generateMetadata({
   const data = await getProtocolBySlug(slug);
   if (!data) return {};
   return {
-    title: data.protocol.name,
+    title: `${data.protocol.name} — TVL, Fees, Revenue & DeFi Analytics`,
     description:
       data.protocol.description ??
       `${data.protocol.name} TVL, fees, revenue and volume, tracked live on DeFiHub.`,

@@ -31,7 +31,7 @@ export async function generateMetadata({
   const data = await getChainBySlug(slug);
   if (!data) return {};
   return {
-    title: data.chain.name,
+    title: `${data.chain.name} — TVL, Top Protocols & DeFi Analytics`,
     description: `${data.chain.name} total value locked and top protocols, tracked live on DeFiHub.`,
   };
 }

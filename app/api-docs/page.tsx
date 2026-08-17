@@ -3,7 +3,7 @@ import { EndpointDoc } from "@/components/api-docs/endpoint-doc";
 
 export const metadata: Metadata = {
   title: "API",
-  description: "Free, read-only JSON API for ChainScope's protocol, chain and yield data.",
+  description: "Free, read-only JSON API for DeFiHub's protocol, chain and yield data.",
 };
 
 export default function ApiDocsPage() {

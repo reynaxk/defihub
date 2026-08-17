@@ -22,14 +22,14 @@ const siteUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: "ChainScope — DeFi Analytics",
-    template: "%s — ChainScope",
+    default: "DeFiHub — DeFi Intelligence, All In One Place",
+    template: "%s — DeFiHub",
   },
   description:
     "Track TVL, fees, revenue and yields across DeFi protocols and chains, in real time.",
   openGraph: {
     type: "website",
-    siteName: "ChainScope",
+    siteName: "DeFiHub",
   },
 };
 

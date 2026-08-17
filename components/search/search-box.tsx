@@ -31,10 +31,17 @@ export function SearchBox({ className }: { className?: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // "/" focuses search from anywhere, unless the user is already typing
-  // somewhere else (an input, textarea, or contenteditable).
+  // Cmd/Ctrl+K focuses search from anywhere, always (even mid-typing, the
+  // standard convention). "/" is a secondary shortcut that backs off if the
+  // user is already typing somewhere else.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
+      const isCmdK = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k";
+      if (isCmdK) {
+        e.preventDefault();
+        inputRef.current?.focus();
+        return;
+      }
       if (e.key !== "/") return;
       const target = e.target as HTMLElement | null;
       const isTyping =
@@ -105,7 +112,7 @@ export function SearchBox({ className }: { className?: string }) {
           className="h-8 w-full rounded-lg border border-border bg-background py-1.5 pr-10 pl-8 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
         />
         <kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-          /
+          ⌘K
         </kbd>
       </div>
 

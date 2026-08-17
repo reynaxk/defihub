@@ -1,7 +1,7 @@
 import { Resend } from "resend";
 
 const apiKey = process.env.RESEND_API_KEY;
-const fromAddress = process.env.ALERTS_FROM_EMAIL || "alerts@chainscope.dev";
+const fromAddress = process.env.ALERTS_FROM_EMAIL || "alerts@defihub.dev";
 
 const resend = apiKey ? new Resend(apiKey) : null;
 

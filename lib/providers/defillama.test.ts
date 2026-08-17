@@ -37,6 +37,8 @@ describe("DefiLlamaProvider", () => {
             chains: ["Ethereum"],
             tvl: 17_880_000_000,
             chainTvls: { Ethereum: 17_880_000_000 },
+            change_1d: 1.23,
+            change_7d: -4.56,
           },
         ]),
       );
@@ -56,6 +58,8 @@ describe("DefiLlamaProvider", () => {
           chains: ["Ethereum"],
           tvl: 17_880_000_000,
           tvlByChain: { Ethereum: 17_880_000_000 },
+          tvlChange1d: 1.23,
+          tvlChange7d: -4.56,
         },
       ]);
     });
@@ -75,6 +79,8 @@ describe("DefiLlamaProvider", () => {
       expect(protocol.tvl).toBeNull();
       expect(protocol.chains).toEqual([]);
       expect(protocol.tvlByChain).toEqual({});
+      expect(protocol.tvlChange1d).toBeNull();
+      expect(protocol.tvlChange7d).toBeNull();
     });
   });
 

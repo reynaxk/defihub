@@ -47,6 +47,8 @@ const protocolSchema = z.object({
   chains: z.array(z.string()).default([]),
   tvl: z.number().nullable().optional(),
   chainTvls: z.record(z.string(), z.number()).default({}),
+  change_1d: z.number().nullable().optional(),
+  change_7d: z.number().nullable().optional(),
 });
 
 const protocolsResponseSchema = z.array(protocolSchema);
@@ -63,6 +65,8 @@ function toNormalizedProtocol(p: z.infer<typeof protocolSchema>): NormalizedProt
     chains: p.chains,
     tvl: p.tvl ?? null,
     tvlByChain: p.chainTvls,
+    tvlChange1d: p.change_1d ?? null,
+    tvlChange7d: p.change_7d ?? null,
   };
 }
 

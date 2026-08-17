@@ -3,7 +3,7 @@ import postgres from "postgres";
 import * as schema from "./schema";
 
 declare global {
-  var __chainscopeDbClient: postgres.Sql | undefined;
+  var __defihubDbClient: postgres.Sql | undefined;
 }
 
 const connectionString = process.env.DATABASE_URL;
@@ -17,11 +17,11 @@ if (!connectionString) {
 // Reuse the connection across hot reloads in dev so we don't exhaust Postgres
 // connection slots every time a route file changes.
 const client =
-  globalThis.__chainscopeDbClient ??
+  globalThis.__defihubDbClient ??
   postgres(connectionString, { max: process.env.NODE_ENV === "production" ? 10 : 1 });
 
 if (process.env.NODE_ENV !== "production") {
-  globalThis.__chainscopeDbClient = client;
+  globalThis.__defihubDbClient = client;
 }
 
 export const db = drizzle(client, { schema });

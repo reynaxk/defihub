@@ -93,7 +93,7 @@ function alertEmailHtml(params: {
   condition: string;
 }): string {
   return `
-    <p>A ChainScope alert you created has triggered.</p>
+    <p>A DeFiHub alert you created has triggered.</p>
     <p><strong>${params.displayName}</strong> is now <strong>${params.current.toLocaleString()}</strong>,
     which is ${params.condition.replace(/_/g, " ")} your threshold of ${params.threshold.toLocaleString()}.</p>
   `;
@@ -140,7 +140,7 @@ export async function checkAlerts() {
     if (fires) {
       await sendEmail({
         to: userEmail,
-        subject: `ChainScope alert: ${reading.displayName}`,
+        subject: `DeFiHub alert: ${reading.displayName}`,
         html: alertEmailHtml({
           displayName: reading.displayName,
           current: reading.current,

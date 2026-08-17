@@ -37,7 +37,7 @@ export default function OpengraphImage() {
             <div style={{ width: 8, height: 20, background: "#ffffff", borderRadius: 2.5 }} />
             <div style={{ width: 8, height: 28, background: "#ffffff", borderRadius: 2.5 }} />
           </div>
-          <div style={{ fontSize: 40, fontWeight: 700, letterSpacing: -0.5 }}>ChainScope</div>
+          <div style={{ fontSize: 40, fontWeight: 700, letterSpacing: -0.5 }}>DeFiHub</div>
         </div>
         <div style={{ display: "flex", fontSize: 56, fontWeight: 700, marginTop: 56, maxWidth: 900 }}>
           DeFi data, tracked clearly.

@@ -16,5 +16,5 @@ export async function GET(request: Request) {
     { header: "TVL (USD)", value: (r) => r.tvl },
   ]);
 
-  return csvResponse("chainscope-chains.csv", csv);
+  return csvResponse("defihub-chains.csv", csv);
 }

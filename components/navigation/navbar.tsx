@@ -32,7 +32,7 @@ export async function Navbar() {
           <MobileNav links={mobileLinks} />
           <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight">
             <LineChart className="size-5 text-primary" strokeWidth={2.5} />
-            <span>ChainScope</span>
+            <span>DeFiHub</span>
           </Link>
           <nav className="hidden items-center gap-5 text-sm text-muted-foreground sm:flex">
             {NAV_LINKS.map((link) => (

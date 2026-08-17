@@ -1,6 +1,7 @@
 import { desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chainMetrics, chains, protocolMetrics, protocols } from "@/lib/database/schema";
+import { computeTvlChanges, type TvlChanges } from "./tvl-change";
 
 export interface ChainListItem {
   id: string;
@@ -9,36 +10,66 @@ export interface ChainListItem {
   logoUrl: string | null;
   nativeToken: string;
   tvl: number | null;
+  change24h: number | null;
+  change7d: number | null;
+  change30d: number | null;
 }
 
 export async function getTopChains(): Promise<ChainListItem[]> {
-  const latestPerChain = db
-    .select({
-      chainId: chainMetrics.chainId,
-      ts: sql<Date>`max(${chainMetrics.timestamp})`.as("ts"),
-    })
-    .from(chainMetrics)
-    .groupBy(chainMetrics.chainId)
-    .as("latest_per_chain");
+  const chainRows = await db.select().from(chains);
 
+  // Only ever 5-10 chains, each with a modest daily-point history - cheaper
+  // and simpler to compute changes in JS from the full set than to express
+  // "value at latest, 1d-ago, 7d-ago, 30d-ago" as one SQL query per chain.
+  const allMetrics = await db
+    .select({ chainId: chainMetrics.chainId, timestamp: chainMetrics.timestamp, tvl: chainMetrics.tvl })
+    .from(chainMetrics)
+    .orderBy(chainMetrics.timestamp);
+
+  const byChain = new Map<string, { timestamp: Date; tvl: number | null }[]>();
+  for (const m of allMetrics) {
+    const list = byChain.get(m.chainId) ?? [];
+    list.push({ timestamp: m.timestamp, tvl: m.tvl != null ? Number(m.tvl) : null });
+    byChain.set(m.chainId, list);
+  }
+
+  const items = chainRows.map((chain) => {
+    const changes = computeTvlChanges(byChain.get(chain.id) ?? []);
+    return {
+      id: chain.id,
+      name: chain.name,
+      slug: chain.slug,
+      logoUrl: chain.logoUrl,
+      nativeToken: chain.nativeToken,
+      tvl: changes.latest,
+      change24h: changes.change24h,
+      change7d: changes.change7d,
+      change30d: changes.change30d,
+    };
+  });
+
+  return items.sort((a, b) => (b.tvl ?? 0) - (a.tvl ?? 0));
+}
+
+export async function getGlobalTvlHistory(): Promise<{ timestamp: Date; tvl: number }[]> {
   const rows = await db
     .select({
-      id: chains.id,
-      name: chains.name,
-      slug: chains.slug,
-      logoUrl: chains.logoUrl,
-      nativeToken: chains.nativeToken,
-      tvl: chainMetrics.tvl,
+      day: sql<Date>`date_trunc('day', ${chainMetrics.timestamp})`.as("day"),
+      tvl: sql<string>`sum(${chainMetrics.tvl})`.as("tvl"),
     })
-    .from(chains)
-    .leftJoin(latestPerChain, eq(latestPerChain.chainId, chains.id))
-    .leftJoin(
-      chainMetrics,
-      sql`${chainMetrics.chainId} = ${latestPerChain.chainId} and ${chainMetrics.timestamp} = ${latestPerChain.ts}`,
-    )
-    .orderBy(desc(chainMetrics.tvl));
+    .from(chainMetrics)
+    .groupBy(sql`date_trunc('day', ${chainMetrics.timestamp})`)
+    .orderBy(sql`date_trunc('day', ${chainMetrics.timestamp})`);
 
-  return rows.map((r) => ({ ...r, tvl: r.tvl != null ? Number(r.tvl) : null }));
+  // `date_trunc` on a raw sql fragment comes back from the postgres driver
+  // as a string, not a parsed Date, despite the sql<Date> type hint -
+  // coerce explicitly rather than trusting that annotation at runtime.
+  return rows.map((r) => ({ timestamp: new Date(r.day), tvl: Number(r.tvl) }));
+}
+
+export async function getGlobalTvlChanges(): Promise<TvlChanges> {
+  const history = await getGlobalTvlHistory();
+  return computeTvlChanges(history);
 }
 
 export async function getChainBySlug(slug: string) {
@@ -72,6 +103,8 @@ export async function getChainBySlug(slug: string) {
             volume24h: sql<string | null>`null`,
             fees24h: sql<string | null>`null`,
             revenue24h: sql<string | null>`null`,
+            tvlChange1d: sql<string | null>`null`,
+            tvlChange7d: sql<string | null>`null`,
           })
           .from(protocolMetrics)
           .innerJoin(protocols, eq(protocolMetrics.protocolId, protocols.id))
@@ -80,17 +113,25 @@ export async function getChainBySlug(slug: string) {
           .limit(50)
       : [];
 
+  const normalizedHistory = history.map((h) => ({
+    timestamp: h.timestamp,
+    tvl: h.tvl != null ? Number(h.tvl) : null,
+  }));
+
   return {
     chain,
-    history: history.map((h) => ({ timestamp: h.timestamp, tvl: h.tvl != null ? Number(h.tvl) : null })),
+    history: normalizedHistory,
     topProtocols: topProtocols.map((p) => ({
       ...p,
       tvl: p.tvl != null ? Number(p.tvl) : null,
       volume24h: null,
       fees24h: null,
       revenue24h: null,
+      tvlChange1d: null,
+      tvlChange7d: null,
     })),
-    latestTvl: history.length > 0 ? Number(history[history.length - 1].tvl ?? 0) : null,
+    latestTvl: normalizedHistory.length > 0 ? normalizedHistory[normalizedHistory.length - 1].tvl : null,
+    changes: computeTvlChanges(normalizedHistory),
   };
 }
 

@@ -1,12 +1,14 @@
 import Link from "next/link";
-import { ArrowRight, Coins, Layers, Sprout, Wallet } from "lucide-react";
+import { ArrowRight, Coins, DollarSign, Layers, Sprout, Wallet } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { StatTile } from "@/components/stats/stat-tile";
+import { PercentChange } from "@/components/shared/percent-change";
+import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
 import { ProtocolsTable } from "@/components/protocols/protocols-table";
 import { ChainsTable } from "@/components/chains/chains-table";
 import { TopMovers } from "@/components/tokens/top-movers";
-import { getProtocolCount, getTopProtocols } from "@/lib/database/queries/protocols";
-import { getTopChains } from "@/lib/database/queries/chains";
+import { getGlobal24hTotals, getProtocolCount, getTopProtocols } from "@/lib/database/queries/protocols";
+import { getGlobalTvlChanges, getGlobalTvlHistory, getTopChains } from "@/lib/database/queries/chains";
 import { getYieldPoolCount } from "@/lib/database/queries/yields";
 import { getTopMovers } from "@/lib/database/queries/tokens";
 import { formatUsd } from "@/lib/format";
@@ -15,12 +17,24 @@ import { SUPPORTED_CHAINS } from "@/lib/config/chains";
 export const revalidate = 300;
 
 export default async function HomePage() {
-  const [topProtocols, topChains, protocolCount, yieldPoolCount, movers] = await Promise.all([
+  const [
+    topProtocols,
+    topChains,
+    protocolCount,
+    yieldPoolCount,
+    movers,
+    globalHistory,
+    globalChanges,
+    global24h,
+  ] = await Promise.all([
     getTopProtocols(10),
     getTopChains(),
     getProtocolCount(),
     getYieldPoolCount(),
     getTopMovers(5),
+    getGlobalTvlHistory(),
+    getGlobalTvlChanges(),
+    getGlobal24hTotals(),
   ]);
 
   const totalTvl = topChains.reduce((sum, c) => sum + (c.tvl ?? 0), 0);
@@ -29,31 +43,40 @@ export default async function HomePage() {
     <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6">
       <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 flex flex-col items-start gap-4 py-8 duration-700 sm:py-12">
         <h1 className="max-w-2xl text-4xl font-semibold tracking-tight sm:text-5xl">
-          DeFi data, tracked clearly.
+          DeFi intelligence, all in one place.
         </h1>
         <p className="max-w-xl text-lg text-muted-foreground">
-          ChainScope aggregates TVL, fees, revenue and yield data across {SUPPORTED_CHAINS.length}{" "}
-          chains into one clean dashboard — so you can see what&apos;s actually happening on-chain.
+          DeFiHub tracks TVL, volume, fees, revenue and yields across {SUPPORTED_CHAINS.length}{" "}
+          chains and thousands of protocols — one clean dashboard for what&apos;s actually happening on-chain.
         </p>
         <div className="flex flex-wrap items-center gap-3 pt-2">
           <Button
             size="lg"
             render={
               <Link href="/protocols">
-                Explore protocols <ArrowRight className="size-4" />
+                Explore DeFi <ArrowRight className="size-4" />
               </Link>
             }
           />
-          <Button size="lg" variant="outline" render={<Link href="/yields">Find yield</Link>} />
+          <Button size="lg" variant="outline" render={<Link href="/protocols">Explore protocols</Link>} />
         </div>
       </section>
 
-      <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 grid grid-cols-2 gap-3 py-6 delay-150 duration-700 sm:grid-cols-4">
+      <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 grid grid-cols-2 gap-3 py-6 delay-150 duration-700 sm:grid-cols-3 lg:grid-cols-5">
         <StatTile
           label="Total value locked"
           value={formatUsd(totalTvl)}
           icon={Wallet}
           animate={{ value: totalTvl, format: "usd" }}
+        />
+        <StatTile label="24h TVL change" customValue={<PercentChange value={globalChanges.change24h} />} />
+        <StatTile label="7d TVL change" customValue={<PercentChange value={globalChanges.change7d} />} />
+        <StatTile label="30d TVL change" customValue={<PercentChange value={globalChanges.change30d} />} />
+        <StatTile
+          label="Chains supported"
+          value={String(SUPPORTED_CHAINS.length)}
+          icon={Coins}
+          animate={{ value: SUPPORTED_CHAINS.length, format: "count" }}
         />
         <StatTile
           label="Protocols tracked"
@@ -68,11 +91,32 @@ export default async function HomePage() {
           animate={{ value: yieldPoolCount, format: "count" }}
         />
         <StatTile
-          label="Chains supported"
-          value={String(SUPPORTED_CHAINS.length)}
-          icon={Coins}
-          animate={{ value: SUPPORTED_CHAINS.length, format: "count" }}
+          label="24h volume"
+          value={formatUsd(global24h.volume24h)}
+          icon={DollarSign}
+          animate={global24h.volume24h != null ? { value: global24h.volume24h, format: "usd" } : undefined}
         />
+        <StatTile
+          label="24h fees"
+          value={formatUsd(global24h.fees24h)}
+          animate={global24h.fees24h != null ? { value: global24h.fees24h, format: "usd" } : undefined}
+        />
+        <StatTile
+          label="24h revenue"
+          value={formatUsd(global24h.revenue24h)}
+          animate={global24h.revenue24h != null ? { value: global24h.revenue24h, format: "usd" } : undefined}
+        />
+      </section>
+
+      <section className="py-8">
+        <h2 className="mb-4 text-xl font-semibold tracking-tight">Total DeFi TVL</h2>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <RangedAreaChart
+            data={globalHistory.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))}
+            height={320}
+            defaultRange="90d"
+          />
+        </div>
       </section>
 
       <section className="py-8">

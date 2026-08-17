@@ -1,10 +1,13 @@
 import Link from "next/link";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EntityLogo } from "@/components/shared/entity-logo";
-import { formatUsd } from "@/lib/format";
+import { PercentChange } from "@/components/shared/percent-change";
+import { formatPercent, formatUsd } from "@/lib/format";
 import type { ChainListItem } from "@/lib/database/queries/chains";
 
 export function ChainsTable({ chains }: { chains: ChainListItem[] }) {
+  const totalTvl = chains.reduce((sum, c) => sum + (c.tvl ?? 0), 0);
+
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <Table>
@@ -12,8 +15,10 @@ export function ChainsTable({ chains }: { chains: ChainListItem[] }) {
           <TableRow>
             <TableHead className="w-10">#</TableHead>
             <TableHead>Chain</TableHead>
-            <TableHead>Native token</TableHead>
+            <TableHead className="hidden sm:table-cell">Native token</TableHead>
             <TableHead className="text-right">TVL</TableHead>
+            <TableHead className="hidden text-right md:table-cell">24h</TableHead>
+            <TableHead className="hidden text-right lg:table-cell">% of total</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -26,8 +31,14 @@ export function ChainsTable({ chains }: { chains: ChainListItem[] }) {
                   {chain.name}
                 </Link>
               </TableCell>
-              <TableCell className="text-muted-foreground">{chain.nativeToken}</TableCell>
+              <TableCell className="hidden text-muted-foreground sm:table-cell">{chain.nativeToken}</TableCell>
               <TableCell className="text-right tabular-nums">{formatUsd(chain.tvl)}</TableCell>
+              <TableCell className="hidden text-right tabular-nums md:table-cell">
+                <PercentChange value={chain.change24h} />
+              </TableCell>
+              <TableCell className="hidden text-right tabular-nums text-muted-foreground lg:table-cell">
+                {chain.tvl != null && totalTvl > 0 ? formatPercent((chain.tvl / totalTvl) * 100) : "—"}
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>

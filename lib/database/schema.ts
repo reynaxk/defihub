@@ -98,6 +98,14 @@ export const protocolMetrics = pgTable(
     volume24h: numeric("volume_24h", { precision: 24, scale: 2 }),
     fees24h: numeric("fees_24h", { precision: 24, scale: 2 }),
     revenue24h: numeric("revenue_24h", { precision: 24, scale: 2 }),
+    // DefiLlama's own pre-computed TVL change, not derived from our
+    // snapshot history - `protocol_metrics` only accumulates one row per
+    // sync run, too sparse to compute a real 7d change from until this app
+    // has been running for weeks. Chain-level changes (lib/database/queries
+    // /tvl-change.ts) differ - chain history is fully backfilled, so those
+    // are computed locally instead.
+    tvlChange1d: numeric("tvl_change_1d", { precision: 10, scale: 4 }),
+    tvlChange7d: numeric("tvl_change_7d", { precision: 10, scale: 4 }),
   },
   (table) => [
     index("protocol_metrics_protocol_ts_idx").on(table.protocolId, table.timestamp),

@@ -21,7 +21,7 @@ export default function GlobalError({
     <html lang="en">
       <body className="flex min-h-screen items-center justify-center bg-background px-4 text-foreground">
         <div className="flex max-w-md flex-col items-center gap-4 text-center">
-          <h1 className="text-xl font-semibold tracking-tight">ChainScope hit an error</h1>
+          <h1 className="text-xl font-semibold tracking-tight">DeFiHub hit an error</h1>
           <p className="text-muted-foreground">
             The whole page failed to load. Try again in a moment.
           </p>

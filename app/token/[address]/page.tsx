@@ -23,7 +23,7 @@ export async function generateMetadata({
   if (!data) return {};
   return {
     title: data.token.symbol,
-    description: `${data.token.symbol} price and market history on ${data.chain.name}, tracked live on ChainScope.`,
+    description: `${data.token.symbol} price and market history on ${data.chain.name}, tracked live on DeFiHub.`,
   };
 }
 

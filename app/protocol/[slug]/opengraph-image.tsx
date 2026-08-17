@@ -46,7 +46,7 @@ export default async function OpengraphImage({ params }: { params: Promise<{ slu
             <div style={{ width: 5, height: 12, background: "#ffffff", borderRadius: 1.5 }} />
             <div style={{ width: 5, height: 17, background: "#ffffff", borderRadius: 1.5 }} />
           </div>
-          <div style={{ fontSize: 22, fontWeight: 600, color: "#a3a3a3" }}>ChainScope</div>
+          <div style={{ fontSize: 22, fontWeight: 600, color: "#a3a3a3" }}>DeFiHub</div>
         </div>
 
         <div style={{ display: "flex", fontSize: 64, fontWeight: 700, marginTop: 48, maxWidth: 1000 }}>{name}</div>

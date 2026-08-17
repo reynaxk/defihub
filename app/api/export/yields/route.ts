@@ -27,5 +27,5 @@ export async function GET(request: Request) {
     { header: "IL Risk", value: (r) => r.ilRisk },
   ]);
 
-  return csvResponse("chainscope-yields.csv", csv);
+  return csvResponse("defihub-yields.csv", csv);
 }

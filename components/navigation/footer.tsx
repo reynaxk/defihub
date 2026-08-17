@@ -5,7 +5,7 @@ export function Footer() {
     <footer className="border-t border-border/60">
       <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-8 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between sm:px-6">
         <p>
-          &copy; {new Date().getFullYear()} ChainScope. Protocol, chain and yield data via{" "}
+          &copy; {new Date().getFullYear()} DeFiHub. Protocol, chain and yield data via{" "}
           <a
             href="https://defillama.com"
             target="_blank"

@@ -4,8 +4,9 @@ import { notFound } from "next/navigation";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchlistButton } from "@/components/shared/watchlist-button";
 import { StatTile } from "@/components/stats/stat-tile";
-import { TvlAreaChart } from "@/components/charts/tvl-area-chart";
+import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
 import { ProtocolsTable } from "@/components/protocols/protocols-table";
+import { PercentChange } from "@/components/shared/percent-change";
 import { getChainBySlug } from "@/lib/database/queries/chains";
 import { isWatchingChain } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
@@ -23,7 +24,7 @@ export async function generateMetadata({
   if (!data) return {};
   return {
     title: data.chain.name,
-    description: `${data.chain.name} total value locked and top protocols, tracked live on ChainScope.`,
+    description: `${data.chain.name} total value locked and top protocols, tracked live on DeFiHub.`,
   };
 }
 
@@ -32,7 +33,7 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
   const [data, session] = await Promise.all([getChainBySlug(slug), auth()]);
   if (!data) notFound();
 
-  const { chain, history, topProtocols, latestTvl } = data;
+  const { chain, history, topProtocols, latestTvl, changes } = data;
   const watching = await isWatchingChain(session?.user?.id, chain.id);
 
   return (
@@ -60,12 +61,15 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
         </div>
       </div>
 
-      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3">
+      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <StatTile
           label="TVL"
           value={formatUsd(latestTvl)}
           animate={latestTvl != null ? { value: latestTvl, format: "usd" } : undefined}
         />
+        <StatTile label="24h change" customValue={<PercentChange value={changes.change24h} />} />
+        <StatTile label="7d change" customValue={<PercentChange value={changes.change7d} />} />
+        <StatTile label="30d change" customValue={<PercentChange value={changes.change30d} />} />
         <StatTile
           label="Protocols"
           value={String(topProtocols.length)}
@@ -77,7 +81,7 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
 
       <div className="mt-8 rounded-lg border border-border bg-card p-4">
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
-        <TvlAreaChart data={history.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))} />
+        <RangedAreaChart data={history.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))} />
       </div>
 
       <div className="mt-8">

@@ -23,6 +23,8 @@ export interface NormalizedProtocol {
   chains: string[]; // provider chain names, e.g. "Ethereum", "BSC"
   tvl: number | null;
   tvlByChain: Record<string, number>;
+  tvlChange1d: number | null; // percent, e.g. 3.45 = +3.45%, as reported by the provider
+  tvlChange7d: number | null;
 }
 
 export interface NormalizedProtocolFinancials {

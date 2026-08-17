@@ -24,5 +24,5 @@ export async function GET(request: Request) {
     { header: "24h Revenue (USD)", value: (r) => r.revenue24h },
   ]);
 
-  return csvResponse("chainscope-protocols.csv", csv);
+  return csvResponse("defihub-protocols.csv", csv);
 }

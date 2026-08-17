@@ -22,6 +22,8 @@ export interface ProtocolListItem {
   volume24h: number | null;
   fees24h: number | null;
   revenue24h: number | null;
+  tvlChange1d: number | null;
+  tvlChange7d: number | null;
 }
 
 export async function getTopProtocols(limit = 100): Promise<ProtocolListItem[]> {
@@ -36,6 +38,8 @@ export async function getTopProtocols(limit = 100): Promise<ProtocolListItem[]> 
       volume24h: protocolMetrics.volume24h,
       fees24h: protocolMetrics.fees24h,
       revenue24h: protocolMetrics.revenue24h,
+      tvlChange1d: protocolMetrics.tvlChange1d,
+      tvlChange7d: protocolMetrics.tvlChange7d,
     })
     .from(protocolMetrics)
     .innerJoin(protocols, eq(protocolMetrics.protocolId, protocols.id))
@@ -50,6 +54,8 @@ export async function getTopProtocols(limit = 100): Promise<ProtocolListItem[]> 
     volume24h: r.volume24h != null ? Number(r.volume24h) : null,
     fees24h: r.fees24h != null ? Number(r.fees24h) : null,
     revenue24h: r.revenue24h != null ? Number(r.revenue24h) : null,
+    tvlChange1d: r.tvlChange1d != null ? Number(r.tvlChange1d) : null,
+    tvlChange7d: r.tvlChange7d != null ? Number(r.tvlChange7d) : null,
   }));
 }
 
@@ -87,6 +93,8 @@ export async function getProtocolsList(filters: ProtocolFilters = {}): Promise<P
       volume24h: protocolMetrics.volume24h,
       fees24h: protocolMetrics.fees24h,
       revenue24h: protocolMetrics.revenue24h,
+      tvlChange1d: protocolMetrics.tvlChange1d,
+      tvlChange7d: protocolMetrics.tvlChange7d,
     })
     .from(protocolMetrics)
     .innerJoin(protocols, eq(protocolMetrics.protocolId, protocols.id))
@@ -131,6 +139,8 @@ export async function getProtocolsList(filters: ProtocolFilters = {}): Promise<P
       volume24h: r.volume24h != null ? Number(r.volume24h) : null,
       fees24h: r.fees24h != null ? Number(r.fees24h) : null,
       revenue24h: r.revenue24h != null ? Number(r.revenue24h) : null,
+      tvlChange1d: r.tvlChange1d != null ? Number(r.tvlChange1d) : null,
+      tvlChange7d: r.tvlChange7d != null ? Number(r.tvlChange7d) : null,
     })),
     page,
     pageSize,
@@ -165,6 +175,8 @@ export async function getProtocolsForExport(
       volume24h: protocolMetrics.volume24h,
       fees24h: protocolMetrics.fees24h,
       revenue24h: protocolMetrics.revenue24h,
+      tvlChange1d: protocolMetrics.tvlChange1d,
+      tvlChange7d: protocolMetrics.tvlChange7d,
     })
     .from(protocolMetrics)
     .innerJoin(protocols, eq(protocolMetrics.protocolId, protocols.id))
@@ -189,12 +201,41 @@ export async function getProtocolsForExport(
     volume24h: r.volume24h != null ? Number(r.volume24h) : null,
     fees24h: r.fees24h != null ? Number(r.fees24h) : null,
     revenue24h: r.revenue24h != null ? Number(r.revenue24h) : null,
+    tvlChange1d: r.tvlChange1d != null ? Number(r.tvlChange1d) : null,
+    tvlChange7d: r.tvlChange7d != null ? Number(r.tvlChange7d) : null,
   }));
 }
 
 export async function getProtocolCount(): Promise<number> {
   const [row] = await db.select({ value: count() }).from(protocols);
   return row?.value ?? 0;
+}
+
+export interface Global24hTotals {
+  volume24h: number | null;
+  fees24h: number | null;
+  revenue24h: number | null;
+}
+
+// Sums each protocol's own 24h figures at the latest sync - a real total
+// built from the same per-protocol numbers shown elsewhere in the app, not
+// a separately-fetched "global" figure that could silently drift from them.
+export async function getGlobal24hTotals(): Promise<Global24hTotals> {
+  const [row] = await db
+    .select({
+      volume24h: sql<string | null>`sum(${protocolMetrics.volume24h})`,
+      fees24h: sql<string | null>`sum(${protocolMetrics.fees24h})`,
+      revenue24h: sql<string | null>`sum(${protocolMetrics.revenue24h})`,
+    })
+    .from(protocolMetrics)
+    .innerJoin(latestAggregateTimestamp, eq(protocolMetrics.timestamp, latestAggregateTimestamp.ts))
+    .where(isNull(protocolMetrics.chainId));
+
+  return {
+    volume24h: row?.volume24h != null ? Number(row.volume24h) : null,
+    fees24h: row?.fees24h != null ? Number(row.fees24h) : null,
+    revenue24h: row?.revenue24h != null ? Number(row.revenue24h) : null,
+  };
 }
 
 export async function getAllCategories(): Promise<string[]> {
@@ -223,6 +264,8 @@ export async function getProtocolBySlug(slug: string) {
       volume24h: protocolMetrics.volume24h,
       fees24h: protocolMetrics.fees24h,
       revenue24h: protocolMetrics.revenue24h,
+      tvlChange1d: protocolMetrics.tvlChange1d,
+      tvlChange7d: protocolMetrics.tvlChange7d,
     })
     .from(protocolMetrics)
     .where(and(eq(protocolMetrics.protocolId, protocol.id), isNull(protocolMetrics.chainId)))
@@ -234,6 +277,8 @@ export async function getProtocolBySlug(slug: string) {
     volume24h: h.volume24h != null ? Number(h.volume24h) : null,
     fees24h: h.fees24h != null ? Number(h.fees24h) : null,
     revenue24h: h.revenue24h != null ? Number(h.revenue24h) : null,
+    tvlChange1d: h.tvlChange1d != null ? Number(h.tvlChange1d) : null,
+    tvlChange7d: h.tvlChange7d != null ? Number(h.tvlChange7d) : null,
   }));
 
   return {

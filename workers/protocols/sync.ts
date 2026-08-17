@@ -84,6 +84,8 @@ export async function syncProtocols() {
     volume24h: string | null;
     fees24h: string | null;
     revenue24h: string | null;
+    tvlChange1d: string | null;
+    tvlChange7d: string | null;
   }[] = [];
 
   for (const p of relevant) {
@@ -102,6 +104,8 @@ export async function syncProtocols() {
       volume24h: volume != null ? volume.toString() : null,
       fees24h: fin?.fees24h != null ? fin.fees24h.toString() : null,
       revenue24h: fin?.revenue24h != null ? fin.revenue24h.toString() : null,
+      tvlChange1d: p.tvlChange1d != null ? p.tvlChange1d.toString() : null,
+      tvlChange7d: p.tvlChange7d != null ? p.tvlChange7d.toString() : null,
     });
 
     for (const chainName of matchedChainNames) {
@@ -119,6 +123,8 @@ export async function syncProtocols() {
           volume24h: null,
           fees24h: null,
           revenue24h: null,
+          tvlChange1d: null,
+          tvlChange7d: null,
         });
       }
     }

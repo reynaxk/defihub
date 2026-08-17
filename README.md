@@ -1,4 +1,4 @@
-# ChainScope
+# DeFiHub
 
 A DeFi analytics platform — protocols, chains, tokens and yield pools tracked with real data, plus accounts, watchlists, threshold alerts, AI-generated protocol summaries, and a public read-only API.
 

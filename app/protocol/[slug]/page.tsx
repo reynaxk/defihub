@@ -6,9 +6,10 @@ import { Badge } from "@/components/ui/badge";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchlistButton } from "@/components/shared/watchlist-button";
 import { StatTile } from "@/components/stats/stat-tile";
-import { TvlAreaChart } from "@/components/charts/tvl-area-chart";
+import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
 import { AiSummaryCard } from "@/components/protocols/ai-summary-card";
 import { OnchainVerificationCard } from "@/components/protocols/onchain-verification-card";
+import { PercentChange } from "@/components/shared/percent-change";
 import { getProtocolBySlug } from "@/lib/database/queries/protocols";
 import { isWatchingProtocol } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
@@ -30,7 +31,7 @@ export async function generateMetadata({
     title: data.protocol.name,
     description:
       data.protocol.description ??
-      `${data.protocol.name} TVL, fees, revenue and volume, tracked live on ChainScope.`,
+      `${data.protocol.name} TVL, fees, revenue and volume, tracked live on DeFiHub.`,
   };
 }
 
@@ -80,12 +81,14 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
 
       {protocol.description && <p className="mt-4 max-w-3xl text-muted-foreground">{protocol.description}</p>}
 
-      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <StatTile
           label="TVL"
           value={formatUsd(latest?.tvl)}
           animate={latest?.tvl != null ? { value: latest.tvl, format: "usd" } : undefined}
         />
+        <StatTile label="24h change" customValue={<PercentChange value={latest?.tvlChange1d} />} />
+        <StatTile label="7d change" customValue={<PercentChange value={latest?.tvlChange7d} />} />
         <StatTile
           label="24h Volume"
           value={formatUsd(latest?.volume24h)}
@@ -105,7 +108,7 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
 
       <div className="mt-8 rounded-lg border border-border bg-card p-4">
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
-        <TvlAreaChart data={history.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))} />
+        <RangedAreaChart data={history.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))} />
       </div>
 
       <OnchainVerificationCard verifications={verifications} />

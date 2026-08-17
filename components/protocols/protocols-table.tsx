@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EntityLogo } from "@/components/shared/entity-logo";
+import { PercentChange } from "@/components/shared/percent-change";
 import { formatUsd } from "@/lib/format";
 import type { ProtocolListItem } from "@/lib/database/queries/protocols";
 
@@ -21,6 +22,8 @@ export function ProtocolsTable({
             <TableHead>Protocol</TableHead>
             <TableHead className="hidden sm:table-cell">Category</TableHead>
             <TableHead className="text-right">TVL</TableHead>
+            <TableHead className="hidden text-right sm:table-cell">24h</TableHead>
+            <TableHead className="hidden text-right md:table-cell">7d</TableHead>
             <TableHead className="hidden text-right md:table-cell">24h Volume</TableHead>
             <TableHead className="hidden text-right lg:table-cell">24h Fees</TableHead>
             <TableHead className="hidden text-right lg:table-cell">24h Revenue</TableHead>
@@ -40,6 +43,12 @@ export function ProtocolsTable({
                 {protocol.category && <Badge variant="secondary">{protocol.category}</Badge>}
               </TableCell>
               <TableCell className="text-right tabular-nums">{formatUsd(protocol.tvl)}</TableCell>
+              <TableCell className="hidden text-right tabular-nums sm:table-cell">
+                <PercentChange value={protocol.tvlChange1d} />
+              </TableCell>
+              <TableCell className="hidden text-right tabular-nums md:table-cell">
+                <PercentChange value={protocol.tvlChange7d} />
+              </TableCell>
               <TableCell className="hidden text-right tabular-nums text-muted-foreground md:table-cell">
                 {formatUsd(protocol.volume24h)}
               </TableCell>
@@ -53,7 +62,7 @@ export function ProtocolsTable({
           ))}
           {protocols.length === 0 && (
             <TableRow>
-              <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
+              <TableCell colSpan={9} className="py-10 text-center text-muted-foreground">
                 No protocols match these filters yet.
               </TableCell>
             </TableRow>

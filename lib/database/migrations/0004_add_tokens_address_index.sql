@@ -1,0 +1,1 @@
+CREATE INDEX "tokens_address_idx" ON "tokens" USING btree ("address");

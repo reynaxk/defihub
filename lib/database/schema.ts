@@ -128,7 +128,15 @@ export const tokens = pgTable(
     // Identifier used to query the CoinGecko price provider.
     coingeckoId: varchar("coingecko_id", { length: 128 }),
   },
-  (table) => [uniqueIndex("tokens_chain_address_unique").on(table.chainId, table.address)],
+  (table) => [
+    uniqueIndex("tokens_chain_address_unique").on(table.chainId, table.address),
+    // getTokenByAddress (app route + public API) filters by address alone,
+    // optionally narrowed by chain after a join - the composite unique
+    // index above has address as its second column, so it can't serve a
+    // lookup that doesn't also pin chainId. Cheap at current scale (~400
+    // rows) but a real gap as the token list grows.
+    index("tokens_address_idx").on(table.address),
+  ],
 );
 
 export const tokenPrices = pgTable(

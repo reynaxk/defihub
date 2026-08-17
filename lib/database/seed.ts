@@ -13,6 +13,9 @@ const NATIVE_COINGECKO_ID: Record<string, string> = {
   arbitrum: "ethereum",
   base: "ethereum",
   "bnb-chain": "binancecoin",
+  avalanche: "avalanche-2",
+  polygon: "polygon-ecosystem-token",
+  optimism: "ethereum",
 };
 
 // 0x000...0 is the widely-used sentinel address for a chain's native

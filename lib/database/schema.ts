@@ -104,8 +104,15 @@ export const protocolMetrics = pgTable(
     // has been running for weeks. Chain-level changes (lib/database/queries
     // /tvl-change.ts) differ - chain history is fully backfilled, so those
     // are computed locally instead.
-    tvlChange1d: numeric("tvl_change_1d", { precision: 10, scale: 4 }),
-    tvlChange7d: numeric("tvl_change_7d", { precision: 10, scale: 4 }),
+    // precision 10 (max ~1M%) turned out too narrow: a real sync against
+    // DefiLlama's long tail of thin/new-pool protocols hit a genuine
+    // numeric field overflow the first time a wider chain set (adding
+    // Avalanche/Polygon/Optimism) pulled in a protocol with a more
+    // extreme change_1d than anything seen on the original 5 chains.
+    // Widened with real headroom rather than tuned to the one value that
+    // broke it.
+    tvlChange1d: numeric("tvl_change_1d", { precision: 18, scale: 4 }),
+    tvlChange7d: numeric("tvl_change_7d", { precision: 18, scale: 4 }),
   },
   (table) => [
     index("protocol_metrics_protocol_ts_idx").on(table.protocolId, table.timestamp),

@@ -1,0 +1,2 @@
+ALTER TABLE "protocol_metrics" ALTER COLUMN "tvl_change_1d" SET DATA TYPE numeric(18, 4);--> statement-breakpoint
+ALTER TABLE "protocol_metrics" ALTER COLUMN "tvl_change_7d" SET DATA TYPE numeric(18, 4);

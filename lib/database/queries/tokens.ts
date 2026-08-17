@@ -93,7 +93,7 @@ function normalizeTokenRows<T extends { priceUsd: string | null; marketCap: stri
 
 // Unpaginated - used by CSV export, the v1 API's simple mode, and the chain
 // page's "top tokens on this chain" slice, none of which want a page/total
-// envelope. ~370 tokens today across 5 chains; fine to fetch in one shot.
+// envelope. ~450 tokens today across 8 chains; fine to fetch in one shot.
 export async function getTokensList(
   opts: { chainSlug?: string; sort?: TokenSort } = {},
 ): Promise<TokenListItem[]> {

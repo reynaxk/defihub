@@ -49,7 +49,7 @@ Fill in `DATABASE_URL` at minimum. Everything else is optional:
 
 ```bash
 npm run db:migrate   # create tables
-npm run seed          # seed the 5 supported chains + their native tokens
+npm run seed          # seed the 8 supported chains + their native tokens
 ```
 
 ### 5. Pull in real data
@@ -101,7 +101,7 @@ lib/
   security/            In-memory rate limiter
   api/                 Shared response helpers for the public API
   cron/                Cron route auth helper
-  config/chains.ts     The 5 supported chains - add a chain here to extend
+  config/chains.ts     The 8 supported chains - add a chain here to extend
 workers/               Standalone ingestion scripts, also callable from app/api/cron/*
 ```
 

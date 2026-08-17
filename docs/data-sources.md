@@ -33,6 +33,15 @@ Free, no API key. Base URLs: `api.llama.fi` and `yields.llama.fi`.
   A protocol can have TVL but no fees data (not all protocols report fees to
   DefiLlama), which is why `protocol_metrics.fees24h`/`revenue24h` are
   nullable, not defaulted to 0.
+- **DefiLlama isn't internally consistent about chain names.** `/v2/chains`
+  and `/v2/historicalChainTvl/{chain}` name Optimism "OP Mainnet"; every
+  protocol's own `chains` array (from `/protocols`) calls the same chain
+  "Optimism". `lib/config/chains.ts`'s `defillamaSlug` has to be the name
+  used in the *protocol* `chains` array specifically, since that's what
+  chain-to-protocol linking matches against - the historical-TVL endpoint
+  turned out to accept both names for the same chain, but that's not
+  guaranteed for every chain, so verify a new chain's exact name against a
+  live `/protocols` response (not just `/v2/chains`) before adding it.
 
 ## CoinGecko (`lib/providers/coingecko.ts`)
 
@@ -48,12 +57,12 @@ Free public tier without a key (rate-limited); a free Demo API key
 
 **Known limitations:**
 
-- **A token only appears if it's deployed on one of the 5 supported chains.**
+- **A token only appears if it's deployed on one of the 8 supported chains.**
   `sync:tokens` cross-references `/coins/markets` results against
   `COINGECKO_PLATFORM_TO_CHAIN_SLUG` (`lib/config/chains.ts`) — a token in
-  the top 250 by market cap with no contract on Ethereum, Solana, Arbitrum,
-  Base, or BNB Chain (e.g., a Bitcoin-only or Tron-only asset) is skipped
-  entirely, by design.
+  the top 250 by market cap with no contract on any of Ethereum, Solana,
+  Arbitrum, Base, BNB Chain, Avalanche, Polygon, or Optimism (e.g., a
+  Bitcoin-only or Tron-only asset) is skipped entirely, by design.
 - **24h change is CoinGecko's own trailing-24h computation**, not derived
   from two of DeFiHub's own snapshots. This matters because it means the
   figure is correct from the very first sync, rather than requiring two

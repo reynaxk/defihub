@@ -8,7 +8,7 @@ generated from it, never hand-written).
 
 | Table | Purpose | Notes |
 |---|---|---|
-| `chains` | The 5 supported chains | Seeded from `lib/config/chains.ts`, not synced from a provider |
+| `chains` | The 8 supported chains | Seeded from `lib/config/chains.ts`, not synced from a provider |
 | `chain_metrics` | Chain TVL, one row per `(chain_id, timestamp)` | Full history, backfilled once then appended to |
 | `protocols` | Protocol metadata (name, category, description, logo) | |
 | `protocol_chains` | Which chains a protocol is deployed on | Composite PK `(protocol_id, chain_id)` |
@@ -64,6 +64,6 @@ tooling — a mistake gets fixed with a new forward migration, not a rollback.
 
 ```bash
 npm run db:migrate   # create/update tables
-npm run seed          # seed the 5 supported chains + their native tokens
+npm run seed          # seed the 8 supported chains + their native tokens
 npm run sync:all      # pull real data (see README for the full sync command list)
 ```

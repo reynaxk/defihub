@@ -73,7 +73,7 @@ AI layer (lib/ai) — reads already-verified DB data, never invents figures
 An earlier instruction set for this project asked for a
 blockchain → indexer → normalization pipeline built directly on RPC data.
 That was deliberately not built: running RPC infrastructure (self-hosted or
-a paid provider like Alchemy) across 5 chains is a real, ongoing cost with
+a paid provider like Alchemy) across 8 chains is a real, ongoing cost with
 no clear benefit over DefiLlama and CoinGecko, which already aggregate,
 normalize, and serve the same TVL/price/yield data for free. The provider
 abstraction layer exists specifically so this can change later — a

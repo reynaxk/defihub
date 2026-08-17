@@ -31,7 +31,7 @@ export async function syncTokens() {
       if (!address) continue; // CoinGecko sometimes lists a platform with an empty address
 
       const chainSlug = COINGECKO_PLATFORM_TO_CHAIN_SLUG.get(platformId);
-      if (!chainSlug) continue; // not one of our 5 supported chains
+      if (!chainSlug) continue; // not one of our supported chains
 
       const chainId = chainIdBySlug.get(chainSlug);
       if (!chainId) continue;

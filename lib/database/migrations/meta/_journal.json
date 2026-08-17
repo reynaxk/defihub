@@ -50,6 +50,13 @@
       "when": 1786977196874,
       "tag": "0006_cheerful_alice",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786995958861,
+      "tag": "0007_bouncy_jocasta",
+      "breakpoints": true
     }
   ]
 }

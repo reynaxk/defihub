@@ -22,7 +22,8 @@ export default async function HomePage() {
     topChains,
     protocolCount,
     yieldPoolCount,
-    movers,
+    movers24h,
+    movers7d,
     globalHistory,
     globalChanges,
     global24h,
@@ -31,7 +32,8 @@ export default async function HomePage() {
     getTopChains(),
     getProtocolCount(),
     getYieldPoolCount(),
-    getTopMovers(5),
+    getTopMovers(5, "24h"),
+    getTopMovers(5, "7d"),
     getGlobalTvlHistory(),
     getGlobalTvlChanges(),
     getGlobal24hTotals(),
@@ -126,7 +128,7 @@ export default async function HomePage() {
             View all
           </Link>
         </div>
-        <TopMovers gainers={movers.gainers} losers={movers.losers} />
+        <TopMovers movers24h={movers24h} movers7d={movers7d} />
       </section>
 
       <section className="py-8">

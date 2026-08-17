@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, tokenPrices, tokens } from "@/lib/database/schema";
 
@@ -18,6 +18,20 @@ const latestPricePerToken = db
   .from(tokenPrices)
   .orderBy(tokenPrices.tokenId, desc(tokenPrices.timestamp))
   .as("latest_price");
+
+// priceChange7d is only written by the 6-hourly token-discovery sync, not
+// the 15-min price-refresh sync (see schema.ts) - most rows have it null, so
+// "the latest row" usually wouldn't have a 7d figure. This looks back to the
+// most recent row that actually has one, per token.
+const latestNon7dNullChange = db
+  .selectDistinctOn([tokenPrices.tokenId], {
+    tokenId: tokenPrices.tokenId,
+    priceChange7d: tokenPrices.priceChange7d,
+  })
+  .from(tokenPrices)
+  .where(isNotNull(tokenPrices.priceChange7d))
+  .orderBy(tokenPrices.tokenId, desc(tokenPrices.timestamp))
+  .as("latest_7d_change");
 
 export interface TokenListItem {
   id: string;
@@ -79,55 +93,112 @@ export async function getTokensList(
 }
 
 export interface TokenMover {
+  id: string;
   address: string;
   chainSlug: string;
   symbol: string;
   logoUrl: string | null;
   priceUsd: number | null;
-  priceChange24h: number;
+  priceChange: number;
+  sparkline: number[];
 }
 
-// Sorting by raw priceChange24h (not abs value) naturally surfaces real
-// volatility at the extremes without needing to filter out stablecoins
-// separately - a stablecoin sitting at +/-0.01% never competes with an
-// actual mover for a top-N spot in either direction.
-export async function getTopMovers(limit = 5): Promise<{ gainers: TokenMover[]; losers: TokenMover[] }> {
-  const columns = {
-    address: tokens.address,
-    chainSlug: chains.slug,
-    symbol: tokens.symbol,
-    logoUrl: tokens.logoUrl,
-    priceUsd: latestPricePerToken.priceUsd,
-    priceChange24h: latestPricePerToken.priceChange24h,
-  };
+export type MoverWindow = "24h" | "7d";
 
+// Sorting by raw change (not abs value) naturally surfaces real volatility
+// at the extremes without needing to filter out stablecoins separately - a
+// stablecoin sitting at +/-0.01% never competes with an actual mover for a
+// top-N spot in either direction.
+async function queryMovers(limit: number, window: MoverWindow, direction: "desc" | "asc") {
+  if (window === "7d") {
+    const changeColumn = latestNon7dNullChange.priceChange7d;
+    return db
+      .select({
+        id: tokens.id,
+        address: tokens.address,
+        chainSlug: chains.slug,
+        symbol: tokens.symbol,
+        logoUrl: tokens.logoUrl,
+        priceUsd: latestPricePerToken.priceUsd,
+        priceChange: changeColumn,
+      })
+      .from(tokens)
+      .innerJoin(chains, eq(chains.id, tokens.chainId))
+      .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+      .innerJoin(latestNon7dNullChange, eq(latestNon7dNullChange.tokenId, tokens.id))
+      .where(isNotNull(changeColumn))
+      .orderBy(direction === "desc" ? desc(changeColumn) : asc(changeColumn))
+      .limit(limit);
+  }
+
+  const changeColumn = latestPricePerToken.priceChange24h;
+  return db
+    .select({
+      id: tokens.id,
+      address: tokens.address,
+      chainSlug: chains.slug,
+      symbol: tokens.symbol,
+      logoUrl: tokens.logoUrl,
+      priceUsd: latestPricePerToken.priceUsd,
+      priceChange: changeColumn,
+    })
+    .from(tokens)
+    .innerJoin(chains, eq(chains.id, tokens.chainId))
+    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+    .where(isNotNull(changeColumn))
+    .orderBy(direction === "desc" ? desc(changeColumn) : asc(changeColumn))
+    .limit(limit);
+}
+
+export async function getTopMovers(
+  limit = 5,
+  window: MoverWindow = "24h",
+): Promise<{ gainers: TokenMover[]; losers: TokenMover[] }> {
   const [gainerRows, loserRows] = await Promise.all([
-    db
-      .select(columns)
-      .from(tokens)
-      .innerJoin(chains, eq(chains.id, tokens.chainId))
-      .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
-      .where(isNotNull(latestPricePerToken.priceChange24h))
-      .orderBy(desc(latestPricePerToken.priceChange24h))
-      .limit(limit),
-    db
-      .select(columns)
-      .from(tokens)
-      .innerJoin(chains, eq(chains.id, tokens.chainId))
-      .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
-      .where(isNotNull(latestPricePerToken.priceChange24h))
-      .orderBy(asc(latestPricePerToken.priceChange24h))
-      .limit(limit),
+    queryMovers(limit, window, "desc"),
+    queryMovers(limit, window, "asc"),
   ]);
+
+  const ids = [...gainerRows, ...loserRows].map((r) => r.id);
+  const sparklines = await getSparklines(ids);
 
   const normalize = (rows: typeof gainerRows): TokenMover[] =>
     rows.map((r) => ({
       ...r,
       priceUsd: r.priceUsd != null ? Number(r.priceUsd) : null,
-      priceChange24h: Number(r.priceChange24h),
+      priceChange: Number(r.priceChange),
+      sparkline: sparklines.get(r.id) ?? [],
     }));
 
   return { gainers: normalize(gainerRows), losers: normalize(loserRows) };
+}
+
+const SPARKLINE_POINTS = 20;
+
+// Batched "last N prices per token", trimmed in JS rather than expressed as
+// a SQL window function - simplest safe option at mover-list scale (~10
+// tokens, each with at most a few hundred price rows even after months of
+// 15-min syncing), and keeps this on the typed query builder like the rest
+// of the codebase instead of introducing raw SQL.
+async function getSparklines(tokenIds: string[]): Promise<Map<string, number[]>> {
+  if (tokenIds.length === 0) return new Map();
+
+  const rows = await db
+    .select({ tokenId: tokenPrices.tokenId, priceUsd: tokenPrices.priceUsd, timestamp: tokenPrices.timestamp })
+    .from(tokenPrices)
+    .where(inArray(tokenPrices.tokenId, tokenIds))
+    .orderBy(tokenPrices.tokenId, desc(tokenPrices.timestamp));
+
+  const byToken = new Map<string, number[]>();
+  for (const row of rows) {
+    const list = byToken.get(row.tokenId) ?? [];
+    if (list.length < SPARKLINE_POINTS) list.push(Number(row.priceUsd));
+    byToken.set(row.tokenId, list);
+  }
+  // Rows came back newest-first (for the take-last-N-cheaply trick above) -
+  // reverse each list so sparklines render oldest-to-newest, left to right.
+  for (const list of byToken.values()) list.reverse();
+  return byToken;
 }
 
 export interface TokenPricePoint {

@@ -28,6 +28,7 @@ const marketsSchema = z.array(
     market_cap: z.number().nullable(),
     total_volume: z.number().nullable(),
     price_change_percentage_24h: z.number().nullable().optional(),
+    price_change_percentage_7d_in_currency: z.number().nullable().optional(),
   }),
 );
 
@@ -116,6 +117,10 @@ export class CoinGeckoProvider implements PriceProvider, TokenDiscoveryProvider 
       per_page: String(Math.min(limit, 250)),
       page: "1",
       sparkline: "false",
+      // Adds price_change_percentage_7d_in_currency to the response - the
+      // only CoinGecko endpoint that exposes a 7d window (the /simple/price
+      // endpoint the 15-min price-refresh sync uses only has 24h).
+      price_change_percentage: "7d",
     });
 
     // /coins/markets doesn't carry contract addresses - /coins/list does
@@ -152,6 +157,7 @@ export class CoinGeckoProvider implements PriceProvider, TokenDiscoveryProvider 
       marketCap: m.market_cap,
       volume24h: m.total_volume,
       priceChange24h: m.price_change_percentage_24h ?? null,
+      priceChange7d: m.price_change_percentage_7d_in_currency ?? null,
       platforms: platformsById.get(m.id) ?? {},
     }));
   }

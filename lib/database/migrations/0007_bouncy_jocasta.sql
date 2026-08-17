@@ -1,0 +1,1 @@
+ALTER TABLE "token_prices" ADD COLUMN "price_change_7d" numeric(10, 4);

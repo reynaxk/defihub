@@ -213,6 +213,52 @@ describe("CoinGeckoProvider", () => {
       expect(token.logoUrl).toBeNull();
     });
 
+    it("extracts the 7d change and requests it via price_change_percentage", async () => {
+      mockMarketsAndList(
+        [
+          {
+            id: "usd-coin",
+            symbol: "usdc",
+            name: "USD Coin",
+            image: null,
+            current_price: 1.0,
+            market_cap: 32_000_000_000,
+            total_volume: 4_500_000_000,
+            price_change_percentage_24h: 0.01,
+            price_change_percentage_7d_in_currency: -2.5,
+          },
+        ],
+        [],
+      );
+
+      const provider = new CoinGeckoProvider("test-key");
+      const [token] = await provider.getTopMarketTokens(250);
+
+      expect(token.priceChange7d).toBe(-2.5);
+      const marketsUrl = fetchMock.mock.calls[0][0] as string;
+      expect(new URL(marketsUrl).searchParams.get("price_change_percentage")).toBe("7d");
+    });
+
+    it("defaults priceChange7d to null when the field is absent", async () => {
+      mockMarketsAndList(
+        [
+          {
+            id: "bitcoin",
+            symbol: "btc",
+            name: "Bitcoin",
+            image: null,
+            current_price: 60000,
+            market_cap: 1_000_000_000_000,
+            total_volume: 20_000_000_000,
+          },
+        ],
+        [],
+      );
+      const provider = new CoinGeckoProvider("test-key");
+      const [token] = await provider.getTopMarketTokens(250);
+      expect(token.priceChange7d).toBeNull();
+    });
+
     it("caps per_page at 250 even when a larger limit is requested", async () => {
       mockMarketsAndList([], []);
       const provider = new CoinGeckoProvider("test-key");

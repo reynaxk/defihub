@@ -161,6 +161,13 @@ export const tokenPrices = pgTable(
     // own trailing-24h computation) - not derived from our own snapshots,
     // which would need two sync runs a day apart to mean anything.
     priceChange24h: numeric("price_change_24h", { precision: 10, scale: 4 }),
+    // Only populated by the token-discovery sync (every 6h, top 250 by
+    // market cap), not the 15-minute price-refresh sync - CoinGecko's
+    // /simple/price endpoint that sync uses has no 7d window, only
+    // /coins/markets does. Most rows will have this null; queries reading
+    // it look back to the most recent non-null value per token rather than
+    // assuming the latest row has it (see getTopMovers).
+    priceChange7d: numeric("price_change_7d", { precision: 10, scale: 4 }),
   },
   (table) => [primaryKey({ columns: [table.tokenId, table.timestamp] })],
 );

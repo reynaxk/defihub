@@ -83,7 +83,7 @@ Read-only JSON endpoints under `/api/v1/*` (protocols, chains, yields, tokens �
 
 ## Docs
 
-Deeper reference material lives in [`docs/`](./docs) — architecture, database design, data source methodology, and security posture.
+Deeper reference material lives in [`docs/`](./docs) — architecture, database design, data source methodology, security posture, and monetization planning.
 
 ## Project structure
 

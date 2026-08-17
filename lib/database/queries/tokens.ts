@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, tokenPrices, tokens } from "@/lib/database/schema";
 
@@ -76,6 +76,58 @@ export async function getTokensList(
     volume24h: r.volume24h != null ? Number(r.volume24h) : null,
     priceChange24h: r.priceChange24h != null ? Number(r.priceChange24h) : null,
   }));
+}
+
+export interface TokenMover {
+  address: string;
+  chainSlug: string;
+  symbol: string;
+  logoUrl: string | null;
+  priceUsd: number | null;
+  priceChange24h: number;
+}
+
+// Sorting by raw priceChange24h (not abs value) naturally surfaces real
+// volatility at the extremes without needing to filter out stablecoins
+// separately - a stablecoin sitting at +/-0.01% never competes with an
+// actual mover for a top-N spot in either direction.
+export async function getTopMovers(limit = 5): Promise<{ gainers: TokenMover[]; losers: TokenMover[] }> {
+  const columns = {
+    address: tokens.address,
+    chainSlug: chains.slug,
+    symbol: tokens.symbol,
+    logoUrl: tokens.logoUrl,
+    priceUsd: latestPricePerToken.priceUsd,
+    priceChange24h: latestPricePerToken.priceChange24h,
+  };
+
+  const [gainerRows, loserRows] = await Promise.all([
+    db
+      .select(columns)
+      .from(tokens)
+      .innerJoin(chains, eq(chains.id, tokens.chainId))
+      .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+      .where(isNotNull(latestPricePerToken.priceChange24h))
+      .orderBy(desc(latestPricePerToken.priceChange24h))
+      .limit(limit),
+    db
+      .select(columns)
+      .from(tokens)
+      .innerJoin(chains, eq(chains.id, tokens.chainId))
+      .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+      .where(isNotNull(latestPricePerToken.priceChange24h))
+      .orderBy(asc(latestPricePerToken.priceChange24h))
+      .limit(limit),
+  ]);
+
+  const normalize = (rows: typeof gainerRows): TokenMover[] =>
+    rows.map((r) => ({
+      ...r,
+      priceUsd: r.priceUsd != null ? Number(r.priceUsd) : null,
+      priceChange24h: Number(r.priceChange24h),
+    }));
+
+  return { gainers: normalize(gainerRows), losers: normalize(loserRows) };
 }
 
 export interface TokenPricePoint {

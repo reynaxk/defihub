@@ -4,20 +4,23 @@ import { Button } from "@/components/ui/button";
 import { StatTile } from "@/components/stats/stat-tile";
 import { ProtocolsTable } from "@/components/protocols/protocols-table";
 import { ChainsTable } from "@/components/chains/chains-table";
+import { TopMovers } from "@/components/tokens/top-movers";
 import { getProtocolCount, getTopProtocols } from "@/lib/database/queries/protocols";
 import { getTopChains } from "@/lib/database/queries/chains";
 import { getYieldPoolCount } from "@/lib/database/queries/yields";
+import { getTopMovers } from "@/lib/database/queries/tokens";
 import { formatUsd } from "@/lib/format";
 import { SUPPORTED_CHAINS } from "@/lib/config/chains";
 
 export const revalidate = 300;
 
 export default async function HomePage() {
-  const [topProtocols, topChains, protocolCount, yieldPoolCount] = await Promise.all([
+  const [topProtocols, topChains, protocolCount, yieldPoolCount, movers] = await Promise.all([
     getTopProtocols(10),
     getTopChains(),
     getProtocolCount(),
     getYieldPoolCount(),
+    getTopMovers(5),
   ]);
 
   const totalTvl = topChains.reduce((sum, c) => sum + (c.tvl ?? 0), 0);
@@ -50,6 +53,16 @@ export default async function HomePage() {
         <StatTile label="Protocols tracked" value={protocolCount.toLocaleString()} icon={Layers} />
         <StatTile label="Yield pools" value={yieldPoolCount.toLocaleString()} icon={Sprout} />
         <StatTile label="Chains supported" value={String(SUPPORTED_CHAINS.length)} icon={Coins} />
+      </section>
+
+      <section className="py-8">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-xl font-semibold tracking-tight">Top movers</h2>
+          <Link href="/tokens?sort=priceChange24h" className="text-sm text-primary hover:underline">
+            View all
+          </Link>
+        </div>
+        <TopMovers gainers={movers.gainers} losers={movers.losers} />
       </section>
 
       <section className="py-8">

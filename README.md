@@ -77,7 +77,11 @@ Locally, re-run the `npm run sync:*` scripts whenever you want fresher data, or 
 
 ## Public API
 
-Read-only JSON endpoints under `/api/v1/*` (protocols, chains, yields — list + detail), rate-limited to 60 req/min per IP, no key required. Documented with example responses at `/api-docs`.
+Read-only JSON endpoints under `/api/v1/*` (protocols, chains, yields, tokens — list + detail), rate-limited to 60 req/min per IP, no key required. Documented with example responses at `/api-docs`.
+
+## Docs
+
+Deeper reference material lives in [`docs/`](./docs) — architecture, database design, data source methodology, and security posture.
 
 ## Project structure
 

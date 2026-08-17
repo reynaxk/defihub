@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { SearchBox } from "@/components/search/search-box";
 
 // The account menu (avatar dropdown) and the sign-in/register buttons
 // already render outside the `hidden sm:flex` nav, so they're reachable on
@@ -29,6 +30,9 @@ export function MobileNav({ links }: { links: { href: string; label: string }[] 
         <SheetHeader>
           <SheetTitle>Menu</SheetTitle>
         </SheetHeader>
+        <div className="px-4">
+          <SearchBox />
+        </div>
         <nav className="flex flex-col gap-1 px-4">
           {links.map((link) => (
             <Link

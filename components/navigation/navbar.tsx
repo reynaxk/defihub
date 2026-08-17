@@ -12,6 +12,7 @@ import {
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ThemeToggle } from "@/components/navigation/theme-toggle";
 import { MobileNav } from "@/components/navigation/mobile-nav";
+import { SearchBox } from "@/components/search/search-box";
 
 const NAV_LINKS = [
   { href: "/protocols", label: "Protocols" },
@@ -45,6 +46,10 @@ export async function Navbar() {
               </Link>
             )}
           </nav>
+        </div>
+
+        <div className="hidden max-w-xs flex-1 px-6 sm:block">
+          <SearchBox />
         </div>
 
         <div className="flex items-center gap-3">

@@ -71,9 +71,12 @@ export default async function DashboardPage() {
       </div>
 
       {watchlist.length === 0 ? (
-        <p className="mt-3 text-sm text-muted-foreground">
-          Nothing watched yet. Star a protocol, chain, token or yield pool to track it here.
-        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <p className="text-sm text-muted-foreground">
+            Nothing watched yet. Star a protocol, chain, token or yield pool to track it here.
+          </p>
+          <Button variant="outline" size="sm" render={<Link href="/protocols">Browse protocols</Link>} />
+        </div>
       ) : (
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
           {watchlist.map((item) => (

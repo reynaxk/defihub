@@ -13,8 +13,7 @@ export const metadata: Metadata = {
 export const revalidate = 300;
 
 export default async function ChainsPage() {
-  const session = await auth();
-  const chains = await getTopChains();
+  const [session, chains] = await Promise.all([auth(), getTopChains()]);
   const watchedChainIds = await getWatchedChainIds(
     session?.user?.id,
     chains.map((c) => c.id),

@@ -38,9 +38,8 @@ export default async function YieldsPage({
   const sortBy = params.sort === "tvl" ? "tvl" : "apy";
   const sortDir = params.dir === "asc" ? "asc" : "desc";
 
-  const session = await auth();
-
-  const [result, categories, chains] = await Promise.all([
+  const [session, result, categories, chains] = await Promise.all([
+    auth(),
     getYieldPoolsList({
       chainSlug: params.chain,
       category: params.category,

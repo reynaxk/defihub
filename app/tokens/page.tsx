@@ -33,8 +33,8 @@ export default async function TokensPage({
   const sort = VALID_SORTS.includes(params.sort as TokenSort) ? (params.sort as TokenSort) : "marketCap";
   const page = Math.max(1, Number(params.page) || 1);
 
-  const session = await auth();
-  const [result, chains] = await Promise.all([
+  const [session, result, chains] = await Promise.all([
+    auth(),
     getTokensPageList({ chainSlug: params.chain, sort, page }),
     getAllChains(),
   ]);

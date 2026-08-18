@@ -20,8 +20,8 @@ import { SUPPORTED_CHAINS } from "@/lib/config/chains";
 export const revalidate = 300;
 
 export default async function HomePage() {
-  const session = await auth();
   const [
+    session,
     topProtocols,
     topChains,
     protocolCount,
@@ -31,6 +31,7 @@ export default async function HomePage() {
     globalHistory,
     global24h,
   ] = await Promise.all([
+    auth(),
     getTopProtocols(10),
     getTopChains(),
     getProtocolCount(),

@@ -19,10 +19,12 @@ const PLACEHOLDER_BY_TYPE: Record<string, string> = {
 };
 
 export function AlertTargetPicker({
+  id,
   type,
   value,
   onChange,
 }: {
+  id?: string;
   type: string;
   value: string;
   onChange: (value: string) => void;
@@ -125,6 +127,7 @@ export function AlertTargetPicker({
       <div className="relative">
         <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input
+          id={id}
           value={query}
           onChange={(e) => {
             setQuery(e.target.value);

@@ -151,6 +151,7 @@ export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) 
                 name="target"
                 render={({ field }) => (
                   <AlertTargetPicker
+                    id="target"
                     key={targetPickerKey}
                     type={selectedType}
                     value={field.value ?? ""}

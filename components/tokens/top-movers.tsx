@@ -44,7 +44,17 @@ export function TopMovers({
   const [window, setWindow] = useState<"24h" | "7d">("24h");
   const active = window === "24h" ? movers24h : movers7d;
 
-  if (movers24h.gainers.length === 0 && movers24h.losers.length === 0) return null;
+  // priceChange24h and priceChange7d come from different sync cadences (see
+  // tokens.ts) and can genuinely have different availability - checking only
+  // movers24h here would hide the whole component, toggle included, on a
+  // window where 7d data exists but 24h happens to be empty (e.g. early in a
+  // sync cycle).
+  const hasAnyData =
+    movers24h.gainers.length > 0 ||
+    movers24h.losers.length > 0 ||
+    movers7d.gainers.length > 0 ||
+    movers7d.losers.length > 0;
+  if (!hasAnyData) return null;
 
   return (
     <div>

@@ -61,7 +61,7 @@ export function YieldFilters({
           />
         </div>
 
-        <Select defaultValue={searchParams.get("chain") ?? ALL} onValueChange={(value) => updateParams({ chain: value })}>
+        <Select value={searchParams.get("chain") ?? ALL} onValueChange={(value) => updateParams({ chain: value })}>
           <SelectTrigger aria-label="Filter by chain" className="w-40">
             <SelectValue placeholder="Chain">
               {(value: string) => (value === ALL ? "All chains" : (chains.find((c) => c.slug === value)?.name ?? value))}
@@ -78,7 +78,7 @@ export function YieldFilters({
         </Select>
 
         <Select
-          defaultValue={searchParams.get("category") ?? ALL}
+          value={searchParams.get("category") ?? ALL}
           onValueChange={(value) => updateParams({ category: value })}
         >
           <SelectTrigger aria-label="Filter by category" className="w-44">
@@ -95,7 +95,7 @@ export function YieldFilters({
         </Select>
 
         <Select
-          defaultValue={searchParams.get("risk") ?? ALL}
+          value={searchParams.get("risk") ?? ALL}
           onValueChange={(value) => updateParams({ risk: value })}
         >
           <SelectTrigger aria-label="Filter by impermanent loss risk" className="w-36">
@@ -132,7 +132,7 @@ export function YieldFilters({
         <div className="flex items-center gap-2">
           <Switch
             id="stablecoin-only"
-            defaultChecked={searchParams.get("stable") === "1"}
+            checked={searchParams.get("stable") === "1"}
             onCheckedChange={(checked) => updateParams({ stable: checked ? "1" : null })}
           />
           <Label htmlFor="stablecoin-only" className="text-sm text-muted-foreground">

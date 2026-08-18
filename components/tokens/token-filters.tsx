@@ -30,7 +30,7 @@ export function TokenFilters({ chains }: { chains: { slug: string; name: string 
 
   return (
     <div className="flex flex-wrap items-center gap-4">
-      <Select defaultValue={searchParams.get("chain") ?? ALL} onValueChange={(value) => updateParam("chain", value)}>
+      <Select value={searchParams.get("chain") ?? ALL} onValueChange={(value) => updateParam("chain", value)}>
         <SelectTrigger aria-label="Filter by chain" className="w-44">
           <SelectValue placeholder="Chain">
             {(value: string) => (value === ALL ? "All chains" : (chains.find((c) => c.slug === value)?.name ?? value))}
@@ -47,7 +47,7 @@ export function TokenFilters({ chains }: { chains: { slug: string; name: string 
       </Select>
 
       <Select
-        defaultValue={searchParams.get("sort") ?? "marketCap"}
+        value={searchParams.get("sort") ?? "marketCap"}
         onValueChange={(value) => updateParam("sort", value)}
       >
         <SelectTrigger aria-label="Sort by" className="w-44">

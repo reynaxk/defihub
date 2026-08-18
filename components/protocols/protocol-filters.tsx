@@ -77,7 +77,7 @@ export function ProtocolFilters({
       </div>
 
       <Select
-        defaultValue={searchParams.get("category") ?? ALL}
+        value={searchParams.get("category") ?? ALL}
         onValueChange={(value) => updateParam("category", value)}
       >
         <SelectTrigger aria-label="Filter by category" className="sm:w-44">
@@ -95,7 +95,7 @@ export function ProtocolFilters({
         </SelectContent>
       </Select>
 
-      <Select defaultValue={searchParams.get("chain") ?? ALL} onValueChange={(value) => updateParam("chain", value)}>
+      <Select value={searchParams.get("chain") ?? ALL} onValueChange={(value) => updateParam("chain", value)}>
         <SelectTrigger aria-label="Filter by chain" className="sm:w-44">
           <SelectValue placeholder="Chain">
             {(value: string) => (value === ALL ? "All chains" : (chains.find((c) => c.slug === value)?.name ?? value))}

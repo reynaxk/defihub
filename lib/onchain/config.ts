@@ -104,6 +104,33 @@ export const VERIFIED_POOLS: VerifiedPool[] = [
     ],
   },
   {
+    key: "uniswap-v3-arb-usdc-weth-005",
+    chainSlug: "arbitrum",
+    protocolDefillamaSlug: "uniswap-v3",
+    label: "USDC/WETH 0.05% (Arbitrum)",
+    // Confirmed via GeckoTerminal's top-pools API and directly on-chain
+    // (token0()/token1() called against the pool contract itself returned
+    // these exact two addresses), 2026-08-18.
+    poolAddress: "0xc6962004f452be9203591991d15f6b388e09e8d0",
+    tokens: [
+      {
+        address: "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+        symbol: "USDC",
+        decimals: 6,
+        coingeckoId: "usd-coin",
+      },
+      {
+        address: "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+        symbol: "WETH",
+        decimals: 18,
+        // A third distinct per-chain WETH id (same pattern as Base above) -
+        // confirmed via CoinGecko's /coins/arbitrum-one/contract/{address}
+        // lookup rather than reused from Ethereum's or Base's entry.
+        coingeckoId: "arbitrum-bridged-weth-arbitrum-one",
+      },
+    ],
+  },
+  {
     key: "pancakeswap-amm-bsc-usdt-wbnb",
     chainSlug: "bnb-chain",
     protocolDefillamaSlug: "pancakeswap-amm",

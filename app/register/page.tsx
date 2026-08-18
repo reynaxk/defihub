@@ -14,7 +14,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 const registerSchema = z.object({
   name: z.string().min(1, "Name is required").max(120),
   email: z.string().email("Enter a valid email"),
-  password: z.string().min(8, "At least 8 characters"),
+  password: z.string().min(8, "At least 8 characters").max(128, "At most 128 characters"),
 });
 
 type RegisterForm = z.infer<typeof registerSchema>;

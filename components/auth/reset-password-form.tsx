@@ -9,7 +9,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-const resetPasswordSchema = z.object({ password: z.string().min(8, "At least 8 characters") });
+const resetPasswordSchema = z.object({
+  password: z.string().min(8, "At least 8 characters").max(128, "At most 128 characters"),
+});
 
 type ResetPasswordForm = z.infer<typeof resetPasswordSchema>;
 

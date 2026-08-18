@@ -3,7 +3,7 @@ import { createPublicClient, erc20Abi, formatUnits, http, isAddress, type Addres
 import { auth } from "@/lib/auth/config";
 import { checkRateLimit } from "@/lib/security/rate-limit";
 import { getTokensForBalanceCheck } from "@/lib/database/queries/tokens";
-import { EVM_CHAINS, VIEM_CHAIN_BY_SLUG, rpcUrlFor } from "@/lib/wallet/config";
+import { EVM_CHAINS, VIEM_CHAIN_BY_SLUG, rpcUrlFor } from "@/lib/chains/rpc-client";
 
 // Each request fans out to 7 chains' RPC endpoints (1 native balance + 1
 // multicall each) - modest per-user cap since this is real external RPC

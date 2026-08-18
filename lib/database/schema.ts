@@ -241,6 +241,9 @@ export const protocolAiSummaries = pgTable("protocol_ai_summaries", {
 export const onchainVerifications = pgTable("onchain_verifications", {
   key: varchar("key", { length: 64 }).primaryKey(),
   protocolId: uuid("protocol_id").references(() => protocols.id, { onDelete: "cascade" }),
+  chainId: uuid("chain_id")
+    .notNull()
+    .references(() => chains.id, { onDelete: "cascade" }),
   label: text("label").notNull(),
   poolAddress: varchar("pool_address", { length: 128 }).notNull(),
   tvlUsd: numeric("tvl_usd", { precision: 24, scale: 2 }).notNull(),
@@ -443,5 +446,9 @@ export const onchainVerificationsRelations = relations(onchainVerifications, ({ 
   protocol: one(protocols, {
     fields: [onchainVerifications.protocolId],
     references: [protocols.id],
+  }),
+  chain: one(chains, {
+    fields: [onchainVerifications.chainId],
+    references: [chains.id],
   }),
 }));

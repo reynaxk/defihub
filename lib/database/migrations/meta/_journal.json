@@ -78,6 +78,20 @@
       "when": 1787041942096,
       "tag": "0010_lyrical_warlock",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1787090697002,
+      "tag": "0011_add_onchain_verifications_chain_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1787090778533,
+      "tag": "0012_onchain_verifications_chain_id_not_null",
+      "breakpoints": true
     }
   ]
 }

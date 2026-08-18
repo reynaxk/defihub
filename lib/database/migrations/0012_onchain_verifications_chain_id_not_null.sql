@@ -1,0 +1,1 @@
+ALTER TABLE "onchain_verifications" ALTER COLUMN "chain_id" SET NOT NULL;

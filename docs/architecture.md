@@ -80,24 +80,43 @@ abstraction layer exists specifically so this can change later — a
 `DefiDataProvider` backed by an indexer is a drop-in replacement — but there
 was no reason to build and pay for that infrastructure before it's needed.
 
-### On-chain verification (the one deliberate exception)
+### On-chain verification (a small, growing, still-bounded indexer)
 
-`lib/onchain/` reads two ERC-20 `balanceOf` values directly from a free
-public Ethereum RPC endpoint for one hand-picked, well-understood pool
-(Uniswap V3 USDC/WETH 0.05% — see `lib/onchain/config.ts`), and shows the
-resulting TVL on the Uniswap protocol page as an independent cross-check
-next to the DefiLlama figure. This is not the start of a general indexer:
-`VERIFIED_POOLS` is a short, hand-maintained list, each entry needs a human
-to confirm the contract addresses and that a plain balance read is actually
-the right TVL formula for that pool (true for a simple Uniswap V3 pool,
-*not* true for something like an Aave reserve, which needs aToken
-exchange-rate/debt accounting to get right — see the section above). Adding
-a new protocol here means adding a new, individually-reasoned entry, not
-extending a codebase that reads arbitrary contracts generically.
+`lib/onchain/` reads each pool contract's own ERC-20 token balances
+directly from a free public RPC endpoint — multi-chain, via the shared
+viem client config in `lib/chains/rpc-client.ts` (the same one the
+`/wallet` feature uses) — for a hand-picked, well-understood set of pools
+(`lib/onchain/config.ts`'s `VERIFIED_POOLS`), and shows the resulting TVL
+on each protocol's page as an independent cross-check next to the
+DefiLlama figure. `lib/onchain/verify-pool.ts` batches every pool on the
+same chain into one `multicall()` call rather than one RPC round-trip per
+token.
 
-Cost: zero — a public RPC endpoint, no paid tier, refreshed every 30 minutes
-by `workers/onchain/verify.ts` (`ETH_RPC_URL` env var lets you swap in a paid
-provider later if the public endpoint gets rate-limited).
+This is deliberately **not** a general indexer, even as the list grows:
+every entry still needs a human to confirm the contract address, chain,
+and that a plain "sum the pool's own token balances" read is actually the
+right TVL formula for that pool. That's true for AMM-style pools —
+Uniswap V2/V3 and structurally similar DEXes — regardless of chain,
+because it never touches the pool's internal accounting, only what the
+contract actually holds. It is *not* true for something like an Aave
+reserve, which needs aToken exchange-rate/debt accounting to get right —
+see the section above — so lending, staking, and vault protocols stay out
+of scope no matter how many AMM pools get added. Adding a new protocol or
+chain here means adding a new, individually-reasoned entry, not extending
+a codebase that reads arbitrary contracts generically. Verifying a
+protocol's most prominent pool(s) is not the same claim as having verified
+that protocol's entire TVL (a protocol can have thousands of pools) — the
+UI and this doc stay explicit about exactly what's covered.
+
+Prices still come from CoinGecko (`lib/providers/coingecko.ts`) — this
+indexer replaces DefiLlama's TVL computation with our own, but doesn't
+attempt to replace price discovery, which is a separate, much harder
+problem than reading a contract's own balance.
+
+Cost: zero — free public RPC endpoints, no paid tier, refreshed every 30
+minutes by `workers/onchain/verify.ts` (the per-chain `*_RPC_URL` env vars
+documented in `.env.example` let you swap in a paid provider later if a
+public endpoint gets rate-limited).
 
 ## Graceful degradation
 

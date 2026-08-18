@@ -1,10 +1,10 @@
 import { eq } from "drizzle-orm";
+import { createPublicClient, erc20Abi, http, type Address } from "viem";
 import { db } from "@/lib/database/client";
-import { onchainVerifications, protocols } from "@/lib/database/schema";
+import { onchainVerifications, protocols, chains } from "@/lib/database/schema";
 import { priceProvider } from "@/lib/providers";
-import { ProviderUnavailableError } from "@/lib/providers/types";
+import { VIEM_CHAIN_BY_SLUG, rpcUrlFor } from "@/lib/chains/rpc-client";
 import { VERIFIED_POOLS, type VerifiedPool } from "./config";
-import { getBlockNumber, getErc20Balance } from "./rpc";
 
 export interface OnchainVerificationResult {
   key: string;
@@ -13,15 +13,28 @@ export interface OnchainVerificationResult {
   tvlUsd: number;
   blockNumber: number;
   verifiedAt: Date;
+  chainSlug: string;
+  explorerUrl: string | null;
 }
 
 export async function getVerificationsForProtocol(
   protocolId: string,
 ): Promise<OnchainVerificationResult[]> {
   const rows = await db
-    .select()
+    .select({
+      key: onchainVerifications.key,
+      label: onchainVerifications.label,
+      poolAddress: onchainVerifications.poolAddress,
+      tvlUsd: onchainVerifications.tvlUsd,
+      blockNumber: onchainVerifications.blockNumber,
+      verifiedAt: onchainVerifications.verifiedAt,
+      chainSlug: chains.slug,
+      explorerUrl: chains.explorerUrl,
+    })
     .from(onchainVerifications)
+    .innerJoin(chains, eq(chains.id, onchainVerifications.chainId))
     .where(eq(onchainVerifications.protocolId, protocolId));
+
   return rows.map((r) => ({
     key: r.key,
     label: r.label,
@@ -29,73 +42,172 @@ export async function getVerificationsForProtocol(
     tvlUsd: Number(r.tvlUsd),
     blockNumber: Number(r.blockNumber),
     verifiedAt: r.verifiedAt,
+    chainSlug: r.chainSlug,
+    explorerUrl: r.explorerUrl,
   }));
 }
 
+interface PoolOutcome {
+  key: string;
+  ok: boolean;
+  error?: string;
+  tvlUsd?: number;
+  blockNumber?: bigint;
+}
+
 /**
- * Reads both tokens' raw balances of the pool contract directly from
- * Ethereum, prices them via the existing CoinGecko price provider, and
- * upserts the result. Throws ProviderUnavailableError if the RPC or price
- * provider is unreachable - callers (the worker) should catch and skip.
+ * Verifies every pool on a single chain in one batched round-trip: one
+ * multicall covering every pool-token balanceOf read on this chain, plus one
+ * getBlockNumber. Mirrors the batching pattern already verified working for
+ * the wallet balances route (app/api/wallet/balances/route.ts).
  */
-async function verifyPool(pool: VerifiedPool): Promise<void> {
-  const [protocolRow] = await db
-    .select({ id: protocols.id })
-    .from(protocols)
-    .where(eq(protocols.defillamaSlug, pool.protocolDefillamaSlug));
-
-  const [balance0, balance1, blockNumber, prices] = await Promise.all([
-    getErc20Balance(pool.token0.address, pool.poolAddress),
-    getErc20Balance(pool.token1.address, pool.poolAddress),
-    getBlockNumber(),
-    priceProvider.getPrices([pool.token0.coingeckoId, pool.token1.coingeckoId]),
-  ]);
-
-  const priceById = new Map(prices.map((p) => [p.id, p.priceUsd]));
-  const price0 = priceById.get(pool.token0.coingeckoId);
-  const price1 = priceById.get(pool.token1.coingeckoId);
-  if (price0 == null || price1 == null) {
-    throw new ProviderUnavailableError(
-      "coingecko",
-      `missing USD price for ${pool.token0.symbol} or ${pool.token1.symbol}`,
-    );
+async function verifyPoolsOnChain(
+  chainSlug: string,
+  pools: VerifiedPool[],
+  priceById: Map<string, number>,
+): Promise<PoolOutcome[]> {
+  const viemChain = VIEM_CHAIN_BY_SLUG.get(chainSlug);
+  if (!viemChain) {
+    return pools.map((p) => ({
+      key: p.key,
+      ok: false,
+      error: `no RPC configured for chain "${chainSlug}"`,
+    }));
   }
 
-  const amount0 = Number(balance0) / 10 ** pool.token0.decimals;
-  const amount1 = Number(balance1) / 10 ** pool.token1.decimals;
-  const tvlUsd = amount0 * price0 + amount1 * price1;
+  const client = createPublicClient({ chain: viemChain, transport: http(rpcUrlFor(chainSlug)) });
 
-  await db
-    .insert(onchainVerifications)
-    .values({
-      key: pool.key,
-      protocolId: protocolRow?.id ?? null,
-      label: pool.label,
-      poolAddress: pool.poolAddress,
-      tvlUsd: tvlUsd.toFixed(2),
-      blockNumber: String(blockNumber),
-    })
-    .onConflictDoUpdate({
-      target: onchainVerifications.key,
-      set: {
-        protocolId: protocolRow?.id ?? null,
-        tvlUsd: tvlUsd.toFixed(2),
-        blockNumber: String(blockNumber),
-        verifiedAt: new Date(),
-      },
-    });
+  const calls = pools.flatMap((pool) =>
+    pool.tokens.map((token) => ({
+      address: token.address as Address,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [pool.poolAddress as Address],
+    })),
+  );
+
+  // Destructured inline (rather than pre-declared with an explicit type)
+  // so viem's multicall return type is inferred from this exact call's
+  // `contracts` argument - annotating the variable ahead of time via
+  // `Awaited<ReturnType<typeof client.multicall>>` resolves the generic
+  // with no argument context and collapses each result to `{}`.
+  const chainRead = await Promise.all([
+    client.multicall({ contracts: calls }),
+    client.getBlockNumber(),
+  ]).catch((err) => {
+    const message = err instanceof Error ? err.message : String(err);
+    return { chainReadError: message } as const;
+  });
+
+  if ("chainReadError" in chainRead) {
+    return pools.map((p) => ({ key: p.key, ok: false, error: `chain read failed: ${chainRead.chainReadError}` }));
+  }
+  const [multicallResults, blockNumber] = chainRead;
+
+  const outcomes: PoolOutcome[] = [];
+  let offset = 0;
+  for (const pool of pools) {
+    const slice = multicallResults.slice(offset, offset + pool.tokens.length);
+    offset += pool.tokens.length;
+
+    const failedToken = pool.tokens.find((_, i) => slice[i]?.status !== "success");
+    if (failedToken) {
+      outcomes.push({
+        key: pool.key,
+        ok: false,
+        error: `balance read failed for ${failedToken.symbol}`,
+      });
+      continue;
+    }
+
+    let tvlUsd = 0;
+    let missingPriceSymbol: string | undefined;
+    for (let i = 0; i < pool.tokens.length; i++) {
+      const token = pool.tokens[i];
+      const price = priceById.get(token.coingeckoId);
+      if (price == null) {
+        missingPriceSymbol = token.symbol;
+        break;
+      }
+      const balance = slice[i].result as bigint;
+      tvlUsd += (Number(balance) / 10 ** token.decimals) * price;
+    }
+
+    if (missingPriceSymbol) {
+      outcomes.push({ key: pool.key, ok: false, error: `missing USD price for ${missingPriceSymbol}` });
+      continue;
+    }
+
+    outcomes.push({ key: pool.key, ok: true, tvlUsd, blockNumber });
+  }
+
+  return outcomes;
 }
 
 export async function verifyAllPools(): Promise<{ key: string; ok: boolean; error?: string }[]> {
+  if (VERIFIED_POOLS.length === 0) return [];
+
+  const [protocolRows, chainRows] = await Promise.all([
+    db.select({ id: protocols.id, defillamaSlug: protocols.defillamaSlug }).from(protocols),
+    db.select({ id: chains.id, slug: chains.slug }).from(chains),
+  ]);
+  const protocolIdBySlug = new Map(protocolRows.map((p) => [p.defillamaSlug, p.id]));
+  const chainIdBySlug = new Map(chainRows.map((c) => [c.slug, c.id]));
+
+  const uniqueCoingeckoIds = [...new Set(VERIFIED_POOLS.flatMap((p) => p.tokens.map((t) => t.coingeckoId)))];
+  let priceById: Map<string, number>;
+  try {
+    const prices = await priceProvider.getPrices(uniqueCoingeckoIds);
+    priceById = new Map(prices.map((p) => [p.id, p.priceUsd]));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return VERIFIED_POOLS.map((p) => ({ key: p.key, ok: false, error: `price lookup failed: ${message}` }));
+  }
+
+  const poolsByChain = new Map<string, VerifiedPool[]>();
+  for (const pool of VERIFIED_POOLS) {
+    const list = poolsByChain.get(pool.chainSlug) ?? [];
+    list.push(pool);
+    poolsByChain.set(pool.chainSlug, list);
+  }
+
+  const perChainOutcomes = await Promise.all(
+    [...poolsByChain.entries()].map(([chainSlug, pools]) => verifyPoolsOnChain(chainSlug, pools, priceById)),
+  );
+  const outcomeByKey = new Map(perChainOutcomes.flat().map((o) => [o.key, o]));
+
   const results: { key: string; ok: boolean; error?: string }[] = [];
   for (const pool of VERIFIED_POOLS) {
+    const outcome = outcomeByKey.get(pool.key);
+    if (!outcome || !outcome.ok) {
+      results.push({ key: pool.key, ok: false, error: outcome?.error ?? "no result" });
+      continue;
+    }
+
+    const chainId = chainIdBySlug.get(pool.chainSlug);
+    if (!chainId) {
+      results.push({ key: pool.key, ok: false, error: `chain "${pool.chainSlug}" not found in DB` });
+      continue;
+    }
+
+    const protocolId = protocolIdBySlug.get(pool.protocolDefillamaSlug) ?? null;
+    const tvlUsd = outcome.tvlUsd!.toFixed(2);
+    const blockNumber = String(outcome.blockNumber!);
+
     try {
-      await verifyPool(pool);
+      await db
+        .insert(onchainVerifications)
+        .values({ key: pool.key, protocolId, chainId, label: pool.label, poolAddress: pool.poolAddress, tvlUsd, blockNumber })
+        .onConflictDoUpdate({
+          target: onchainVerifications.key,
+          set: { protocolId, chainId, tvlUsd, blockNumber, verifiedAt: new Date() },
+        });
       results.push({ key: pool.key, ok: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       results.push({ key: pool.key, ok: false, error: message });
     }
   }
+
   return results;
 }

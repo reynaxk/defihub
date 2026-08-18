@@ -14,6 +14,7 @@ import {
 } from "../../lib/database/schema";
 import { evaluateCondition } from "../../lib/alerts/evaluate";
 import { sendEmail } from "../../lib/notifications/email";
+import { escapeHtml } from "../../lib/utils/html";
 
 interface CurrentAndPrevious {
   current: number;
@@ -90,15 +91,6 @@ async function readPoolApy(externalPoolId: string): Promise<CurrentAndPrevious |
 // name), not direct user input - but it's still external content flowing
 // into an HTML email, so it gets escaped like any other untrusted string
 // rather than trusted just because the immediate risk is low.
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
 const CONDITION_PHRASES: Record<string, string> = {
   above: "rose above",
   below: "fell below",

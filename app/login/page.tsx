@@ -14,7 +14,7 @@ export const metadata: Metadata = { title: "Sign in" };
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ callbackUrl?: string; error?: string; registered?: string }>;
+  searchParams: Promise<{ callbackUrl?: string; error?: string; registered?: string; reset?: string }>;
 }) {
   const params = await searchParams;
   const callbackUrl = params.callbackUrl || "/dashboard";
@@ -64,6 +64,11 @@ export default async function LoginPage({
               Account created — sign in below.
             </p>
           )}
+          {params.reset && (
+            <p className="rounded-md bg-[var(--success-text)]/10 px-3 py-2 text-sm text-[var(--success-text)]">
+              Password reset — sign in with your new password.
+            </p>
+          )}
 
           {googleSignInEnabled && (
             <>
@@ -86,7 +91,12 @@ export default async function LoginPage({
               <Input id="email" name="email" type="email" required autoComplete="email" />
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="password">Password</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="password">Password</Label>
+                <Link href="/forgot-password" className="text-xs text-primary hover:underline">
+                  Forgot password?
+                </Link>
+              </div>
               <Input id="password" name="password" type="password" required autoComplete="current-password" />
             </div>
             <Button type="submit" className="w-full">

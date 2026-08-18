@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Search } from "lucide-react";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { cn } from "@/lib/utils";
@@ -23,13 +24,16 @@ function groupResults(results: SearchResult[]) {
 }
 
 export function SearchBox({ className }: { className?: string }) {
+  const router = useRouter();
   const [query, setQuery] = useState("");
   const [rawResults, setRawResults] = useState<SearchResult[]>([]);
   const [open, setOpen] = useState(false);
   const [rawLoading, setRawLoading] = useState(false);
+  const [highlightedIndex, setHighlightedIndex] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const listboxId = useId();
 
   // Cmd/Ctrl+K focuses search from anywhere, always (even mid-typing, the
   // standard convention). "/" is a secondary shortcut that backs off if the
@@ -70,6 +74,7 @@ export function SearchBox({ className }: { className?: string }) {
         if (res.ok) {
           const data = await res.json();
           setRawResults(data.results ?? []);
+          setHighlightedIndex(-1);
         }
       } finally {
         setRawLoading(false);
@@ -83,7 +88,40 @@ export function SearchBox({ className }: { className?: string }) {
   const results = queryLongEnough ? rawResults : [];
   const loading = queryLongEnough && rawLoading;
   const groups = groupResults(results);
+  // Keyboard nav and aria-activedescendant index into rendering order
+  // (grouped by kind), not the raw API response order - those can differ,
+  // and a mismatch there would highlight one item while Enter selects
+  // another.
+  const flatResults = groups.flatMap((g) => g.items);
+  const flatIndexByKey = new Map(flatResults.map((item, i) => [`${item.kind}-${item.href}`, i]));
   const showDropdown = open && queryLongEnough;
+
+  function selectResult(item: SearchResult) {
+    setOpen(false);
+    setQuery("");
+    setHighlightedIndex(-1);
+    router.push(item.href);
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Escape") {
+      setOpen(false);
+      inputRef.current?.blur();
+      return;
+    }
+    if (!showDropdown || flatResults.length === 0) return;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlightedIndex((i) => (i + 1) % flatResults.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlightedIndex((i) => (i <= 0 ? flatResults.length - 1 : i - 1));
+    } else if (e.key === "Enter" && highlightedIndex >= 0) {
+      e.preventDefault();
+      selectResult(flatResults[highlightedIndex]);
+    }
+  }
 
   return (
     <div
@@ -101,14 +139,14 @@ export function SearchBox({ className }: { className?: string }) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => setOpen(true)}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              setOpen(false);
-              inputRef.current?.blur();
-            }
-          }}
+          onKeyDown={handleKeyDown}
           placeholder="Search protocols, chains, tokens..."
           aria-label="Search"
+          role="combobox"
+          aria-expanded={showDropdown}
+          aria-controls={listboxId}
+          aria-autocomplete="list"
+          aria-activedescendant={highlightedIndex >= 0 ? `${listboxId}-option-${highlightedIndex}` : undefined}
           className="h-8 w-full rounded-lg border border-border bg-background py-1.5 pr-10 pl-8 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
         />
         <kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
@@ -117,7 +155,11 @@ export function SearchBox({ className }: { className?: string }) {
       </div>
 
       {showDropdown && (
-        <div className="motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-top-1 absolute top-full left-0 z-50 mt-1.5 w-full min-w-72 overflow-hidden rounded-lg border border-border bg-popover shadow-lg duration-150">
+        <div
+          id={listboxId}
+          role="listbox"
+          className="motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-top-1 absolute top-full left-0 z-50 mt-1.5 w-full min-w-72 overflow-hidden rounded-lg border border-border bg-popover shadow-lg duration-150"
+        >
           {loading && groups.length === 0 && (
             <div className="px-3 py-4 text-center text-sm text-muted-foreground">Searching…</div>
           )}
@@ -131,21 +173,31 @@ export function SearchBox({ className }: { className?: string }) {
               <div className="px-3 py-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
                 {KIND_LABELS[group.kind]}
               </div>
-              {group.items.map((item) => (
+              {group.items.map((item) => {
+                const flatIndex = flatIndexByKey.get(`${item.kind}-${item.href}`);
+                return (
                 <Link
                   key={`${item.kind}-${item.href}`}
+                  id={`${listboxId}-option-${flatIndex}`}
+                  role="option"
+                  aria-selected={highlightedIndex === flatIndex}
                   href={item.href}
                   onClick={() => {
                     setOpen(false);
                     setQuery("");
+                    setHighlightedIndex(-1);
                   }}
-                  className="flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-muted"
+                  className={cn(
+                    "flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-muted",
+                    highlightedIndex === flatIndex && "bg-muted",
+                  )}
                 >
                   <EntityLogo src={item.logoUrl} name={item.name} size={20} />
                   <span className="font-medium">{item.name}</span>
                   {item.subtitle && <span className="text-muted-foreground">{item.subtitle}</span>}
                 </Link>
-              ))}
+                );
+              })}
             </div>
           ))}
         </div>

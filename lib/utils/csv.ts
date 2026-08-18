@@ -3,9 +3,19 @@ export interface CsvColumn<T> {
   value: (row: T) => string | number | boolean | null | undefined;
 }
 
+const FORMULA_LEAD_CHARS = ["=", "+", "-", "@", "\t", "\r"];
+
 function escapeCell(value: string | number | boolean | null | undefined): string {
   if (value == null) return "";
-  const str = String(value);
+  let str = String(value);
+  // Names/categories in these exports come from DefiLlama/CoinGecko - external,
+  // only loosely-controlled content (same trust level as the alert-email
+  // displayName this app already HTML-escapes). A cell starting with =, +, -,
+  // @, or a tab/CR is interpreted as a formula by Excel/Sheets on open, which
+  // is a known RCE/data-exfiltration vector (CSV/formula injection, CWE-1236).
+  // Prefixing with a single quote neutralizes it in every major spreadsheet
+  // app while staying human-readable.
+  if (FORMULA_LEAD_CHARS.some((c) => str.startsWith(c))) str = `'${str}`;
   // RFC 4180: quote a field if it contains a comma, quote, or newline;
   // double up any quotes inside it.
   return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;

@@ -29,6 +29,12 @@ class RateLimitedSignin extends CredentialsSignin {
 const LOGIN_IP_LIMIT = { limit: 20, windowMs: 5 * 60 * 1000 };
 const LOGIN_EMAIL_LIMIT = { limit: 10, windowMs: 5 * 60 * 1000 };
 
+// A real bcrypt hash of a random 32-byte value generated for this purpose -
+// not derived from any real password. Used purely so bcrypt.compare() always
+// runs below, regardless of whether the account exists.
+const DUMMY_PASSWORD_HASH =
+  "$2b$12$xeLH.C5l1tv0RBKC40BShuWNPl0RHBnzds4ms/yx6nhHpMFn7vyZe";
+
 const providers: Provider[] = [
   Credentials({
     name: "Email and password",
@@ -47,10 +53,13 @@ const providers: Provider[] = [
       if (!ipLimit.allowed || !emailLimit.allowed) throw new RateLimitedSignin();
 
       const [user] = await db.select().from(users).where(eq(users.email, email));
-      if (!user || !user.passwordHash) return null;
-
-      const valid = await bcrypt.compare(password, user.passwordHash);
-      if (!valid) return null;
+      // Always run bcrypt.compare, even for a nonexistent account or one
+      // that only has an OAuth identity (no passwordHash) - comparing
+      // against a fixed dummy hash keeps this branch's latency in line with
+      // the real-user branch below, so response timing can't be used to
+      // enumerate which emails have an account.
+      const valid = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+      if (!user || !user.passwordHash || !valid) return null;
 
       return { id: user.id, email: user.email, name: user.name, image: user.image };
     },

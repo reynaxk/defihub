@@ -15,9 +15,15 @@ export function StatTile({
   value?: string;
   icon?: LucideIcon;
   valueClassName?: string;
-  // Optional progressive enhancement: `value` is still required (and is
-  // what renders with no JS), animate provides the raw number so the
-  // client can count up to it instead of just displaying the string.
+  // `value` is the plain formatted string, rendered as-is whenever `animate`
+  // is omitted or falsy (several call sites do exactly this - e.g. a null
+  // data point where there's nothing real to count up to). When `animate`
+  // IS provided, AnimatedNumber renders instead and `value` is not used for
+  // that tile at all - it isn't a no-JS fallback (there's no <noscript>
+  // wiring here, and this whole app already requires JS for its core
+  // interactions - search, alerts, watchlist, sign-in), just a formatted
+  // string some callers happen to also pass for symmetry with their
+  // non-animated siblings.
   animate?: { value: number; format: AnimatedNumberFormat };
   // Escape hatch for values that aren't a plain formatted string - e.g. a
   // colored PercentChange node. Takes priority over `value`/`animate`.

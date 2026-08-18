@@ -94,13 +94,11 @@ export default async function HomePage() {
         />
         <StatTile
           label="Protocols tracked"
-          value={protocolCount.toLocaleString("en-US")}
           icon={Layers}
           animate={{ value: protocolCount, format: "count" }}
         />
         <StatTile
           label="Yield pools"
-          value={yieldPoolCount.toLocaleString("en-US")}
           icon={Sprout}
           animate={{ value: yieldPoolCount, format: "count" }}
         />

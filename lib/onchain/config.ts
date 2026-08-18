@@ -75,6 +75,35 @@ export const VERIFIED_POOLS: VerifiedPool[] = [
     ],
   },
   {
+    key: "aerodrome-v1-base-usdc-weth",
+    chainSlug: "base",
+    protocolDefillamaSlug: "aerodrome-v1",
+    label: "USDC/WETH (Base)",
+    // Confirmed via GeckoTerminal's top-pools API and directly on-chain
+    // (token0()/token1() called against the pool contract itself returned
+    // these exact two addresses), 2026-08-18.
+    poolAddress: "0xcdac0d6c6c59727a65f871236188350531885c43",
+    tokens: [
+      {
+        address: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        symbol: "USDC",
+        decimals: 6,
+        coingeckoId: "usd-coin",
+      },
+      {
+        address: "0x4200000000000000000000000000000000000006",
+        symbol: "WETH",
+        decimals: 18,
+        // NOT the same CoinGecko id as Ethereum's WETH ("weth") - Base's
+        // WETH is a distinct bridged-asset listing. Confirmed via
+        // CoinGecko's /coins/base/contract/{address} lookup rather than
+        // assumed, since reusing "weth" here would have silently returned
+        // no price (or the wrong one) for this token.
+        coingeckoId: "l2-standard-bridged-weth-base",
+      },
+    ],
+  },
+  {
     key: "pancakeswap-amm-bsc-usdt-wbnb",
     chainSlug: "bnb-chain",
     protocolDefillamaSlug: "pancakeswap-amm",

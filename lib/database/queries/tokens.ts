@@ -295,11 +295,18 @@ export async function getTokenByAddress(address: string, chainSlug?: string): Pr
   const conditions = [eq(tokens.address, address)];
   if (chainSlug) conditions.push(eq(chains.slug, chainSlug));
 
+  // A token address can exist on more than one chain (e.g. the native-ETH
+  // placeholder address appears on several). Without an explicit order,
+  // which one this returns for an address-only lookup isn't guaranteed
+  // stable across requests - order by chain slug so a bare /token/{address}
+  // visit (no ?chain=) at least always resolves to the same one rather than
+  // whatever Postgres happens to return first.
   const [row] = await db
     .select({ token: tokens, chainName: chains.name, chainSlug: chains.slug })
     .from(tokens)
     .innerJoin(chains, eq(chains.id, tokens.chainId))
     .where(and(...conditions))
+    .orderBy(chains.slug)
     .limit(1);
 
   if (!row) return null;

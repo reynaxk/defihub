@@ -1,5 +1,6 @@
 import { apiOptions, apiSuccess, checkPublicApiRateLimit } from "@/lib/api/response";
 import { getYieldPoolsList } from "@/lib/database/queries/yields";
+import { parseOptionalNumber } from "@/lib/utils/query-params";
 
 export async function OPTIONS() {
   return apiOptions();
@@ -18,8 +19,8 @@ export async function GET(request: Request) {
     stablecoinOnly: searchParams.get("stable") === "1",
     ilRisk: risk === "yes" || risk === "no" ? risk : undefined,
     search: searchParams.get("q") ?? undefined,
-    minApy: searchParams.get("minApy") ? Number(searchParams.get("minApy")) : undefined,
-    minTvl: searchParams.get("minTvl") ? Number(searchParams.get("minTvl")) : undefined,
+    minApy: parseOptionalNumber(searchParams.get("minApy")),
+    minTvl: parseOptionalNumber(searchParams.get("minTvl")),
     page: searchParams.get("page") ? Number(searchParams.get("page")) : undefined,
     pageSize: searchParams.get("pageSize") ? Number(searchParams.get("pageSize")) : undefined,
   });

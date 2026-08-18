@@ -1,6 +1,7 @@
 import { checkPublicApiRateLimit } from "@/lib/api/response";
 import { getYieldPools } from "@/lib/database/queries/yields";
 import { toCsv, csvResponse } from "@/lib/utils/csv";
+import { parseOptionalNumber } from "@/lib/utils/query-params";
 
 type YieldPool = Awaited<ReturnType<typeof getYieldPools>>[number];
 
@@ -16,8 +17,8 @@ export async function GET(request: Request) {
     stablecoinOnly: searchParams.get("stable") === "1",
     ilRisk: risk === "yes" || risk === "no" ? risk : undefined,
     search: searchParams.get("q") ?? undefined,
-    minApy: searchParams.get("minApy") ? Number(searchParams.get("minApy")) : undefined,
-    minTvl: searchParams.get("minTvl") ? Number(searchParams.get("minTvl")) : undefined,
+    minApy: parseOptionalNumber(searchParams.get("minApy")),
+    minTvl: parseOptionalNumber(searchParams.get("minTvl")),
   });
 
   const csv = toCsv<YieldPool>(rows, [

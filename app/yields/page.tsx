@@ -7,6 +7,7 @@ import { getYieldCategories, getYieldPoolsList } from "@/lib/database/queries/yi
 import { getAllChains } from "@/lib/database/queries/chains";
 import { getWatchedPoolIds } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
+import { parseOptionalNumber } from "@/lib/utils/query-params";
 
 export const metadata: Metadata = {
   title: "Yields",
@@ -46,7 +47,7 @@ export default async function YieldsPage({
       stablecoinOnly: params.stable === "1",
       ilRisk,
       search: params.q,
-      minTvl: params.minTvl ? Number(params.minTvl) : undefined,
+      minTvl: parseOptionalNumber(params.minTvl),
       sortBy,
       sortDir,
       page,

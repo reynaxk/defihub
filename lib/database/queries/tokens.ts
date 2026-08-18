@@ -93,7 +93,13 @@ function normalizeTokenRows<T extends { priceUsd: string | null; marketCap: stri
 
 // Unpaginated - used by CSV export, the v1 API's simple mode, and the chain
 // page's "top tokens on this chain" slice, none of which want a page/total
-// envelope. ~450 tokens today across 8 chains; fine to fetch in one shot.
+// envelope. ~450 tokens today across 8 chains, comfortably under the cap
+// below - same defense-in-depth reasoning as protocols.ts's
+// getProtocolsForExport (EXPORT_MAX_ROWS there): the CSV export path has no
+// chain filter option to naturally bound it, so this is a ceiling for
+// if/when token coverage grows, not a limit expected to bind today.
+const TOKENS_MAX_ROWS = 5000;
+
 export async function getTokensList(
   opts: { chainSlug?: string; sort?: TokenSort } = {},
 ): Promise<TokenListItem[]> {
@@ -106,7 +112,8 @@ export async function getTokensList(
     .innerJoin(chains, eq(chains.id, tokens.chainId))
     .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
     .where(conditions.length ? and(...conditions) : undefined)
-    .orderBy(sql`${orderColumn} desc nulls last`);
+    .orderBy(sql`${orderColumn} desc nulls last`)
+    .limit(TOKENS_MAX_ROWS);
 
   return normalizeTokenRows(rows);
 }

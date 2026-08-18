@@ -61,7 +61,19 @@ async function readChainTvl(slug: string): Promise<CurrentAndPrevious | null> {
 }
 
 async function readTokenPrice(coingeckoId: string): Promise<CurrentAndPrevious | null> {
-  const [token] = await db.select().from(tokens).where(eq(tokens.coingeckoId, coingeckoId)).limit(1);
+  // coingeckoId isn't unique per row - the same asset can have a row per
+  // chain it's deployed on (searchTokenTargets treats this as fine, since
+  // the design intent is "any chain's price is close enough"). Still worth
+  // an explicit order: without one, which chain's row backs a given alert
+  // could silently change between cron runs as sync data is re-upserted,
+  // so a user's "above $X" alert could flip in and out of firing based on
+  // which chain got picked rather than a real price move.
+  const [token] = await db
+    .select()
+    .from(tokens)
+    .where(eq(tokens.coingeckoId, coingeckoId))
+    .orderBy(tokens.id)
+    .limit(1);
   if (!token) return null;
 
   const points = await db
@@ -108,6 +120,13 @@ function alertEmailHtml(params: {
   const name = escapeHtml(params.displayName);
   const phrase = CONDITION_PHRASES[params.condition] ?? params.condition.replace(/_/g, " ");
   const isPercent = params.condition.startsWith("percent_change");
+  // Explicit locale, unlike most of this app's other toLocaleString() calls
+  // (which are fine following a visiting browser's own locale) - this is a
+  // raw HTML string generated server-side for an email with no browser
+  // involved at all, so whatever locale the server process resolves is the
+  // only one that will ever apply. Confirmed live: running this worker in a
+  // non-US-locale shell rendered "4 847 398 772" (space-separated) instead
+  // of "4,847,398,772" in the actual email body.
 
   return `
 <!DOCTYPE html>
@@ -129,9 +148,9 @@ function alertEmailHtml(params: {
                 </p>
                 <h1 style="margin:0 0 16px;font-size:22px;line-height:1.3;color:#18181b;">${name}</h1>
                 <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#3f3f46;">
-                  Now <strong style="color:#18181b;">${params.current.toLocaleString()}${isPercent ? "%" : ""}</strong>,
+                  Now <strong style="color:#18181b;">${params.current.toLocaleString("en-US")}${isPercent ? "%" : ""}</strong>,
                   which ${phrase} your threshold of
-                  <strong style="color:#18181b;">${params.threshold.toLocaleString()}${isPercent ? "%" : ""}</strong>.
+                  <strong style="color:#18181b;">${params.threshold.toLocaleString("en-US")}${isPercent ? "%" : ""}</strong>.
                 </p>
                 <a href="${params.appUrl}/alerts" style="display:inline-block;background:#3987e5;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 20px;border-radius:8px;">
                   Manage your alerts

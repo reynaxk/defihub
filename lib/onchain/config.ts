@@ -131,6 +131,40 @@ export const VERIFIED_POOLS: VerifiedPool[] = [
     ],
   },
   {
+    key: "uniswap-v3-op-usdc-weth-03",
+    chainSlug: "optimism",
+    protocolDefillamaSlug: "uniswap-v3",
+    label: "USDC/WETH 0.3% (Optimism)",
+    // Confirmed via GeckoTerminal's top-pools API and directly on-chain
+    // (token0()/token1() called against the pool contract itself returned
+    // these exact two addresses), 2026-08-18.
+    poolAddress: "0xc1738d90e2e26c35784a0d3e3d8a9f795074bca4",
+    tokens: [
+      {
+        address: "0x0b2c639c533813f4aa9d7837caf62653d097ff85",
+        symbol: "USDC",
+        decimals: 6,
+        // CoinGecko's /coins/optimistic-ethereum/contract/{address} lookup
+        // for this exact address returned id "usdc" - which turned out to
+        // be a red herring: that id doesn't resolve on /simple/price at
+        // all (a different, non-pricing-active listing that happens to
+        // share the slug). Cross-checked the other direction instead -
+        // fetched /coins/usd-coin directly and confirmed its own
+        // "platforms.optimistic-ethereum" field lists this exact address.
+        // "usd-coin" is the id that actually prices; used that.
+        coingeckoId: "usd-coin",
+      },
+      {
+        address: "0x4200000000000000000000000000000000000006",
+        symbol: "WETH",
+        decimals: 18,
+        // Another distinct per-chain WETH id, same pattern as Base/Arbitrum
+        // above - confirmed via the contract lookup, not assumed.
+        coingeckoId: "l2-standard-bridged-weth-optimism",
+      },
+    ],
+  },
+  {
     key: "pancakeswap-amm-bsc-usdt-wbnb",
     chainSlug: "bnb-chain",
     protocolDefillamaSlug: "pancakeswap-amm",

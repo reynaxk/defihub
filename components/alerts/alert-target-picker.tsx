@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -32,9 +32,11 @@ export function AlertTargetPicker({
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<TargetOption[]>([]);
   const [open, setOpen] = useState(false);
+  const [highlightedIndex, setHighlightedIndex] = useState(-1);
   const containerRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastType = useRef(type);
+  const listboxId = useId();
 
   // Switching alert type invalidates whatever was searched/selected under
   // the previous type - a protocol slug is meaningless once you're
@@ -64,6 +66,7 @@ export function AlertTargetPicker({
       if (res.ok) {
         const data = await res.json();
         setResults(data.results ?? []);
+        setHighlightedIndex(-1);
       }
     }, 200);
     return () => {
@@ -77,6 +80,26 @@ export function AlertTargetPicker({
     onChange(option.value);
     setQuery(option.label);
     setOpen(false);
+    setHighlightedIndex(-1);
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Escape") {
+      setOpen(false);
+      return;
+    }
+    if (!open || visibleResults.length === 0) return;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlightedIndex((i) => (i + 1) % visibleResults.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlightedIndex((i) => (i <= 0 ? visibleResults.length - 1 : i - 1));
+    } else if (e.key === "Enter" && highlightedIndex >= 0) {
+      e.preventDefault();
+      select(visibleResults[highlightedIndex]);
+    }
   }
 
   return (
@@ -96,31 +119,42 @@ export function AlertTargetPicker({
             onChange("");
           }}
           onFocus={() => setOpen(true)}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") setOpen(false);
-          }}
+          onKeyDown={handleKeyDown}
           placeholder={PLACEHOLDER_BY_TYPE[type] ?? "Search..."}
           aria-label="Alert target"
+          role="combobox"
+          aria-expanded={open && queryLongEnough}
+          aria-controls={listboxId}
+          aria-autocomplete="list"
+          aria-activedescendant={highlightedIndex >= 0 ? `${listboxId}-option-${highlightedIndex}` : undefined}
           className="pl-8"
           autoComplete="off"
         />
       </div>
 
       {open && queryLongEnough && (
-        <div className="absolute top-full left-0 z-50 mt-1.5 max-h-64 w-full min-w-64 overflow-y-auto rounded-lg border border-border bg-popover shadow-lg">
+        <div
+          id={listboxId}
+          role="listbox"
+          className="absolute top-full left-0 z-50 mt-1.5 max-h-64 w-full min-w-64 overflow-y-auto rounded-lg border border-border bg-popover shadow-lg"
+        >
           {visibleResults.length === 0 ? (
             <div className="px-3 py-3 text-center text-sm text-muted-foreground">
               No matches for &ldquo;{query}&rdquo;
             </div>
           ) : (
-            visibleResults.map((option) => (
+            visibleResults.map((option, index) => (
               <button
                 key={option.value}
+                id={`${listboxId}-option-${index}`}
+                role="option"
+                aria-selected={value === option.value}
                 type="button"
                 onClick={() => select(option)}
+                onMouseEnter={() => setHighlightedIndex(index)}
                 className={cn(
                   "flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left text-sm hover:bg-muted",
-                  value === option.value && "bg-muted",
+                  (value === option.value || highlightedIndex === index) && "bg-muted",
                 )}
               >
                 <span className="font-medium">{option.label}</span>

@@ -13,17 +13,26 @@ export function SettingsForm({ initialName, email }: { initialName: string; emai
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setIsSubmitting(true);
-    const res = await fetch("/api/settings", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    setIsSubmitting(false);
-    if (!res.ok) {
-      toast.error("Couldn't save changes");
-      return;
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) {
+        toast.error("Couldn't save changes");
+        return;
+      }
+      toast.success("Saved");
+    } catch {
+      // fetch itself rejecting (offline, DNS failure) rather than
+      // resolving with a non-2xx response - without this catch, the
+      // exception would skip setIsSubmitting(false) below entirely and
+      // leave the button stuck on "Saving..." until a page reload.
+      toast.error("Couldn't save changes - check your connection");
+    } finally {
+      setIsSubmitting(false);
     }
-    toast.success("Saved");
   }
 
   return (

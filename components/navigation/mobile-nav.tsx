@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { usePathname } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -17,6 +18,21 @@ export function MobileNav({ links }: { links: { href: string; label: string }[] 
   // readers would announce "button" for something that just links to a
   // page. Controlled open state + a plain Link keeps the native link role.
   const [open, setOpen] = useState(false);
+  const pathname = usePathname();
+  const lastPathname = useRef(pathname);
+
+  // Closes on any navigation, not just the plain browse links below - the
+  // embedded SearchBox's own results are real <Link>s too (selecting one
+  // navigates via next/link), but SearchBox has no idea it's nested inside
+  // a sheet, so it can't close this on its own. Driving this off the route
+  // itself covers every current and future way to navigate from in here,
+  // rather than threading a close callback through each one individually.
+  useEffect(() => {
+    if (lastPathname.current !== pathname) {
+      lastPathname.current = pathname;
+      setOpen(false);
+    }
+  }, [pathname]);
 
   return (
     <Sheet open={open} onOpenChange={setOpen}>

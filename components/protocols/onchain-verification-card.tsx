@@ -36,7 +36,7 @@ export function OnchainVerificationCard({
             <div className="text-right">
               <p className="font-medium tabular-nums">{formatUsd(v.tvlUsd)}</p>
               <p className="text-xs text-muted-foreground">
-                block {v.blockNumber.toLocaleString()} · {formatDistanceToNow(v.verifiedAt, { addSuffix: true })}
+                block {v.blockNumber.toLocaleString("en-US")} · {formatDistanceToNow(v.verifiedAt, { addSuffix: true })}
               </p>
             </div>
           </div>

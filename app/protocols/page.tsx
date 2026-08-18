@@ -75,7 +75,7 @@ export default async function ProtocolsPage({
       <p className="mt-1 text-muted-foreground">
         {result.total === 0
           ? "No protocols match these filters"
-          : `Showing ${firstRow.toLocaleString()}–${lastRow.toLocaleString()} of ${result.total.toLocaleString()} protocols`}
+          : `Showing ${firstRow.toLocaleString("en-US")}–${lastRow.toLocaleString("en-US")} of ${result.total.toLocaleString("en-US")} protocols`}
       </p>
 
       <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

@@ -61,7 +61,7 @@ export default async function TokensPage({
       <p className="mt-1 text-muted-foreground">
         {result.total === 0
           ? "No tokens match these filters"
-          : `Showing ${firstRow.toLocaleString()}–${lastRow.toLocaleString()} of ${result.total.toLocaleString()} tokens, ranked by ${SORT_DESCRIPTIONS[sort]}`}
+          : `Showing ${firstRow.toLocaleString("en-US")}–${lastRow.toLocaleString("en-US")} of ${result.total.toLocaleString("en-US")} tokens, ranked by ${SORT_DESCRIPTIONS[sort]}`}
       </p>
 
       <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

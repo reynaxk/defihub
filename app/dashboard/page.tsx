@@ -122,7 +122,7 @@ export default async function DashboardPage() {
                 <span className="font-medium">{ALERT_TYPE_LABELS[alert.type] ?? alert.type}</span> for{" "}
                 <span className="font-medium">{alert.target}</span>{" "}
                 {CONDITION_LABELS[alert.condition] ?? alert.condition}{" "}
-                {Number(alert.threshold).toLocaleString()}
+                {Number(alert.threshold).toLocaleString("en-US")}
                 {alert.condition.startsWith("percent_change") ? "%" : ""}
                 <span className="text-muted-foreground">
                   {" "}

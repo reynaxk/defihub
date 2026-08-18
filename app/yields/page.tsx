@@ -84,7 +84,7 @@ export default async function YieldsPage({
       <p className="mt-1 text-muted-foreground">
         {result.total === 0
           ? "No pools match these filters"
-          : `Showing ${firstRow.toLocaleString()}–${lastRow.toLocaleString()} of ${result.total.toLocaleString()} pools with at least $10K TVL`}
+          : `Showing ${firstRow.toLocaleString("en-US")}–${lastRow.toLocaleString("en-US")} of ${result.total.toLocaleString("en-US")} pools with at least $10K TVL`}
       </p>
       <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
         APY is a snapshot, not a guaranteed or historical return - it moves with pool activity and reward-token

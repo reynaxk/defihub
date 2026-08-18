@@ -360,3 +360,32 @@ export async function getTokenChainPresence(
     .where(and(eq(tokens.coingeckoId, coingeckoId), ne(tokens.id, excludeTokenId)));
   return rows;
 }
+
+export interface BalanceCheckToken {
+  address: string;
+  symbol: string;
+  decimals: number;
+  logoUrl: string | null;
+}
+
+const BALANCE_CHECK_TOKENS_PER_CHAIN = 50;
+
+// The wallet balance viewer only checks tokens this app already tracks
+// (no paid token-discovery API), capped per chain to keep each multicall
+// request a reasonable size - ordered by market cap so the tokens most
+// likely to actually be held show up first if a chain has more than the cap.
+export async function getTokensForBalanceCheck(chainSlug: string): Promise<BalanceCheckToken[]> {
+  return db
+    .select({
+      address: tokens.address,
+      symbol: tokens.symbol,
+      decimals: tokens.decimals,
+      logoUrl: tokens.logoUrl,
+    })
+    .from(tokens)
+    .innerJoin(chains, eq(chains.id, tokens.chainId))
+    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+    .where(eq(chains.slug, chainSlug))
+    .orderBy(sql`${latestPricePerToken.marketCap} desc nulls last`)
+    .limit(BALANCE_CHECK_TOKENS_PER_CHAIN);
+}

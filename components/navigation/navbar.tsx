@@ -23,7 +23,9 @@ const NAV_LINKS = [
 
 export async function Navbar() {
   const session = await auth();
-  const mobileLinks = session?.user ? [...NAV_LINKS, { href: "/dashboard", label: "Dashboard" }] : NAV_LINKS;
+  const mobileLinks = session?.user
+    ? [...NAV_LINKS, { href: "/dashboard", label: "Dashboard" }, { href: "/wallet", label: "Wallet" }]
+    : NAV_LINKS;
 
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -41,9 +43,14 @@ export async function Navbar() {
               </Link>
             ))}
             {session?.user && (
-              <Link href="/dashboard" className="transition-colors hover:text-foreground">
-                Dashboard
-              </Link>
+              <>
+                <Link href="/dashboard" className="transition-colors hover:text-foreground">
+                  Dashboard
+                </Link>
+                <Link href="/wallet" className="transition-colors hover:text-foreground">
+                  Wallet
+                </Link>
+              </>
             )}
           </nav>
         </div>

@@ -5,6 +5,7 @@ import { Navbar } from "@/components/navigation/navbar";
 import { Footer } from "@/components/navigation/footer";
 import { Toaster } from "@/components/ui/sonner";
 import { ThemeProvider } from "@/components/theme-provider";
+import { WalletProvider } from "@/components/wallet/wallet-provider";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -50,10 +51,12 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           disableTransitionOnChange
           nonce={nonce}
         >
-          <Navbar />
-          <main className="flex-1">{children}</main>
-          <Footer />
-          <Toaster />
+          <WalletProvider>
+            <Navbar />
+            <main className="flex-1">{children}</main>
+            <Footer />
+            <Toaster />
+          </WalletProvider>
         </ThemeProvider>
       </body>
     </html>

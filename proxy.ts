@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth/config";
 
-const PROTECTED_PREFIXES = ["/dashboard", "/alerts", "/settings"];
+const PROTECTED_PREFIXES = ["/dashboard", "/alerts", "/settings", "/wallet"];
 
 function buildCsp(nonce: string): string {
   const isDev = process.env.NODE_ENV === "development";

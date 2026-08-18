@@ -10,14 +10,15 @@ interface Verification {
   blockNumber: number;
   verifiedAt: Date;
   chainSlug: string;
+  chainName: string;
   explorerUrl: string | null;
 }
 
 export function OnchainVerificationCard({ verifications }: { verifications: Verification[] }) {
   if (verifications.length === 0) return null;
 
-  const chainSlugs = [...new Set(verifications.map((v) => v.chainSlug))];
-  const chainLabel = chainSlugs.length === 1 ? chainSlugs[0] : "multiple chains";
+  const chainNames = [...new Set(verifications.map((v) => v.chainName))];
+  const chainLabel = chainNames.length === 1 ? chainNames[0] : "multiple chains";
 
   return (
     <div className="mt-6 rounded-lg border border-border bg-card p-4">

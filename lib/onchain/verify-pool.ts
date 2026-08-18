@@ -14,6 +14,7 @@ export interface OnchainVerificationResult {
   blockNumber: number;
   verifiedAt: Date;
   chainSlug: string;
+  chainName: string;
   explorerUrl: string | null;
 }
 
@@ -29,6 +30,7 @@ export async function getVerificationsForProtocol(
       blockNumber: onchainVerifications.blockNumber,
       verifiedAt: onchainVerifications.verifiedAt,
       chainSlug: chains.slug,
+      chainName: chains.name,
       explorerUrl: chains.explorerUrl,
     })
     .from(onchainVerifications)
@@ -43,6 +45,7 @@ export async function getVerificationsForProtocol(
     blockNumber: Number(r.blockNumber),
     verifiedAt: r.verifiedAt,
     chainSlug: r.chainSlug,
+    chainName: r.chainName,
     explorerUrl: r.explorerUrl,
   }));
 }

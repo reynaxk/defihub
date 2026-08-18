@@ -2,6 +2,7 @@
 
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { formatTokenPrice, formatUsd } from "@/lib/format";
+import { computeChartTicks } from "./chart-ticks";
 
 export interface TvlPoint {
   timestamp: string | Date;
@@ -74,6 +75,13 @@ export function TvlAreaChart({
     );
   }
 
+  const formatTick = (timestamp: string) =>
+    new Date(timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const tickTimestamps = computeChartTicks(
+    chartData.map((d) => d.timestamp),
+    formatTick,
+  );
+
   return (
     <ResponsiveContainer width="100%" height={height}>
       <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
@@ -89,10 +97,9 @@ export function TvlAreaChart({
           axisLine={false}
           tickLine={false}
           minTickGap={48}
+          ticks={tickTimestamps}
           tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
-          tickFormatter={(value: string) =>
-            new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })
-          }
+          tickFormatter={formatTick}
         />
         <YAxis
           axisLine={false}

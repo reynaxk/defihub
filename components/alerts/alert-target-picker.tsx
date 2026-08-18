@@ -61,16 +61,28 @@ export function AlertTargetPicker({
     // flagged by react-hooks/set-state-in-effect either way).
     if (!queryLongEnough) return;
 
+    // Without this, a slow response to an earlier query can resolve after a
+    // faster response to a later one and overwrite it with stale results -
+    // same out-of-order-response bug reproduced and fixed in SearchBox.
+    const controller = new AbortController();
     debounceRef.current = setTimeout(async () => {
-      const res = await fetch(`/api/alerts/target-search?type=${type}&q=${encodeURIComponent(query)}`);
-      if (res.ok) {
-        const data = await res.json();
-        setResults(data.results ?? []);
-        setHighlightedIndex(-1);
+      try {
+        const res = await fetch(`/api/alerts/target-search?type=${type}&q=${encodeURIComponent(query)}`, {
+          signal: controller.signal,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setResults(data.results ?? []);
+          setHighlightedIndex(-1);
+        }
+      } catch {
+        // Aborted by a newer query, or a real network failure - either way
+        // there's nothing to show for this specific request.
       }
     }, 200);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      controller.abort();
     };
   }, [query, type, queryLongEnough]);
 

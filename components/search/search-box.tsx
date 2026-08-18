@@ -67,21 +67,32 @@ export function SearchBox({ className }: { className?: string }) {
     // that case, so there's nothing to clear via setState here.
     if (!queryLongEnough) return;
 
+    // Without this, a slow response to an earlier query can resolve after a
+    // faster response to a later one and overwrite it with stale results
+    // that no longer match what's in the input - reproduced this live
+    // (typed "uniswap" then quickly "aave"; a delayed "uniswap" response
+    // clobbered the correct "aave" results a moment later) before adding
+    // the abort.
+    const controller = new AbortController();
     debounceRef.current = setTimeout(async () => {
       setRawLoading(true);
       try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
         if (res.ok) {
           const data = await res.json();
           setRawResults(data.results ?? []);
           setHighlightedIndex(-1);
         }
+      } catch {
+        // Aborted by a newer query, or a real network failure - either way
+        // there's nothing to show for this specific request.
       } finally {
         setRawLoading(false);
       }
     }, 250);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      controller.abort();
     };
   }, [query, queryLongEnough]);
 

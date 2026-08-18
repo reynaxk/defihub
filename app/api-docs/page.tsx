@@ -66,6 +66,7 @@ export default function ApiDocsPage() {
     "slug": "aave-v3",
     "description": "Earn interest, borrow assets, and build applications",
     "website": "https://aave.com",
+    "logoUrl": "https://icons.llamao.fi/icons/protocols/aave-v3",
     "category": "Lending",
     "chains": ["ethereum", "arbitrum", "base"],
     "current": { "timestamp": "2026-08-16T00:00:00.000Z", "tvl": 14150000000, "fees24h": 989380, "revenue24h": 137480 },
@@ -80,8 +81,28 @@ export default function ApiDocsPage() {
           description="List all supported chains, sorted by TVL descending."
           exampleResponse={`{
   "data": [
-    { "id": "8a1c...", "name": "Ethereum", "slug": "ethereum", "nativeToken": "ETH", "tvl": 41110000000 },
-    { "id": "9b2d...", "name": "BNB Chain", "slug": "bnb-chain", "nativeToken": "BNB", "tvl": 4890000000 }
+    {
+      "id": "8a1c...",
+      "name": "Ethereum",
+      "slug": "ethereum",
+      "logoUrl": "https://icons.llamao.fi/icons/chains/rsz_ethereum.jpg",
+      "nativeToken": "ETH",
+      "tvl": 41110000000,
+      "change24h": 0.87,
+      "change7d": -0.65,
+      "change30d": 2.08
+    },
+    {
+      "id": "9b2d...",
+      "name": "BNB Chain",
+      "slug": "bnb-chain",
+      "logoUrl": "https://icons.llamao.fi/icons/chains/rsz_binance.jpg",
+      "nativeToken": "BNB",
+      "tvl": 4890000000,
+      "change24h": 0.03,
+      "change7d": 1.12,
+      "change30d": -1.4
+    }
   ]
 }`}
         />
@@ -97,6 +118,7 @@ export default function ApiDocsPage() {
     "slug": "ethereum",
     "nativeToken": "ETH",
     "chainId": 1,
+    "explorerUrl": "https://etherscan.io",
     "tvl": 41110000000,
     "topProtocols": [{ "name": "Binance CEX", "slug": "binance-cex", "tvl": 62060000000 }, "..."],
     "history": [{ "timestamp": "2017-09-27T00:00:00.000Z", "tvl": 0 }, "..."]

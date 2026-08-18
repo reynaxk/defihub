@@ -86,17 +86,79 @@ async function readPoolApy(externalPoolId: string): Promise<CurrentAndPrevious |
   return { current: Number(pool.apy), previous: null, displayName: pool.symbol };
 }
 
+// displayName comes from synced provider data (a protocol/chain/token
+// name), not direct user input - but it's still external content flowing
+// into an HTML email, so it gets escaped like any other untrusted string
+// rather than trusted just because the immediate risk is low.
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+const CONDITION_PHRASES: Record<string, string> = {
+  above: "rose above",
+  below: "fell below",
+  percent_change_up: "increased by at least",
+  percent_change_down: "decreased by at least",
+};
+
 function alertEmailHtml(params: {
   displayName: string;
   current: number;
   threshold: number;
   condition: string;
+  appUrl: string;
 }): string {
+  const name = escapeHtml(params.displayName);
+  const phrase = CONDITION_PHRASES[params.condition] ?? params.condition.replace(/_/g, " ");
+  const isPercent = params.condition.startsWith("percent_change");
+
   return `
-    <p>A DeFiHub alert you created has triggered.</p>
-    <p><strong>${params.displayName}</strong> is now <strong>${params.current.toLocaleString()}</strong>,
-    which is ${params.condition.replace(/_/g, " ")} your threshold of ${params.threshold.toLocaleString()}.</p>
-  `;
+<!DOCTYPE html>
+<html>
+  <body style="margin:0;padding:0;background-color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e4e4e7;">
+            <tr>
+              <td style="padding:24px 32px;border-bottom:1px solid #e4e4e7;">
+                <span style="font-size:18px;font-weight:700;color:#18181b;">DeFiHub</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px;">
+                <p style="margin:0 0 8px;font-size:13px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:#3987e5;">
+                  Alert triggered
+                </p>
+                <h1 style="margin:0 0 16px;font-size:22px;line-height:1.3;color:#18181b;">${name}</h1>
+                <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#3f3f46;">
+                  Now <strong style="color:#18181b;">${params.current.toLocaleString()}${isPercent ? "%" : ""}</strong>,
+                  which ${phrase} your threshold of
+                  <strong style="color:#18181b;">${params.threshold.toLocaleString()}${isPercent ? "%" : ""}</strong>.
+                </p>
+                <a href="${params.appUrl}/alerts" style="display:inline-block;background:#3987e5;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 20px;border-radius:8px;">
+                  Manage your alerts
+                </a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 32px;border-top:1px solid #e4e4e7;">
+                <p style="margin:0;font-size:12px;color:#a1a1aa;">
+                  You're receiving this because you created this alert on DeFiHub.
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
 }
 
 export async function checkAlerts() {
@@ -146,6 +208,7 @@ export async function checkAlerts() {
           current: reading.current,
           threshold: Number(alert.threshold),
           condition: alert.condition,
+          appUrl: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
         }),
       });
       await db.update(alerts).set({ lastTriggeredAt: new Date() }).where(eq(alerts.id, alert.id));

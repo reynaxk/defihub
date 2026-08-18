@@ -12,13 +12,14 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { AlertTargetPicker } from "@/components/alerts/alert-target-picker";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 const ALERT_TYPES = [
-  { value: "protocol_tvl", label: "Protocol TVL", hint: "Protocol slug, e.g. aave-v3 (from its page URL)" },
-  { value: "chain_tvl", label: "Chain TVL", hint: "Chain slug, e.g. ethereum (from its page URL)" },
-  { value: "token_price", label: "Token price", hint: "CoinGecko id, e.g. ethereum, solana, binancecoin" },
-  { value: "pool_apy", label: "Pool APY", hint: "Yield pool id (from the Yields page)" },
+  { value: "protocol_tvl", label: "Protocol TVL" },
+  { value: "chain_tvl", label: "Chain TVL" },
+  { value: "token_price", label: "Token price" },
+  { value: "pool_apy", label: "Pool APY" },
 ] as const;
 
 const CONDITIONS = [
@@ -52,6 +53,12 @@ export interface AlertRow {
 
 export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) {
   const [alertsList, setAlertsList] = useState(initialAlerts);
+  // AlertTargetPicker keeps its own internal "what's typed" state (it isn't
+  // a fully controlled input) - bumping this key after a successful submit
+  // forces a remount so its display text actually clears along with the
+  // form's target field, instead of showing stale text for a target that
+  // no longer matches what's stored.
+  const [targetPickerKey, setTargetPickerKey] = useState(0);
   const {
     control,
     register,
@@ -65,7 +72,6 @@ export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) 
   });
 
   const selectedType = watch("type");
-  const hint = ALERT_TYPES.find((t) => t.value === selectedType)?.hint;
 
   async function onCreate(values: CreateAlertForm) {
     const res = await fetch("/api/alerts", {
@@ -81,6 +87,7 @@ export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) 
     const { alert } = await res.json();
     setAlertsList((prev) => [alert, ...prev]);
     reset({ type: values.type, condition: "above", target: "", threshold: "" });
+    setTargetPickerKey((k) => k + 1);
     toast.success("Alert created");
   }
 
@@ -139,7 +146,18 @@ export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) 
 
             <div className="flex flex-col gap-1.5 sm:col-span-2 lg:col-span-1">
               <Label htmlFor="target">Target</Label>
-              <Input id="target" {...register("target")} placeholder={hint} />
+              <Controller
+                control={control}
+                name="target"
+                render={({ field }) => (
+                  <AlertTargetPicker
+                    key={targetPickerKey}
+                    type={selectedType}
+                    value={field.value ?? ""}
+                    onChange={field.onChange}
+                  />
+                )}
+              />
               {errors.target && <p className="text-sm text-destructive">{errors.target.message}</p>}
             </div>
 
@@ -177,7 +195,6 @@ export function AlertsManager({ initialAlerts }: { initialAlerts: AlertRow[] }) 
               </Button>
             </div>
           </form>
-          {hint && <p className="mt-2 text-xs text-muted-foreground">{hint}</p>}
         </CardContent>
       </Card>
 

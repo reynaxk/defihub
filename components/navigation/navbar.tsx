@@ -9,7 +9,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ThemeToggle } from "@/components/navigation/theme-toggle";
 import { MobileNav } from "@/components/navigation/mobile-nav";
 import { SearchBox } from "@/components/search/search-box";
@@ -61,6 +61,12 @@ export async function Navbar() {
                 className="flex items-center gap-2 rounded-full outline-none ring-ring/50 focus-visible:ring-2"
               >
                 <Avatar className="size-8">
+                  {session.user.image && (
+                    // referrerPolicy is required - Google's image CDN 403s on
+                    // requests carrying a referrer header pointing back here,
+                    // which would otherwise silently fail to a broken image.
+                    <AvatarImage src={session.user.image} alt="" referrerPolicy="no-referrer" />
+                  )}
                   <AvatarFallback className="text-xs">
                     {(session.user.name ?? session.user.email ?? "?").slice(0, 1).toUpperCase()}
                   </AvatarFallback>

@@ -53,6 +53,26 @@ export async function POST(request: Request) {
     return NextResponse.json({ watching: false });
   }
 
-  await db.insert(watchlist).values({ userId: session.user.id, protocolId, chainId, tokenId, yieldPoolId });
+  try {
+    await db.insert(watchlist).values({ userId: session.user.id, protocolId, chainId, tokenId, yieldPoolId });
+  } catch (err) {
+    // A syntactically-valid but nonexistent id (protocolId/chainId/etc. all
+    // reference real rows) trips the foreign key constraint rather than
+    // anything this route validates itself - Postgres SQLSTATE 23503 =
+    // foreign_key_violation. The UI never constructs a request like this
+    // (every id it sends comes from a real search result or table row), so
+    // this only matters for a hand-crafted request, but it deserves a clean
+    // 400 rather than an unhandled exception surfacing as a bare 500.
+    //
+    // The postgres.js driver wraps the real PostgresError under `.cause`
+    // (confirmed by actually reproducing this live and reading the thrown
+    // error's real shape, not assumed) - `err.code` on the outer
+    // Drizzle-thrown error is undefined; the SQLSTATE is at err.cause.code.
+    const cause = err && typeof err === "object" && "cause" in err ? err.cause : null;
+    if (cause && typeof cause === "object" && "code" in cause && cause.code === "23503") {
+      return NextResponse.json({ error: "That item doesn't exist" }, { status: 400 });
+    }
+    throw err;
+  }
   return NextResponse.json({ watching: true }, { status: 201 });
 }

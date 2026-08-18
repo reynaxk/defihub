@@ -45,7 +45,16 @@ export async function POST(request: Request) {
     // The check above has a race window (two concurrent registrations for
     // the same email); the unique constraint on users.email is the real
     // guarantee. Postgres SQLSTATE 23505 = unique_violation.
-    if (err && typeof err === "object" && "code" in err && err.code === "23505") {
+    //
+    // postgres.js wraps the real PostgresError under `.cause` - confirmed
+    // by reproducing the equivalent constraint-violation shape live against
+    // this exact driver (see the watchlist route's identical fix). err.code
+    // on the outer Drizzle-thrown error is always undefined; the real
+    // SQLSTATE is at err.cause.code, so this check has never actually
+    // matched and this whole catch has always fallen through to `throw err`
+    // for a genuine race - a bare 500 instead of the intended 409.
+    const cause = err && typeof err === "object" && "cause" in err ? err.cause : null;
+    if (cause && typeof cause === "object" && "code" in cause && cause.code === "23505") {
       return NextResponse.json({ error: "An account with that email already exists" }, { status: 409 });
     }
     throw err;

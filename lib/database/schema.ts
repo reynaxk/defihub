@@ -204,7 +204,17 @@ export const yieldPools = pgTable(
   },
   (table) => [
     index("yield_pools_chain_idx").on(table.chainId),
+    // Both indexes below go unused for a plain unfiltered sort+limit
+    // (~13K rows is cheap enough that Postgres correctly prefers a
+    // seq scan + top-N heapsort - confirmed via EXPLAIN ANALYZE, cost
+    // is identical with or without the index). They earn their keep
+    // on getYieldPoolsList's minApy/maxApy/minTvl filters, where the
+    // planner switches to a Bitmap Index Scan and execution time drops
+    // from ~13ms to ~4.4ms (confirmed via EXPLAIN ANALYZE on a
+    // `tvl_usd >= 1000000 order by apy` style query, matching real
+    // filter combinations the yields page supports).
     index("yield_pools_apy_idx").on(table.apy),
+    index("yield_pools_tvl_idx").on(table.tvlUsd),
   ],
 );
 

@@ -1,0 +1,1 @@
+CREATE INDEX "yield_pools_tvl_idx" ON "yield_pools" USING btree ("tvl_usd");

@@ -1,0 +1,1 @@
+CREATE INDEX "protocol_metrics_chain_ts_idx" ON "protocol_metrics" USING btree ("chain_id","timestamp");

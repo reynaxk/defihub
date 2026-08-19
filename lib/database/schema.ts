@@ -116,6 +116,15 @@ export const protocolMetrics = pgTable(
   },
   (table) => [
     index("protocol_metrics_protocol_ts_idx").on(table.protocolId, table.timestamp),
+    // Every hot list page (home, /protocols x2 per request, /chain/[slug],
+    // CSV export) filters/aggregates by chain_id (either `IS NULL` for the
+    // cross-chain aggregate rows, or `= <chain>` for a specific chain's
+    // rows) and takes MAX(timestamp) or ORDER BY timestamp within that
+    // group - neither the protocol_id-leading index above nor the unique
+    // snapshot index below can serve either without a full scan. Btree
+    // indexes support `IS NULL` on a leading column same as an equality
+    // match, so this one index covers both query shapes.
+    index("protocol_metrics_chain_ts_idx").on(table.chainId, table.timestamp),
     uniqueIndex("protocol_metrics_unique_snapshot").on(
       table.protocolId,
       table.chainId,

@@ -1,11 +1,28 @@
 import "dotenv/config";
+import { sql } from "drizzle-orm";
 import { closeDb, db } from "../../lib/database/client";
 import { chains, tokenPrices, tokens } from "../../lib/database/schema";
 import { tokenDiscoveryProvider } from "../../lib/providers";
 import { ProviderUnavailableError } from "../../lib/providers/types";
 import { COINGECKO_PLATFORM_TO_CHAIN_SLUG } from "../../lib/config/chains";
+import { chunk } from "../../lib/utils/chunk";
 
 const TOP_N = 250;
+const BATCH_SIZE = 500;
+
+interface TokenDeployment {
+  chainId: string;
+  address: string;
+  symbol: string;
+  name: string;
+  logoUrl: string | null;
+  coingeckoId: string;
+  priceUsd: number | null;
+  marketCap: number | null;
+  volume24h: number | null;
+  priceChange24h: number | null;
+  priceChange7d: number | null;
+}
 
 export async function syncTokens() {
   const chainRows = await db.select().from(chains);
@@ -23,9 +40,11 @@ export async function syncTokens() {
   }
 
   const now = new Date();
-  let matched = 0;
-  let priced = 0;
 
+  // Flatten to one row per (token, chain deployment) with no DB calls in
+  // this loop - up to 250 tokens x up to 8 chains each is small enough to
+  // hold entirely in memory before batching writes below.
+  const deployments: TokenDeployment[] = [];
   for (const token of marketTokens) {
     for (const [platformId, address] of Object.entries(token.platforms)) {
       if (!address) continue; // CoinGecko sometimes lists a platform with an empty address
@@ -36,48 +55,86 @@ export async function syncTokens() {
       const chainId = chainIdBySlug.get(chainSlug);
       if (!chainId) continue;
 
-      const [row] = await db
-        .insert(tokens)
-        .values({
-          chainId,
-          address,
-          symbol: token.symbol,
-          name: token.name,
-          logoUrl: token.logoUrl,
-          coingeckoId: token.coingeckoId,
-        })
-        .onConflictDoUpdate({
-          target: [tokens.chainId, tokens.address],
-          set: {
-            symbol: token.symbol,
-            name: token.name,
-            logoUrl: token.logoUrl,
-            coingeckoId: token.coingeckoId,
-          },
-        })
-        .returning({ id: tokens.id });
-      matched++;
-
-      if (token.priceUsd != null) {
-        await db
-          .insert(tokenPrices)
-          .values({
-            tokenId: row.id,
-            timestamp: now,
-            priceUsd: token.priceUsd.toString(),
-            marketCap: token.marketCap != null ? token.marketCap.toString() : null,
-            volume24h: token.volume24h != null ? token.volume24h.toString() : null,
-            priceChange24h: token.priceChange24h != null ? token.priceChange24h.toString() : null,
-            priceChange7d: token.priceChange7d != null ? token.priceChange7d.toString() : null,
-          })
-          .onConflictDoNothing();
-        priced++;
-      }
+      deployments.push({
+        chainId,
+        address,
+        symbol: token.symbol,
+        name: token.name,
+        logoUrl: token.logoUrl,
+        coingeckoId: token.coingeckoId,
+        priceUsd: token.priceUsd,
+        marketCap: token.marketCap,
+        volume24h: token.volume24h,
+        priceChange24h: token.priceChange24h,
+        priceChange7d: token.priceChange7d,
+      });
     }
   }
 
+  // 1. Bulk upsert tokens. RETURNING gives back one row per input tuple
+  // (inserted or updated), which is enough to resolve each deployment's row
+  // id without a second round of SELECTs - keyed by the exact chainId+address
+  // just written rather than relying on any positional correspondence to
+  // the input array (batch INSERT...RETURNING doesn't guarantee that order).
+  const tokenIdByKey = new Map<string, string>();
+  for (const batch of chunk(deployments, BATCH_SIZE)) {
+    const rows = await db
+      .insert(tokens)
+      .values(
+        batch.map((d) => ({
+          chainId: d.chainId,
+          address: d.address,
+          symbol: d.symbol,
+          name: d.name,
+          logoUrl: d.logoUrl,
+          coingeckoId: d.coingeckoId,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: [tokens.chainId, tokens.address],
+        // Each conflicting row needs ITS OWN new value, not a single JS
+        // constant shared across the whole batch - excluded.<col> refers to
+        // the specific row's proposed values within this multi-row INSERT,
+        // unlike a literal like `symbol: someToken.symbol` would.
+        set: {
+          symbol: sql`excluded.symbol`,
+          name: sql`excluded.name`,
+          logoUrl: sql`excluded.logo_url`,
+          coingeckoId: sql`excluded.coingecko_id`,
+        },
+      })
+      .returning({ id: tokens.id, chainId: tokens.chainId, address: tokens.address });
+
+    for (const row of rows) {
+      tokenIdByKey.set(`${row.chainId}|${row.address}`, row.id);
+    }
+  }
+
+  // 2. Bulk insert prices for every deployment that has one.
+  const priceRows = deployments
+    .filter((d): d is TokenDeployment & { priceUsd: number } => d.priceUsd != null)
+    .map((d) => {
+      const tokenId = tokenIdByKey.get(`${d.chainId}|${d.address}`);
+      if (!tokenId) return null;
+      return {
+        tokenId,
+        timestamp: now,
+        priceUsd: d.priceUsd.toString(),
+        marketCap: d.marketCap != null ? d.marketCap.toString() : null,
+        volume24h: d.volume24h != null ? d.volume24h.toString() : null,
+        priceChange24h: d.priceChange24h != null ? d.priceChange24h.toString() : null,
+        priceChange7d: d.priceChange7d != null ? d.priceChange7d.toString() : null,
+      };
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null);
+
+  for (const batch of chunk(priceRows, BATCH_SIZE)) {
+    if (batch.length === 0) continue;
+    await db.insert(tokenPrices).values(batch).onConflictDoNothing();
+  }
+
   console.log(
-    `[tokens] scanned ${marketTokens.length} market tokens, matched ${matched} chain deployments (${priced} priced)`,
+    `[tokens] scanned ${marketTokens.length} market tokens, matched ${deployments.length} chain deployments (${priceRows.length} priced)`,
   );
 }
 

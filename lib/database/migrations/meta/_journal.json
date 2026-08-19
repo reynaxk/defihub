@@ -99,6 +99,13 @@
       "when": 1787099264570,
       "tag": "0013_alerts_is_firing",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1787102672235,
+      "tag": "0014_protocol_metrics_chain_ts_idx",
+      "breakpoints": true
     }
   ]
 }

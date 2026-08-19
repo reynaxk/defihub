@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Star } from "lucide-react";
 import { toast } from "sonner";
@@ -30,6 +30,23 @@ export function WatchIconButton({
   const router = useRouter();
   const [watching, setWatching] = useState(initialWatching);
   const [isPending, startTransition] = useTransition();
+  const lastInitialWatching = useRef(initialWatching);
+
+  // Resyncs local state when initialWatching changes because the parent
+  // Server Component re-rendered with fresh data (e.g. the account's watch
+  // state changed in another tab, then this list re-fetched after a filter
+  // change) - this button is keyed by the entity's stable id, so it isn't
+  // remounted just because the surrounding table re-renders, and a stale
+  // `watching` value from first paint would otherwise persist indefinitely.
+  // The ref guard makes this a no-op right after this component's own
+  // successful toggle below, since local state already matches by the time
+  // any later prop change would arrive.
+  useEffect(() => {
+    if (lastInitialWatching.current !== initialWatching) {
+      lastInitialWatching.current = initialWatching;
+      setWatching(initialWatching);
+    }
+  }, [initialWatching]);
 
   function toggle(e: React.MouseEvent) {
     e.preventDefault();

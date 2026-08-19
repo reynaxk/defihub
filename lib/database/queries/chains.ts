@@ -52,14 +52,29 @@ export async function getTopChains(): Promise<ChainListItem[]> {
 }
 
 export async function getGlobalTvlHistory(): Promise<{ timestamp: Date; tvl: number }[]> {
+  // `date_trunc('day', ts)` on a timestamptz truncates using the Postgres
+  // *session's* TimeZone setting, not UTC - nothing in this app pins that
+  // (lib/database/client.ts opens the connection with no timezone option),
+  // so which calendar day a given row lands in would silently depend on
+  // wherever Postgres happens to be deployed/configured, and would reshape
+  // differently across a DST transition even with no code change.
+  // `AT TIME ZONE 'UTC'` converts to the UTC wall-clock value first, so the
+  // truncation is deterministic regardless of session/server timezone. The
+  // second `AT TIME ZONE 'UTC'` converts the (now timezone-less) truncated
+  // value back to a real timestamptz - needed because postgres.js sends a
+  // plain `timestamp without time zone` back over the wire as a bare
+  // "YYYY-MM-DDTHH:mm:ss" string with no offset, which JS's `new Date()`
+  // parses as *local* time, silently reintroducing the exact bug this is
+  // fixing at a different layer.
+  const dayTrunc = sql`(date_trunc('day', ${chainMetrics.timestamp} AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')`;
   const rows = await db
     .select({
-      day: sql<Date>`date_trunc('day', ${chainMetrics.timestamp})`.as("day"),
+      day: sql<Date>`${dayTrunc}`.as("day"),
       tvl: sql<string>`sum(${chainMetrics.tvl})`.as("tvl"),
     })
     .from(chainMetrics)
-    .groupBy(sql`date_trunc('day', ${chainMetrics.timestamp})`)
-    .orderBy(sql`date_trunc('day', ${chainMetrics.timestamp})`);
+    .groupBy(dayTrunc)
+    .orderBy(dayTrunc);
 
   // `date_trunc` on a raw sql fragment comes back from the postgres driver
   // as a string, not a parsed Date, despite the sql<Date> type hint -

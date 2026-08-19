@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Star } from "lucide-react";
 import { toast } from "sonner";
@@ -23,6 +23,24 @@ export function WatchlistButton({
   const router = useRouter();
   const [watching, setWatching] = useState(initialWatching);
   const [isPending, startTransition] = useTransition();
+  const lastInitialWatching = useRef(initialWatching);
+
+  // Resyncs local state when initialWatching changes for a reason other
+  // than this component's own toggle below - e.g. a client-side <Link>
+  // navigation from one protocol/chain/token detail page to another. React
+  // reconciles WatchlistButton as the same component instance across that
+  // navigation (same type, same position in the tree - nothing keys it to
+  // the specific entity), so without this, a stale `watching` value from
+  // the first page visited would keep showing on every subsequent one
+  // until a hard reload. The ref guard makes this a no-op right after this
+  // component's own successful toggle, since local state already matches
+  // by the time any later prop change would arrive.
+  useEffect(() => {
+    if (lastInitialWatching.current !== initialWatching) {
+      lastInitialWatching.current = initialWatching;
+      setWatching(initialWatching);
+    }
+  }, [initialWatching]);
 
   function toggle() {
     if (!isSignedIn) {

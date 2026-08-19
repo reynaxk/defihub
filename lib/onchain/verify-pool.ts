@@ -89,15 +89,26 @@ async function verifyPoolsOnChain(
     })),
   );
 
+  // Fetched first and passed explicitly to multicall's `blockNumber` option
+  // (confirmed supported - viem's multicall/readContract params both derive
+  // from CallParameters, which includes it) rather than fetching the block
+  // number and the balances concurrently: two independent JSON-RPC calls
+  // racing each other can land on different blocks if one is mined in
+  // between, which would make the stored blockNumber not actually
+  // correspond to the state that produced tvlUsd - the whole point of
+  // persisting it. Pinning both to one explicit height keeps them
+  // consistent, at the cost of one extra sequential round trip.
+  //
   // Destructured inline (rather than pre-declared with an explicit type)
   // so viem's multicall return type is inferred from this exact call's
   // `contracts` argument - annotating the variable ahead of time via
   // `Awaited<ReturnType<typeof client.multicall>>` resolves the generic
   // with no argument context and collapses each result to `{}`.
-  const chainRead = await Promise.all([
-    client.multicall({ contracts: calls }),
-    client.getBlockNumber(),
-  ]).catch((err) => {
+  const chainRead = await (async () => {
+    const blockNumber = await client.getBlockNumber();
+    const multicallResults = await client.multicall({ contracts: calls, blockNumber });
+    return [multicallResults, blockNumber] as const;
+  })().catch((err) => {
     const message = err instanceof Error ? err.message : String(err);
     return { chainReadError: message } as const;
   });

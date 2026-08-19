@@ -55,9 +55,23 @@ export async function getCachedProtocolSummary(
   // that had no TVL data yet when the summary was generated) - serve the
   // cached summary as-is rather than treating "unknown" as "definitely
   // stale."
-  if (tvlAtGeneration != null && tvlAtGeneration !== 0 && currentTvl != null) {
-    const relativeChange = Math.abs(currentTvl - tvlAtGeneration) / tvlAtGeneration;
-    if (relativeChange >= STALE_TVL_DELTA) return null;
+  if (tvlAtGeneration != null && currentTvl != null) {
+    if (tvlAtGeneration === 0) {
+      // Can't divide by zero, but this isn't "unknown" like the null case
+      // above - protocolAiSummaries.tvlAtGeneration is numeric(24,2), so
+      // any nonzero-but-sub-cent TVL at generation time (a rugged/near-dead
+      // protocol, not just genuinely zero) was already rounded down to
+      // exactly 0 by the column itself before this code ever sees it - no
+      // amount of app-side precision preserves that. Rather than leave
+      // staleness permanently undetectable for those summaries, treat any
+      // now-measurable TVL as an automatic staleness trigger: a summary
+      // written when TVL was ~$0 is exactly the kind of claim that stops
+      // being true the moment TVL becomes non-negligible.
+      if (currentTvl !== 0) return null;
+    } else {
+      const relativeChange = Math.abs(currentTvl - tvlAtGeneration) / tvlAtGeneration;
+      if (relativeChange >= STALE_TVL_DELTA) return null;
+    }
   }
 
   return { content: row.content, model: row.model, createdAt: row.createdAt };

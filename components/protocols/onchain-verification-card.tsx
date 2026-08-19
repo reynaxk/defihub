@@ -27,8 +27,8 @@ export function OnchainVerificationCard({ verifications }: { verifications: Veri
         Verified on-chain
       </h2>
       <p className="mt-1 text-xs text-muted-foreground">
-        Read directly from {chainLabel} via JSON-RPC (token balances of the pool contract), independent
-        of the DefiLlama figure above.
+        Read directly from {chainLabel} via JSON-RPC (a pool contract&apos;s own token balances, or a
+        protocol contract&apos;s own published total), independent of the DefiLlama figure above.
       </p>
       <div className="mt-3 space-y-3">
         {verifications.map((v) => (

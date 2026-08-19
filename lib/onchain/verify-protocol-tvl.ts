@@ -30,33 +30,41 @@ async function readOne(
     let rawAmount: bigint;
     let blockNumber: bigint;
 
+    // blockNumber is fetched first, then passed explicitly to every
+    // readContract call below, rather than fetching it concurrently with
+    // the reads - two independent JSON-RPC calls racing each other can land
+    // on different blocks if one is mined in between, which would make the
+    // persisted blockNumber not actually correspond to the state that
+    // produced tvlUsd. The two reads in the "supply-times-rate" branch can
+    // still run concurrently with each other, since pinning both to the
+    // same explicit height keeps them consistent regardless of when each
+    // request arrives at the RPC node.
     if (entry.read.kind === "direct") {
       const abi = parseAbi([entry.read.functionSignature]);
       const functionName = functionNameFrom(entry.read.functionSignature);
-      [rawAmount, blockNumber] = await Promise.all([
-        client.readContract({ address, abi, functionName }) as Promise<bigint>,
-        client.getBlockNumber(),
-      ]);
+      blockNumber = await client.getBlockNumber();
+      rawAmount = (await client.readContract({ address, abi, functionName, blockNumber })) as bigint;
     } else {
       const abi = parseAbi([entry.read.supplyFunctionSignature, entry.read.rateFunctionSignature]);
-      const [supply, rate, block] = await Promise.all([
+      blockNumber = await client.getBlockNumber();
+      const [supply, rate] = await Promise.all([
         client.readContract({
           address,
           abi,
           functionName: functionNameFrom(entry.read.supplyFunctionSignature),
+          blockNumber,
         }) as Promise<bigint>,
         client.readContract({
           address,
           abi,
           functionName: functionNameFrom(entry.read.rateFunctionSignature),
+          blockNumber,
         }) as Promise<bigint>,
-        client.getBlockNumber(),
       ]);
       // Both values are fixed-point at `decimals` places (e.g. 1e18), so the
       // raw product needs one factor's worth of scale divided back out
       // before it's in the same fixed-point units as a "direct" read.
       rawAmount = (supply * rate) / BigInt(10) ** BigInt(entry.decimals);
-      blockNumber = block;
     }
 
     const tvlUsd = (Number(rawAmount) / 10 ** entry.decimals) * price;

@@ -12,8 +12,9 @@ import {
   primaryKey,
   uniqueIndex,
   index,
+  check,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 
 // ---------------------------------------------------------------------------
 // Chains
@@ -271,25 +272,40 @@ export const onchainVerifications = pgTable("onchain_verifications", {
 // `sessions` table is needed.
 // ---------------------------------------------------------------------------
 
-export const users = pgTable("users", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  name: text("name"),
-  email: text("email").notNull().unique(),
-  emailVerified: timestamp("email_verified", { withTimezone: true }),
-  image: text("image"),
-  // null for OAuth-only accounts
-  passwordHash: text("password_hash"),
-  // Stamped whenever passwordHash changes via the reset-password flow (null
-  // for an account that's never reset its password). Embedded into the JWT
-  // at sign-in and re-checked against this column on every request in
-  // lib/auth/config.ts's jwt callback, so a password reset actually
-  // invalidates sessions issued before it - otherwise a stateless JWT
-  // (required for the Credentials provider) would stay valid for its full
-  // maxAge regardless of a reset, which defeats the point of resetting a
-  // password you suspect is compromised.
-  passwordChangedAt: timestamp("password_changed_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+export const users = pgTable(
+  "users",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    name: text("name"),
+    email: text("email").notNull().unique(),
+    emailVerified: timestamp("email_verified", { withTimezone: true }),
+    image: text("image"),
+    // null for OAuth-only accounts
+    passwordHash: text("password_hash"),
+    // Stamped whenever passwordHash changes via the reset-password flow (null
+    // for an account that's never reset its password). Embedded into the JWT
+    // at sign-in and re-checked against this column on every request in
+    // lib/auth/config.ts's jwt callback, so a password reset actually
+    // invalidates sessions issued before it - otherwise a stateless JWT
+    // (required for the Credentials provider) would stay valid for its full
+    // maxAge regardless of a reset, which defeats the point of resetting a
+    // password you suspect is compromised.
+    passwordChangedAt: timestamp("password_changed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    // Added NOT VALID by migration 0019 (existing rows aren't re-checked -
+    // migration 0017's lowercasing deliberately skips unresolved
+    // case-insensitive collision groups rather than auto-merging them, so
+    // some legacy rows may not satisfy this yet), but enforced for every
+    // new INSERT/UPDATE from that migration forward. Registration/login/
+    // forgot-password already normalize email to lowercase before it
+    // reaches the DB (lib/auth/config.ts, app/api/auth/register,
+    // app/api/auth/forgot-password) - this is the backstop that makes that
+    // an actual guarantee rather than just an application-level convention.
+    check("users_email_lowercase", sql`${table.email} = lower(${table.email})`),
+  ],
+);
 
 export const accounts = pgTable(
   "accounts",

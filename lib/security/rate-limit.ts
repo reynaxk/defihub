@@ -66,7 +66,7 @@ export async function checkRateLimit(
   key: string,
   { limit, windowMs }: { limit: number; windowMs: number },
 ): Promise<RateLimitResult> {
-  void maybeCleanupOldBuckets();
+  await maybeCleanupOldBuckets();
 
   const windowInterval = sql`make_interval(secs => ${windowMs / 1000})`;
 

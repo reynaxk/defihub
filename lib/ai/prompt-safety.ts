@@ -18,7 +18,15 @@
 // side effect, same reasoning as lib/database/queries/tvl-change.ts being
 // split out from its sibling DB-touching query functions.
 const DELIMITER_TAG_NAMES = ["protocol_name", "protocol_category", "protocol_description"];
-const DELIMITER_TAG_PATTERN = new RegExp(`</?(?:${DELIMITER_TAG_NAMES.join("|")})>`, "gi");
+// Optional whitespace around the tag name (`</protocol_name >`,
+// `< protocol_name>`) is still a real closing/opening tag as far as an LLM
+// reading it is concerned, even though it wouldn't match a strict HTML/XML
+// parser - the original tight pattern (`</?(?:...)>` with no `\s*`) let a
+// crafted field bypass the strip entirely just by adding a space before the
+// bracket. Since the whole point of stripping is to not have to rely on how
+// leniently the model happens to parse near-tag text, the pattern needs to
+// be at least as lenient as the model is, not as strict as a real parser.
+const DELIMITER_TAG_PATTERN = new RegExp(`</?\\s*(?:${DELIMITER_TAG_NAMES.join("|")})\\s*>`, "gi");
 
 export function stripDelimiterTags(text: string): string {
   return text.replace(DELIMITER_TAG_PATTERN, "");

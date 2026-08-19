@@ -38,8 +38,21 @@ const RPC_ENV_VARS: Record<string, string | undefined> = {
   optimism: process.env.OPTIMISM_RPC_URL,
 };
 
+// Throws rather than returning undefined for an unrecognized slug - every
+// caller (toViemChain below, the wallet balances route, the on-chain
+// verification workers) feeds this straight into viem's http()/defineChain,
+// which don't validate their URL argument themselves. A silently-undefined
+// URL there doesn't fail where the actual mistake is (a chain added to
+// SUPPORTED_CHAINS without a matching entry in the two maps above) - it
+// fails later and more confusingly, inside viem's transport. Failing here
+// instead means a misconfigured chain breaks loudly at the point that's
+// actually wrong, including at module load time for toViemChain's callers.
 export function rpcUrlFor(slug: string): string {
-  return RPC_ENV_VARS[slug] || DEFAULT_RPC_URLS[slug];
+  const url = RPC_ENV_VARS[slug] || DEFAULT_RPC_URLS[slug];
+  if (!url) {
+    throw new Error(`rpcUrlFor: no RPC URL configured for chain "${slug}"`);
+  }
+  return url;
 }
 
 // Solana (chainId: null in SUPPORTED_CHAINS) is filtered out here - it isn't

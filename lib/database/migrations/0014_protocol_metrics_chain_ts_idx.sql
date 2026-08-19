@@ -1,1 +1,15 @@
+-- Not CREATE INDEX CONCURRENTLY: drizzle-kit's migrate() runner wraps every
+-- pending migration file in one shared transaction
+-- (node_modules/drizzle-orm/pg-core/dialect.js's migrate(), confirmed by
+-- reading it directly), and Postgres flatly refuses CREATE INDEX
+-- CONCURRENTLY inside a transaction block - it's not something this file
+-- alone can opt out of. As written, this briefly locks protocol_metrics
+-- against writes while the index builds. Acceptable today given the
+-- table's current size and write pattern (periodic sync jobs, not
+-- high-frequency concurrent writes) - but if protocol_metrics grows large
+-- enough for that lock window to matter, the real fix is running
+-- CREATE INDEX CONCURRENTLY as a separate, non-transactional, one-off
+-- deploy step outside `npm run db:migrate` (a plain script against the
+-- postgres.js client with autocommit), not something that can be patched
+-- into this file.
 CREATE INDEX "protocol_metrics_chain_ts_idx" ON "protocol_metrics" USING btree ("chain_id","timestamp");

@@ -274,7 +274,11 @@ function AlertGroup({
                 </TableCell>
                 <TableCell className="text-right tabular-nums">{alert.threshold}</TableCell>
                 <TableCell>
-                  <Switch checked={alert.enabled} onCheckedChange={(checked) => onToggle(alert.id, checked)} />
+                  <Switch
+                    checked={alert.enabled}
+                    onCheckedChange={(checked) => onToggle(alert.id, checked)}
+                    aria-label={`${alert.enabled ? "Disable" : "Enable"} alert for ${alert.target}`}
+                  />
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {alert.lastTriggeredAt ? new Date(alert.lastTriggeredAt).toLocaleString() : "Never"}

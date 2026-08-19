@@ -82,31 +82,48 @@ was no reason to build and pay for that infrastructure before it's needed.
 
 ### On-chain verification (a small, growing, still-bounded indexer)
 
-`lib/onchain/` reads each pool contract's own ERC-20 token balances
-directly from a free public RPC endpoint — multi-chain, via the shared
-viem client config in `lib/chains/rpc-client.ts` (the same one the
-`/wallet` feature uses) — for a hand-picked, well-understood set of pools
-(`lib/onchain/config.ts`'s `VERIFIED_POOLS`), and shows the resulting TVL
-on each protocol's page as an independent cross-check next to the
-DefiLlama figure. `lib/onchain/verify-pool.ts` batches every pool on the
-same chain into one `multicall()` call rather than one RPC round-trip per
-token.
+`lib/onchain/` reads on-chain figures directly from a free public RPC
+endpoint — multi-chain, via the shared viem client config in
+`lib/chains/rpc-client.ts` (the same one the `/wallet` feature uses) —
+for a hand-picked, well-understood set of entries, and shows the
+resulting TVL on each protocol's page as an independent cross-check next
+to the DefiLlama figure. Two categories, both bounded by the same
+underlying test (below), not two arbitrary carve-outs:
 
-This is deliberately **not** a general indexer, even as the list grows:
-every entry still needs a human to confirm the contract address, chain,
-and that a plain "sum the pool's own token balances" read is actually the
-right TVL formula for that pool. That's true for AMM-style pools —
-Uniswap V2/V3 and structurally similar DEXes — regardless of chain,
-because it never touches the pool's internal accounting, only what the
-contract actually holds. It is *not* true for something like an Aave
-reserve, which needs aToken exchange-rate/debt accounting to get right —
-see the section above — so lending, staking, and vault protocols stay out
-of scope no matter how many AMM pools get added. Adding a new protocol or
-chain here means adding a new, individually-reasoned entry, not extending
-a codebase that reads arbitrary contracts generically. Verifying a
-protocol's most prominent pool(s) is not the same claim as having verified
-that protocol's entire TVL (a protocol can have thousands of pools) — the
-UI and this doc stay explicit about exactly what's covered.
+- **AMM pools** (`lib/onchain/config.ts`'s `VERIFIED_POOLS`,
+  `lib/onchain/verify-pool.ts`): TVL is the sum of a pool contract's own
+  ERC-20 token balances — true for Uniswap V2/V3 and structurally similar
+  DEXes regardless of chain, since it never touches the pool's internal
+  swap math, only what the contract actually holds.
+  `verify-pool.ts` batches every pool on the same chain into one
+  `multicall()` call rather than one RPC round-trip per token.
+- **Single-figure protocol accounting** (`VERIFIED_PROTOCOL_TVLS`,
+  `lib/onchain/verify-protocol-tvl.ts`): some protocols already expose
+  one unambiguous "total value under management" figure directly via a
+  dedicated view function on their own core contract, because their own
+  logic depends on that figure being correct (e.g. a liquid-staking
+  token's exchange rate is *derived from* its issuing contract's
+  total-staked figure) — reading it is exactly as first-party as summing
+  an AMM pool's balances, just a different shape of "the contract's own
+  accounting." Lido is the current example: `getTotalPooledEther()` on
+  the stETH contract.
+
+The real boundary isn't "AMM good, everything else excluded" - it's
+whether the contract *already computes and exposes* the figure as one
+number. That's what rules out something like an Aave reserve: TVL there
+isn't one call, it's aToken exchange-rate and debt accounting
+reconstructed across many separate reserves, with real methodology
+choices (gross vs. net of borrows, which price for which asset) - a
+fundamentally different, harder problem than reading a value the
+protocol was already maintaining for itself. Every entry in either
+category still needs a human to confirm the contract address, chain, and
+that the read genuinely is the protocol's own canonical figure before
+it's added - not auto-discovered, and not extended to arbitrary contracts
+generically. Verifying a protocol's most prominent pool(s), or its
+single headline accounting figure, is not the same claim as having
+independently verified that protocol's entire reported TVL down to every
+edge case - the UI and this doc stay explicit about exactly what's
+covered.
 
 Prices still come from CoinGecko (`lib/providers/coingecko.ts`) — this
 indexer replaces DefiLlama's TVL computation with our own, but doesn't

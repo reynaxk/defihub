@@ -1,10 +1,9 @@
 // The hand-picked set of on-chain reads this feature verifies. Deliberately
 // a fixed, short list - not auto-discovered - since each entry needs a human
 // to have confirmed the contract address, chain, and TVL math actually apply.
-// See docs/architecture.md "On-chain verification" for why this is scoped to
-// AMM-style pools only (lending/staking/vault protocols need different
-// accounting and are explicitly out of scope, regardless of how many entries
-// this list grows to).
+// See docs/architecture.md "On-chain verification" for the two categories
+// this covers (AMM pools below, and single-value protocol accounting calls
+// further down) and why lending/vault protocols still don't fit either one.
 
 export interface VerifiedPoolToken {
   address: string;
@@ -191,5 +190,57 @@ export const VERIFIED_POOLS: VerifiedPool[] = [
         coingeckoId: "wbnb",
       },
     ],
+  },
+];
+
+// A second, distinct category: protocols whose TVL isn't "sum of a pool
+// contract's own token balances" but is still a single, unambiguous number
+// the protocol's own contract exposes directly via a view function - no
+// exchange-rate/debt/share-price accounting needed to interpret it, unlike
+// lending or vault protocols. Liquid staking is the clearest fit: a
+// liquid-staking token's issuing contract already tracks "total underlying
+// staked" as its own canonical state (it has to, to compute the token's
+// exchange rate), so reading that function directly is exactly as
+// first-party and provably-correct as reading an AMM pool's own balance -
+// just a different shape of "the contract's own accounting," not a weaker
+// standard of evidence.
+export interface VerifiedProtocolTvl {
+  key: string;
+  chainSlug: string;
+  protocolDefillamaSlug: string;
+  label: string;
+  contractAddress: string;
+  // Human-readable Solidity signature (parsed with viem's parseAbi), not a
+  // raw selector - keeps each entry legible and lets viem compute the
+  // correct selector itself rather than one being hand-copied/misremembered
+  // into the config (confirmed the hard way while researching this exact
+  // entry - a memorized selector for getTotalPooledEther() turned out to be
+  // wrong; viem's own toFunctionSelector() computed the real one).
+  functionSignature: string;
+  decimals: number;
+  // Prices whatever unit the function returns (e.g. "ethereum" for a
+  // function returning a plain ETH amount) - not necessarily the liquid
+  // staking token's own id, which can trade at a slight premium/discount to
+  // its underlying during stress events rather than always at exact parity.
+  coingeckoId: string;
+}
+
+export const VERIFIED_PROTOCOL_TVLS: VerifiedProtocolTvl[] = [
+  {
+    key: "lido-eth-steth",
+    chainSlug: "ethereum",
+    protocolDefillamaSlug: "lido",
+    label: "Total ETH staked (Lido)",
+    // Confirmed live, 2026-08-19: name()/symbol() on this address return
+    // "Liquid staked Ether 2.0"/"stETH" (also cross-checked against
+    // CoinGecko's /coins/ethereum/contract/{address} lookup, which
+    // resolves it to the "staked-ether" id). getTotalPooledEther() and
+    // totalSupply() both returned ~9.54M ETH, matching each other exactly
+    // as expected from stETH's 1:1-pegged design - a second, independent
+    // on-chain confirmation of the same figure via a different call.
+    contractAddress: "0xae7ab96520de3a18e5e111b5eaab095312d7fe84",
+    functionSignature: "function getTotalPooledEther() view returns (uint256)",
+    decimals: 18,
+    coingeckoId: "ethereum",
   },
 ];

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchlistButton } from "@/components/shared/watchlist-button";
@@ -59,10 +60,10 @@ function MetricTab({
           animate={latestValue != null ? { value: latestValue, format: "usd" } : undefined}
         />
       </div>
-      <div className="rounded-lg border border-border bg-card p-4">
+      <Card className="p-4">
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">{label} history</h2>
         <RangedAreaChart data={history} />
-      </div>
+      </Card>
     </div>
   );
 }
@@ -170,10 +171,10 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
         </div>
 
         <TabsContent value="overview" className="mt-4">
-          <div className="rounded-lg border border-border bg-card p-4">
+          <Card className="p-4">
             <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
             <RangedAreaChart data={tvlHistory} />
-          </div>
+          </Card>
           <OnchainVerificationCard verifications={verifications} />
           <AiSummaryCard
             slug={protocol.slug}
@@ -198,9 +199,9 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
             <StatTile label="24h" customValue={<PercentChange value={latest?.tvlChange1d} />} />
             <StatTile label="7d" customValue={<PercentChange value={latest?.tvlChange7d} />} />
           </div>
-          <div className="rounded-lg border border-border bg-card p-4">
+          <Card className="p-4">
             <RangedAreaChart data={tvlHistory} />
-          </div>
+          </Card>
         </TabsContent>
 
         <TabsContent value="fees" className="mt-4">
@@ -216,9 +217,9 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
         </TabsContent>
 
         <TabsContent value="chains" className="mt-4">
-          <div className="rounded-lg border border-border bg-card p-4">
+          <Card className="p-4">
             <ChainDistribution chains={chainBreakdown} />
-          </div>
+          </Card>
         </TabsContent>
 
         <TabsContent value="yields" className="mt-4">

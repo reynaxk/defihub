@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 
 export function AiSummaryCard({
   slug,
@@ -37,7 +38,7 @@ export function AiSummaryCard({
   }
 
   return (
-    <div className="mt-6 rounded-lg border border-border bg-card p-4">
+    <Card className="mt-6 p-4">
       <div className="flex items-center justify-between gap-3">
         <h2 className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
           <Sparkles className="size-4" />
@@ -61,6 +62,6 @@ export function AiSummaryCard({
             : "AI summary unavailable."}
         </p>
       )}
-    </div>
+    </Card>
   );
 }

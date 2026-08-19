@@ -4,6 +4,7 @@ import { formatDistanceToNow } from "date-fns";
 import { Activity, Bell, Star } from "lucide-react";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { auth } from "@/lib/auth/config";
 import { getWatchlistWithDetails, type WatchlistEntry } from "@/lib/database/queries/watchlist";
 import { db } from "@/lib/database/client";
@@ -65,7 +66,7 @@ export default async function DashboardPage() {
       <p className="mt-1 text-muted-foreground">Welcome back{session?.user.name ? `, ${session.user.name}` : ""}.</p>
 
       <div className="mt-8 flex items-center justify-between">
-        <h2 className="flex items-center gap-2 text-lg font-medium">
+        <h2 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
           <Star className="size-4" /> Watchlist
         </h2>
       </div>
@@ -83,7 +84,7 @@ export default async function DashboardPage() {
             <Link
               key={item.id}
               href={watchlistHref(item)}
-              className="flex items-center justify-between rounded-lg border border-border bg-card p-3 hover:border-primary/40"
+              className="flex items-center justify-between rounded-xl bg-card p-3 text-card-foreground ring-1 ring-foreground/10 transition-all duration-200 hover:-translate-y-0.5 hover:ring-primary/30 hover:shadow-md"
             >
               <div className="flex items-center gap-2">
                 <EntityLogo src={item.logoUrl} name={item.name} size={28} />
@@ -98,7 +99,7 @@ export default async function DashboardPage() {
       )}
 
       <div className="mt-10 flex items-center justify-between">
-        <h2 className="flex items-center gap-2 text-lg font-medium">
+        <h2 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
           <Bell className="size-4" /> Alerts
         </h2>
         <Button variant="outline" size="sm" render={<Link href="/alerts">Manage alerts</Link>} />
@@ -108,7 +109,7 @@ export default async function DashboardPage() {
       </p>
 
       <div className="mt-10">
-        <h2 className="flex items-center gap-2 text-lg font-medium">
+        <h2 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
           <Activity className="size-4" /> Recent activity
         </h2>
         {recentlyTriggered.length === 0 ? (
@@ -118,7 +119,7 @@ export default async function DashboardPage() {
         ) : (
           <div className="mt-3 flex flex-col gap-2">
             {recentlyTriggered.map((alert) => (
-              <div key={alert.id} className="rounded-lg border border-border bg-card p-3 text-sm">
+              <Card key={alert.id} className="p-3 text-sm">
                 <span className="font-medium">{ALERT_TYPE_LABELS[alert.type] ?? alert.type}</span> for{" "}
                 <span className="font-medium">{alert.target}</span>{" "}
                 {CONDITION_LABELS[alert.condition] ?? alert.condition}{" "}
@@ -128,7 +129,7 @@ export default async function DashboardPage() {
                   {" "}
                   — {formatDistanceToNow(alert.lastTriggeredAt!, { addSuffix: true })}
                 </span>
-              </div>
+              </Card>
             ))}
           </div>
         )}

@@ -9,6 +9,7 @@ import { ProtocolsTable } from "@/components/protocols/protocols-table";
 import { TokensTable } from "@/components/tokens/tokens-table";
 import { PercentChange } from "@/components/shared/percent-change";
 import { SectionNav } from "@/components/shared/section-nav";
+import { Card } from "@/components/ui/card";
 import { getChainBySlug } from "@/lib/database/queries/chains";
 import { getTokensList } from "@/lib/database/queries/tokens";
 import {
@@ -118,15 +119,15 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
         <StatTile label="Chain ID" value={chain.chainId != null ? String(chain.chainId) : "—"} />
       </div>
 
-      <div id="tvl" className="mt-8 scroll-mt-28 rounded-lg border border-border bg-card p-4">
+      <Card id="tvl" className="mt-8 scroll-mt-28 p-4">
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
         <RangedAreaChart data={history.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))} />
-      </div>
+      </Card>
 
       {categoryBreakdown.length > 0 && (
         <div id="category-breakdown" className="mt-8 scroll-mt-28">
           <h2 className="mb-4 text-xl font-semibold tracking-tight">TVL by category</h2>
-          <div className="rounded-lg border border-border bg-card p-4">
+          <Card className="p-4">
             <div className="flex flex-col gap-3">
               {categoryBreakdown.map(([category, tvl]) => {
                 const share = categoryTotal > 0 ? (tvl / categoryTotal) * 100 : 0;
@@ -144,7 +145,7 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
                 );
               })}
             </div>
-          </div>
+          </Card>
         </div>
       )}
 

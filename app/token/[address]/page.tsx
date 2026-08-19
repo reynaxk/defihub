@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
+import { Card } from "@/components/ui/card";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchlistButton } from "@/components/shared/watchlist-button";
 import { StatTile } from "@/components/stats/stat-tile";
@@ -120,16 +121,16 @@ export default async function TokenDetailPage({
         />
       </div>
 
-      <div className="mt-8 rounded-lg border border-border bg-card p-4">
+      <Card className="mt-8 p-4">
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">Price history</h2>
         <RangedAreaChart data={priceHistory} valueKind="tokenPrice" />
-      </div>
+      </Card>
 
       {marketCapHistory.some((h) => h.value != null) && (
-        <div className="mt-8 rounded-lg border border-border bg-card p-4">
+        <Card className="mt-8 p-4">
           <h2 className="mb-2 text-sm font-medium text-muted-foreground">Market cap history</h2>
           <RangedAreaChart data={marketCapHistory} valueKind="usd" />
-        </div>
+        </Card>
       )}
     </div>
   );

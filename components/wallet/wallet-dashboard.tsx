@@ -3,6 +3,7 @@
 import { useAccount } from "wagmi";
 import { useQuery } from "@tanstack/react-query";
 import { EntityLogo } from "@/components/shared/entity-logo";
+import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ConnectWalletButton } from "@/components/wallet/connect-wallet-button";
 
@@ -45,17 +46,17 @@ async function fetchBalances(address: string): Promise<{ address: string; chains
 function ChainCard({ chain }: { chain: ChainResult }) {
   if (isError(chain)) {
     return (
-      <div className="rounded-lg border border-border bg-card p-4">
+      <Card className="p-4">
         <p className="font-medium">{chain.chainName}</p>
         <p className="mt-1 text-sm text-destructive">{chain.error}</p>
-      </div>
+      </Card>
     );
   }
 
   const hasAnyBalance = Number(chain.nativeBalance) > 0 || chain.tokenBalances.length > 0;
 
   return (
-    <div className="rounded-lg border border-border bg-card p-4">
+    <Card className="p-4">
       <p className="font-medium">{chain.chainName}</p>
       {!hasAnyBalance ? (
         <p className="mt-1 text-sm text-muted-foreground">No balance found on this chain.</p>
@@ -78,7 +79,7 @@ function ChainCard({ chain }: { chain: ChainResult }) {
           ))}
         </div>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -93,13 +94,13 @@ export function WalletDashboard() {
 
   if (!isConnected) {
     return (
-      <div className="mt-6 flex flex-col items-start gap-3 rounded-lg border border-border bg-card p-6">
+      <Card className="mt-6 items-start gap-3 p-6">
         <p className="text-sm text-muted-foreground">
           Connect a wallet to see its balances for the tokens DeFiHub tracks, across the 7 EVM chains
           this app supports.
         </p>
         <ConnectWalletButton />
-      </div>
+      </Card>
     );
   }
 

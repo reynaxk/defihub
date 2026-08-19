@@ -1,4 +1,5 @@
 import { Badge } from "@/components/ui/badge";
+import { Card } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 export interface EndpointParam {
@@ -22,7 +23,7 @@ export function EndpointDoc({
   exampleResponse: string;
 }) {
   return (
-    <div className="rounded-lg border border-border bg-card p-5">
+    <Card className="p-5">
       <div className="flex flex-wrap items-center gap-3">
         <Badge className="bg-[var(--success-text)]/15 text-[var(--success-text)]">{method}</Badge>
         <code className="text-sm font-medium">{path}</code>
@@ -61,6 +62,6 @@ export function EndpointDoc({
           <code>{exampleResponse}</code>
         </pre>
       </div>
-    </div>
+    </Card>
   );
 }

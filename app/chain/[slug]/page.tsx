@@ -9,6 +9,7 @@ import { ProtocolsTable } from "@/components/protocols/protocols-table";
 import { TokensTable } from "@/components/tokens/tokens-table";
 import { PercentChange } from "@/components/shared/percent-change";
 import { SectionNav } from "@/components/shared/section-nav";
+import { DistributionBarList } from "@/components/shared/distribution-bar-list";
 import { Card } from "@/components/ui/card";
 import { getChainBySlug } from "@/lib/database/queries/chains";
 import { getTokensList } from "@/lib/database/queries/tokens";
@@ -18,7 +19,7 @@ import {
   isWatchingChain,
 } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
-import { formatPercent, formatUsd } from "@/lib/format";
+import { formatUsd } from "@/lib/format";
 
 const TOP_TOKENS_LIMIT = 8;
 
@@ -65,7 +66,6 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
   const categoryBreakdown = [...categoryTotals.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, 8);
-  const categoryTotal = categoryBreakdown.reduce((sum, [, tvl]) => sum + tvl, 0);
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -132,23 +132,10 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
         <div id="category-breakdown" className="mt-8 scroll-mt-28">
           <h2 className="mb-4 text-xl font-semibold tracking-tight">TVL by category</h2>
           <Card className="p-4">
-            <div className="flex flex-col gap-3">
-              {categoryBreakdown.map(([category, tvl]) => {
-                const share = categoryTotal > 0 ? (tvl / categoryTotal) * 100 : 0;
-                return (
-                  <div key={category} className="flex items-center gap-3">
-                    <span className="w-32 shrink-0 truncate text-sm font-medium">{category}</span>
-                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full rounded-full bg-primary" style={{ width: `${Math.min(100, share)}%` }} />
-                    </div>
-                    <span className="w-16 shrink-0 text-right text-sm tabular-nums text-muted-foreground">
-                      {formatPercent(share)}
-                    </span>
-                    <span className="w-24 shrink-0 text-right text-sm font-medium tabular-nums">{formatUsd(tvl)}</span>
-                  </div>
-                );
-              })}
-            </div>
+            <DistributionBarList
+              items={categoryBreakdown.map(([category, tvl]) => ({ key: category, label: category, value: tvl }))}
+              emptyMessage="No category breakdown available yet."
+            />
           </Card>
         </div>
       )}

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { DataTable, type DataTableColumn } from "@/components/shared/data-table";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { PercentChange } from "@/components/shared/percent-change";
 import { WatchIconButton } from "@/components/shared/watch-icon-button";
@@ -17,59 +17,72 @@ export function ChainsTable({
 }) {
   const totalTvl = chains.reduce((sum, c) => sum + (c.tvl ?? 0), 0);
 
+  const columns: DataTableColumn<ChainListItem>[] = [
+    {
+      key: "rank",
+      header: "#",
+      headClassName: "w-10",
+      cellClassName: "text-muted-foreground",
+      render: (_chain, i) => i + 1,
+    },
+    {
+      key: "chain",
+      header: "Chain",
+      render: (chain) => (
+        <Link href={`/chain/${chain.slug}`} className="flex items-center gap-2 font-medium">
+          <EntityLogo src={chain.logoUrl} name={chain.name} size={24} />
+          {chain.name}
+        </Link>
+      ),
+    },
+    {
+      key: "nativeToken",
+      header: "Native token",
+      headClassName: "hidden sm:table-cell",
+      cellClassName: "hidden text-muted-foreground sm:table-cell",
+      render: (chain) => chain.nativeToken,
+    },
+    {
+      key: "tvl",
+      header: "TVL",
+      headClassName: "text-right",
+      cellClassName: "text-right tabular-nums",
+      render: (chain) => formatUsd(chain.tvl),
+    },
+    {
+      key: "change24h",
+      header: "24h",
+      headClassName: "hidden text-right md:table-cell",
+      cellClassName: "hidden text-right tabular-nums md:table-cell",
+      render: (chain) => <PercentChange value={chain.change24h} />,
+    },
+    {
+      key: "shareOfTotal",
+      header: "% of total",
+      headClassName: "hidden text-right lg:table-cell",
+      cellClassName: "hidden text-right tabular-nums text-muted-foreground lg:table-cell",
+      render: (chain) => (chain.tvl != null && totalTvl > 0 ? formatPercent((chain.tvl / totalTvl) * 100) : "—"),
+    },
+  ];
+
   return (
-    <div className="overflow-x-auto rounded-lg border border-border">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            {watchedChainIds && <TableHead className="w-8" />}
-            <TableHead className="w-10">#</TableHead>
-            <TableHead>Chain</TableHead>
-            <TableHead className="hidden sm:table-cell">Native token</TableHead>
-            <TableHead className="text-right">TVL</TableHead>
-            <TableHead className="hidden text-right md:table-cell">24h</TableHead>
-            <TableHead className="hidden text-right lg:table-cell">% of total</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {chains.map((chain, i) => (
-            <TableRow key={chain.id}>
-              {watchedChainIds && (
-                <TableCell>
-                  <WatchIconButton
-                    target={{ chainId: chain.id }}
-                    isSignedIn={isSignedIn}
-                    initialWatching={watchedChainIds.has(chain.id)}
-                    label={chain.name}
-                  />
-                </TableCell>
-              )}
-              <TableCell className="text-muted-foreground">{i + 1}</TableCell>
-              <TableCell>
-                <Link href={`/chain/${chain.slug}`} className="flex items-center gap-2 font-medium">
-                  <EntityLogo src={chain.logoUrl} name={chain.name} size={24} />
-                  {chain.name}
-                </Link>
-              </TableCell>
-              <TableCell className="hidden text-muted-foreground sm:table-cell">{chain.nativeToken}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatUsd(chain.tvl)}</TableCell>
-              <TableCell className="hidden text-right tabular-nums md:table-cell">
-                <PercentChange value={chain.change24h} />
-              </TableCell>
-              <TableCell className="hidden text-right tabular-nums text-muted-foreground lg:table-cell">
-                {chain.tvl != null && totalTvl > 0 ? formatPercent((chain.tvl / totalTvl) * 100) : "—"}
-              </TableCell>
-            </TableRow>
-          ))}
-          {chains.length === 0 && (
-            <TableRow>
-              <TableCell colSpan={watchedChainIds ? 7 : 6} className="py-10 text-center text-muted-foreground">
-                No chains to show yet.
-              </TableCell>
-            </TableRow>
-          )}
-        </TableBody>
-      </Table>
-    </div>
+    <DataTable
+      columns={columns}
+      rows={chains}
+      rowKey={(chain) => chain.id}
+      emptyMessage="No chains to show yet."
+      watchColumn={
+        watchedChainIds
+          ? (chain) => (
+              <WatchIconButton
+                target={{ chainId: chain.id }}
+                isSignedIn={isSignedIn}
+                initialWatching={watchedChainIds.has(chain.id)}
+                label={chain.name}
+              />
+            )
+          : undefined
+      }
+    />
   );
 }

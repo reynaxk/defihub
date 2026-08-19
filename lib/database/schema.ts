@@ -279,6 +279,15 @@ export const users = pgTable("users", {
   image: text("image"),
   // null for OAuth-only accounts
   passwordHash: text("password_hash"),
+  // Stamped whenever passwordHash changes via the reset-password flow (null
+  // for an account that's never reset its password). Embedded into the JWT
+  // at sign-in and re-checked against this column on every request in
+  // lib/auth/config.ts's jwt callback, so a password reset actually
+  // invalidates sessions issued before it - otherwise a stateless JWT
+  // (required for the Credentials provider) would stay valid for its full
+  // maxAge regardless of a reset, which defeats the point of resetting a
+  // password you suspect is compromised.
+  passwordChangedAt: timestamp("password_changed_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 

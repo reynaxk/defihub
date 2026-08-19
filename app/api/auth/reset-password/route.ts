@@ -39,7 +39,11 @@ export async function POST(request: Request) {
   }
 
   const passwordHash = await bcrypt.hash(parsed.data.password, 12);
-  await db.update(users).set({ passwordHash }).where(eq(users.email, email));
+  // passwordChangedAt is what lib/auth/config.ts's jwt callback checks on
+  // every request to invalidate any session issued before this reset -
+  // without stamping it here, a stateless JWT from before the reset would
+  // stay valid regardless of the password change.
+  await db.update(users).set({ passwordHash, passwordChangedAt: new Date() }).where(eq(users.email, email));
 
   return NextResponse.json({ ok: true });
 }

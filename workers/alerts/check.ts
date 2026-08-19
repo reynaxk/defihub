@@ -218,7 +218,7 @@ export async function checkAlerts() {
     // the last check (updated below regardless of outcome) independently of
     // lastTriggeredAt, which stays "the last time we actually emailed".
     if (fires && !alert.isFiring) {
-      await sendEmail({
+      const sent = await sendEmail({
         to: userEmail,
         subject: `DeFiHub alert: ${reading.displayName}`,
         html: alertEmailHtml({
@@ -229,11 +229,19 @@ export async function checkAlerts() {
           appUrl: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
         }),
       });
-      await db.update(alerts).set({ lastTriggeredAt: new Date() }).where(eq(alerts.id, alert.id));
-      triggered++;
-    }
-
-    if (fires !== alert.isFiring) {
+      // isFiring only flips to true once the email actually sent - if
+      // Resend failed, this alert is left exactly as it was so the next
+      // run's `fires && !alert.isFiring` check is still true and retries
+      // it, instead of a failed send silently being treated the same as a
+      // delivered one and never being retried.
+      if (sent) {
+        await db
+          .update(alerts)
+          .set({ isFiring: true, lastTriggeredAt: new Date() })
+          .where(eq(alerts.id, alert.id));
+        triggered++;
+      }
+    } else if (fires !== alert.isFiring) {
       await db.update(alerts).set({ isFiring: fires }).where(eq(alerts.id, alert.id));
     }
   }

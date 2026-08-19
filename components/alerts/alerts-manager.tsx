@@ -31,7 +31,7 @@ const CONDITIONS = [
 
 const createAlertSchema = z.object({
   type: z.enum(["protocol_tvl", "chain_tvl", "token_price", "pool_apy"]),
-  target: z.string().min(1, "Required"),
+  target: z.string().min(1, "Required").max(256, "At most 256 characters"),
   condition: z.enum(["above", "below", "percent_change_up", "percent_change_down"]),
   threshold: z
     .string()

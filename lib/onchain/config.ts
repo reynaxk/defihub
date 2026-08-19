@@ -260,19 +260,33 @@ export const VERIFIED_PROTOCOL_TVLS: VerifiedProtocolTvl[] = [
     coingeckoId: "ethereum",
   },
   // Rocket Pool's rETH was researched (2026-08-19) as the second real use
-  // of the "supply-times-rate" read kind above, and the on-chain read
-  // itself checked out: totalSupply() * getExchangeRate() gave ~374,526
-  // ETH ($717.4M at the time), internally consistent with the live ETH
-  // price and matching getEthValue(totalSupply) exactly. But that figure
-  // came in ~29% below DefiLlama's own published /tvl/rocket-pool
-  // ($1.006B) - a real, unexplained gap, not the sub-0.2% noise every
-  // other entry in this file has shown. DefiLlama's protocol methodology
-  // text says "TVL = idle ETH (rETH reserve + deposit pool) + staked ETH,"
-  // which sounds like the same thing rETH's exchange rate should already
-  // represent, so the gap is likely a real second component (RPL staked
-  // as node-operator collateral, a separate MEV smoothing pool, or a
-  // legacy accounting bucket) rather than a bug in this read - but that's
-  // not confirmed, and shipping a TVL that's off by nearly a third would
-  // be worse than not covering this protocol at all. Deliberately not
-  // added until that gap is actually understood, not just noted.
+  // of the "supply-times-rate" read kind above. The exchange-rate read
+  // itself checked out (totalSupply() * getExchangeRate() = ~374,526 ETH,
+  // internally consistent and matching getEthValue(totalSupply) exactly),
+  // but it landed ~29% below DefiLlama's published TVL ($717.4M vs
+  // $1.006B). Chased this down rather than leaving it a mystery: read
+  // DefiLlama's actual open-source adapter
+  // (DefiLlama-Adapters/projects/rocketpool/index.js) instead of guessing,
+  // and it turns out rETH's exchange rate was never the right read at all
+  // - Rocket Pool's real TVL definition is idle ETH (rETH's own balance +
+  // rocketDepositPool.getBalance()) + legacy minipool count * 32 ETH +
+  // a newer "megapool" component. The exchange rate only reflects the
+  // portion of each minipool's 32 ETH sourced from rETH depositors - it
+  // excludes node operators' own co-invested bond capital, which is real
+  // protocol TVL but never backs rETH.
+  //
+  // Recomputed with the correct components (RocketStorage-resolved
+  // rocketDepositPool/rocketMinipoolManager addresses, confirmed against
+  // the known rETH address before trusting them): idle ETH + deposit pool
+  // + 14,297 legacy minipools * 32 ETH = ~457,536 ETH (~$877M) - closes
+  // most of the gap (29% -> ~13% low) and confirms the theory. The
+  // remaining piece is the "megapool" component, which isn't a single
+  // accounting call: it requires enumerating every node operator
+  // (getNodeCount()/getNodeAt()), checking each for a deployed megapool,
+  // and summing active validators per one found - a genuine multi-entity
+  // computation, not a different shape of "the contract's own number."
+  // That's the same category boundary already excluding lending
+  // protocols, not a new exception - so this stays unshipped rather than
+  // either guessing at the megapool piece or quietly serving the
+  // still-~13%-low three-component figure as if it were the full total.
 ];

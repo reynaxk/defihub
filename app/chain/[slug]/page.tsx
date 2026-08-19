@@ -8,6 +8,7 @@ import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
 import { ProtocolsTable } from "@/components/protocols/protocols-table";
 import { TokensTable } from "@/components/tokens/tokens-table";
 import { PercentChange } from "@/components/shared/percent-change";
+import { SectionNav } from "@/components/shared/section-nav";
 import { getChainBySlug } from "@/lib/database/queries/chains";
 import { getTokensList } from "@/lib/database/queries/tokens";
 import {
@@ -90,6 +91,15 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
         </div>
       </div>
 
+      <SectionNav
+        sections={[
+          { id: "tvl", label: "TVL" },
+          ...(categoryBreakdown.length > 0 ? [{ id: "category-breakdown", label: "Categories" }] : []),
+          { id: "top-protocols", label: "Protocols" },
+          ...(chainTokens.length > 0 ? [{ id: "tokens", label: "Tokens" }] : []),
+        ]}
+      />
+
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <StatTile
           label="TVL"
@@ -108,13 +118,13 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
         <StatTile label="Chain ID" value={chain.chainId != null ? String(chain.chainId) : "—"} />
       </div>
 
-      <div className="mt-8 rounded-lg border border-border bg-card p-4">
+      <div id="tvl" className="mt-8 scroll-mt-28 rounded-lg border border-border bg-card p-4">
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
         <RangedAreaChart data={history.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))} />
       </div>
 
       {categoryBreakdown.length > 0 && (
-        <div className="mt-8">
+        <div id="category-breakdown" className="mt-8 scroll-mt-28">
           <h2 className="mb-4 text-xl font-semibold tracking-tight">TVL by category</h2>
           <div className="rounded-lg border border-border bg-card p-4">
             <div className="flex flex-col gap-3">
@@ -138,7 +148,7 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
         </div>
       )}
 
-      <div className="mt-8">
+      <div id="top-protocols" className="mt-8 scroll-mt-28">
         <h2 className="mb-4 text-xl font-semibold tracking-tight">Top protocols on {chain.name}</h2>
         <ProtocolsTable
           protocols={topProtocols}
@@ -148,7 +158,7 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
       </div>
 
       {chainTokens.length > 0 && (
-        <div className="mt-8">
+        <div id="tokens" className="mt-8 scroll-mt-28">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-xl font-semibold tracking-tight">Tokens on {chain.name}</h2>
             <Link href={`/tokens?chain=${chain.slug}`} className="text-sm text-primary hover:underline">

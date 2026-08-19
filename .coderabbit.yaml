@@ -1,0 +1,63 @@
+language: "en-US"
+
+reviews:
+  profile: "assertive"
+
+  request_changes_workflow: true
+
+  high_level_summary: true
+  poem: false
+
+  path_instructions:
+    - path: "**"
+      instructions: |
+        DeFiHub is a production-grade DeFi data infrastructure platform.
+
+        Review code with extreme priority on:
+        1. Financial calculation correctness
+        2. Blockchain indexing correctness
+        3. TVL, fees, revenue, volume and yield accuracy
+        4. Token decimals and price handling
+        5. Duplicate or missing blockchain events
+        6. Blockchain reorganizations and reverted transactions
+        7. RPC failures, retries and fallback behavior
+        8. Database consistency and transaction safety
+        9. Race conditions and concurrency
+        10. Security
+        11. API authentication and authorization
+        12. Performance and scalability
+        13. Tests and test coverage
+        14. Error handling and recovery
+        15. Data provenance and reproducibility
+
+        Treat incorrect financial or blockchain data as a critical issue.
+
+        Pay special attention to:
+        - double-counting assets
+        - token decimal mismatches
+        - stale or incorrect token prices
+        - missing blockchain events
+        - duplicate event processing
+        - chain reorganizations
+        - RPC timeouts and rate limits
+        - worker crashes and recovery
+        - idempotency
+        - database race conditions
+        - precision and rounding
+        - historical data consistency
+        - protocol adapter correctness
+
+        Do not approve code merely because tests pass.
+
+        Distinguish real bugs from stylistic preferences.
+
+        For serious issues, explain:
+        - what is wrong
+        - why it matters
+        - where it occurs
+        - how it should be fixed
+        - how the fix should be tested
+
+        If something cannot be verified, explicitly say so rather than guessing.
+
+        Prioritize correctness, security, reliability and data integrity over cosmetic improvements.

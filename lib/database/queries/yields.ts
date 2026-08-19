@@ -2,6 +2,7 @@ import { and, asc, count, desc, eq, gte, ilike, isNotNull, lte, or, type SQL } f
 import { db } from "@/lib/database/client";
 import { chains, protocols, yieldPools } from "@/lib/database/schema";
 import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
+import { escapeLikePattern } from "@/lib/utils/like-pattern";
 
 export interface YieldFilters {
   chainSlug?: string;
@@ -28,7 +29,7 @@ function buildConditions(filters: YieldFilters): SQL[] {
   if (filters.maxApy != null) conditions.push(lte(yieldPools.apy, filters.maxApy.toString()));
   if (filters.minTvl != null) conditions.push(gte(yieldPools.tvlUsd, filters.minTvl.toString()));
   if (filters.search) {
-    const term = `%${filters.search}%`;
+    const term = `%${escapeLikePattern(filters.search)}%`;
     const clause = or(ilike(yieldPools.symbol, term), ilike(protocols.name, term));
     if (clause) conditions.push(clause);
   }

@@ -2,6 +2,7 @@ import { and, count, desc, eq, ilike, isNotNull, isNull, sql } from "drizzle-orm
 import { db } from "@/lib/database/client";
 import { chains, protocolChains, protocolMetrics, protocols } from "@/lib/database/schema";
 import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
+import { escapeLikePattern } from "@/lib/utils/like-pattern";
 
 // All protocols get upserted with the same `timestamp` value within a single
 // sync run, so "the most recent sync's rows" is just "rows at MAX(timestamp)"
@@ -101,7 +102,7 @@ export async function getProtocolsList(filters: ProtocolFilters = {}): Promise<P
 
   const conditions = [isNull(protocolMetrics.chainId)];
   if (filters.category) conditions.push(eq(protocols.category, filters.category));
-  if (filters.search) conditions.push(ilike(protocols.name, `%${filters.search}%`));
+  if (filters.search) conditions.push(ilike(protocols.name, `%${escapeLikePattern(filters.search)}%`));
 
   let itemsQuery = db
     .select({
@@ -199,7 +200,7 @@ export async function getProtocolsForExport(
 ): Promise<ProtocolListItem[]> {
   const conditions = [isNull(protocolMetrics.chainId)];
   if (filters.category) conditions.push(eq(protocols.category, filters.category));
-  if (filters.search) conditions.push(ilike(protocols.name, `%${filters.search}%`));
+  if (filters.search) conditions.push(ilike(protocols.name, `%${escapeLikePattern(filters.search)}%`));
 
   let itemsQuery = db
     .select({

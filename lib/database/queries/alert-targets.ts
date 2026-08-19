@@ -1,6 +1,7 @@
 import { and, eq, ilike, isNotNull, or } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, protocols, tokens, yieldPools } from "@/lib/database/schema";
+import { escapeLikePattern } from "@/lib/utils/like-pattern";
 
 const RESULTS_LIMIT = 8;
 
@@ -18,10 +19,11 @@ export interface AlertTargetOption {
 
 export async function searchProtocolTargets(query: string): Promise<AlertTargetOption[]> {
   if (query.trim().length < 2) return [];
+  const pattern = `%${escapeLikePattern(query)}%`;
   const rows = await db
     .select({ name: protocols.name, slug: protocols.slug, category: protocols.category })
     .from(protocols)
-    .where(ilike(protocols.name, `%${query}%`))
+    .where(ilike(protocols.name, pattern))
     .orderBy(protocols.name)
     .limit(RESULTS_LIMIT);
   return rows.map((r) => ({ value: r.slug, label: r.name, meta: r.category }));
@@ -29,10 +31,11 @@ export async function searchProtocolTargets(query: string): Promise<AlertTargetO
 
 export async function searchChainTargets(query: string): Promise<AlertTargetOption[]> {
   if (query.trim().length < 1) return [];
+  const pattern = `%${escapeLikePattern(query)}%`;
   const rows = await db
     .select({ name: chains.name, slug: chains.slug, nativeToken: chains.nativeToken })
     .from(chains)
-    .where(ilike(chains.name, `%${query}%`))
+    .where(ilike(chains.name, pattern))
     .orderBy(chains.name)
     .limit(RESULTS_LIMIT);
   return rows.map((r) => ({ value: r.slug, label: r.name, meta: r.nativeToken }));
@@ -43,6 +46,7 @@ export async function searchChainTargets(query: string): Promise<AlertTargetOpti
 // once per chain deployment with identical behavior either way.
 export async function searchTokenTargets(query: string): Promise<AlertTargetOption[]> {
   if (query.trim().length < 1) return [];
+  const pattern = `%${escapeLikePattern(query)}%`;
   const rows = await db
     .selectDistinctOn([tokens.coingeckoId], {
       coingeckoId: tokens.coingeckoId,
@@ -53,7 +57,7 @@ export async function searchTokenTargets(query: string): Promise<AlertTargetOpti
     .where(
       and(
         isNotNull(tokens.coingeckoId),
-        or(ilike(tokens.symbol, `%${query}%`), ilike(tokens.name, `%${query}%`)),
+        or(ilike(tokens.symbol, pattern), ilike(tokens.name, pattern)),
       ),
     )
     .orderBy(tokens.coingeckoId, tokens.symbol)
@@ -73,7 +77,7 @@ export async function searchPoolTargets(query: string): Promise<AlertTargetOptio
     .from(yieldPools)
     .innerJoin(chains, eq(chains.id, yieldPools.chainId))
     .leftJoin(protocols, eq(protocols.id, yieldPools.protocolId))
-    .where(ilike(yieldPools.symbol, `%${query}%`))
+    .where(ilike(yieldPools.symbol, `%${escapeLikePattern(query)}%`))
     .orderBy(yieldPools.symbol)
     .limit(RESULTS_LIMIT);
   return rows.map((r) => ({

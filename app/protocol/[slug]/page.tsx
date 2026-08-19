@@ -75,7 +75,7 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
   const { protocol, chains, history, latest } = data;
   const [watching, cachedSummary, verifications, chainBreakdown, protocolYields] = await Promise.all([
     isWatchingProtocol(session?.user?.id, protocol.id),
-    getCachedProtocolSummary(protocol.id),
+    getCachedProtocolSummary(protocol.id, latest?.tvl ?? null),
     getVerificationsForProtocol(protocol.id),
     getProtocolChainBreakdown(protocol.id),
     getYieldPools({ protocolSlug: protocol.slug }),

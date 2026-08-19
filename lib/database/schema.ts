@@ -233,6 +233,11 @@ export const protocolAiSummaries = pgTable("protocol_ai_summaries", {
     .references(() => protocols.id, { onDelete: "cascade" }),
   content: text("content").notNull(),
   model: varchar("model", { length: 64 }).notNull(),
+  // TVL at the moment this summary was generated - lets a later read detect
+  // "this summary's scale/risk characterization no longer matches reality"
+  // (e.g. a 50% TVL crash) and stop serving it, rather than caching forever
+  // with no invalidation at all. See getCachedProtocolSummary.
+  tvlAtGeneration: numeric("tvl_at_generation", { precision: 24, scale: 2 }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 

@@ -204,24 +204,40 @@ export const VERIFIED_POOLS: VerifiedPool[] = [
 // first-party and provably-correct as reading an AMM pool's own balance -
 // just a different shape of "the contract's own accounting," not a weaker
 // standard of evidence.
+// Human-readable Solidity signatures throughout (parsed with viem's
+// parseAbi), never a raw selector - keeps each entry legible and lets viem
+// compute the correct selector itself rather than one being hand-copied/
+// misremembered into the config. Confirmed the hard way while researching
+// the first entry below: a memorized selector for getTotalPooledEther()
+// turned out to be wrong; viem's own toFunctionSelector() computed the
+// real one.
+export type VerifiedProtocolTvlRead =
+  // One no-arg call returns the total directly - e.g. Lido's stETH, which
+  // rebases by adjusting every holder's balance to keep a 1:1 peg, so the
+  // contract already tracks "total ETH pooled" as one number.
+  | { kind: "direct"; functionSignature: string }
+  // Two independent no-arg calls, multiplied - e.g. Rocket Pool's rETH,
+  // which instead keeps a fixed supply and an appreciating exchange rate,
+  // so "total ETH backing" isn't one call, it's supply * rate. Confirmed
+  // this is exactly what the contract's own conversion helper
+  // (getEthValue(amount)) computes internally too, by calling
+  // getEthValue(1 rETH) and checking it exactly matches getExchangeRate()
+  // - not assumed from how the rebasing/exchange-rate distinction usually
+  // works for this class of token.
+  | { kind: "supply-times-rate"; supplyFunctionSignature: string; rateFunctionSignature: string };
+
 export interface VerifiedProtocolTvl {
   key: string;
   chainSlug: string;
   protocolDefillamaSlug: string;
   label: string;
   contractAddress: string;
-  // Human-readable Solidity signature (parsed with viem's parseAbi), not a
-  // raw selector - keeps each entry legible and lets viem compute the
-  // correct selector itself rather than one being hand-copied/misremembered
-  // into the config (confirmed the hard way while researching this exact
-  // entry - a memorized selector for getTotalPooledEther() turned out to be
-  // wrong; viem's own toFunctionSelector() computed the real one).
-  functionSignature: string;
+  read: VerifiedProtocolTvlRead;
   decimals: number;
-  // Prices whatever unit the function returns (e.g. "ethereum" for a
-  // function returning a plain ETH amount) - not necessarily the liquid
-  // staking token's own id, which can trade at a slight premium/discount to
-  // its underlying during stress events rather than always at exact parity.
+  // Prices whatever unit the read resolves to (e.g. "ethereum" for a
+  // result denominated in plain ETH) - not necessarily the liquid staking
+  // token's own id, which can trade at a slight premium/discount to its
+  // underlying during stress events rather than always at exact parity.
   coingeckoId: string;
 }
 
@@ -239,8 +255,24 @@ export const VERIFIED_PROTOCOL_TVLS: VerifiedProtocolTvl[] = [
     // as expected from stETH's 1:1-pegged design - a second, independent
     // on-chain confirmation of the same figure via a different call.
     contractAddress: "0xae7ab96520de3a18e5e111b5eaab095312d7fe84",
-    functionSignature: "function getTotalPooledEther() view returns (uint256)",
+    read: { kind: "direct", functionSignature: "function getTotalPooledEther() view returns (uint256)" },
     decimals: 18,
     coingeckoId: "ethereum",
   },
+  // Rocket Pool's rETH was researched (2026-08-19) as the second real use
+  // of the "supply-times-rate" read kind above, and the on-chain read
+  // itself checked out: totalSupply() * getExchangeRate() gave ~374,526
+  // ETH ($717.4M at the time), internally consistent with the live ETH
+  // price and matching getEthValue(totalSupply) exactly. But that figure
+  // came in ~29% below DefiLlama's own published /tvl/rocket-pool
+  // ($1.006B) - a real, unexplained gap, not the sub-0.2% noise every
+  // other entry in this file has shown. DefiLlama's protocol methodology
+  // text says "TVL = idle ETH (rETH reserve + deposit pool) + staked ETH,"
+  // which sounds like the same thing rETH's exchange rate should already
+  // represent, so the gap is likely a real second component (RPL staked
+  // as node-operator collateral, a separate MEV smoothing pool, or a
+  // legacy accounting bucket) rather than a bug in this read - but that's
+  // not confirmed, and shipping a TVL that's off by nearly a third would
+  // be worse than not covering this protocol at all. Deliberately not
+  // added until that gap is actually understood, not just noted.
 ];

@@ -20,14 +20,45 @@ async function readOne(
   }
 
   const client = createPublicClient({ chain: viemChain, transport: http(rpcUrlFor(entry.chainSlug)) });
-  const abi = parseAbi([entry.functionSignature]);
-  const functionName = entry.functionSignature.split(/[\s(]/)[1];
+  const address = entry.contractAddress as `0x${string}`;
+
+  function functionNameFrom(signature: string): string {
+    return signature.split(/[\s(]/)[1];
+  }
 
   try {
-    const [rawAmount, blockNumber] = await Promise.all([
-      client.readContract({ address: entry.contractAddress as `0x${string}`, abi, functionName }) as Promise<bigint>,
-      client.getBlockNumber(),
-    ]);
+    let rawAmount: bigint;
+    let blockNumber: bigint;
+
+    if (entry.read.kind === "direct") {
+      const abi = parseAbi([entry.read.functionSignature]);
+      const functionName = functionNameFrom(entry.read.functionSignature);
+      [rawAmount, blockNumber] = await Promise.all([
+        client.readContract({ address, abi, functionName }) as Promise<bigint>,
+        client.getBlockNumber(),
+      ]);
+    } else {
+      const abi = parseAbi([entry.read.supplyFunctionSignature, entry.read.rateFunctionSignature]);
+      const [supply, rate, block] = await Promise.all([
+        client.readContract({
+          address,
+          abi,
+          functionName: functionNameFrom(entry.read.supplyFunctionSignature),
+        }) as Promise<bigint>,
+        client.readContract({
+          address,
+          abi,
+          functionName: functionNameFrom(entry.read.rateFunctionSignature),
+        }) as Promise<bigint>,
+        client.getBlockNumber(),
+      ]);
+      // Both values are fixed-point at `decimals` places (e.g. 1e18), so the
+      // raw product needs one factor's worth of scale divided back out
+      // before it's in the same fixed-point units as a "direct" read.
+      rawAmount = (supply * rate) / BigInt(10) ** BigInt(entry.decimals);
+      blockNumber = block;
+    }
+
     const tvlUsd = (Number(rawAmount) / 10 ** entry.decimals) * price;
     return { key: entry.key, ok: true, tvlUsd, blockNumber };
   } catch (err) {

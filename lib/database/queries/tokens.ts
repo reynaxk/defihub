@@ -373,6 +373,7 @@ export interface BalanceCheckToken {
   symbol: string;
   decimals: number;
   logoUrl: string | null;
+  priceUsd: number | null;
 }
 
 const BALANCE_CHECK_TOKENS_PER_CHAIN = 50;
@@ -382,12 +383,13 @@ const BALANCE_CHECK_TOKENS_PER_CHAIN = 50;
 // request a reasonable size - ordered by market cap so the tokens most
 // likely to actually be held show up first if a chain has more than the cap.
 export async function getTokensForBalanceCheck(chainSlug: string): Promise<BalanceCheckToken[]> {
-  return db
+  const rows = await db
     .select({
       address: tokens.address,
       symbol: tokens.symbol,
       decimals: tokens.decimals,
       logoUrl: tokens.logoUrl,
+      priceUsd: latestPricePerToken.priceUsd,
     })
     .from(tokens)
     .innerJoin(chains, eq(chains.id, tokens.chainId))
@@ -395,4 +397,24 @@ export async function getTokensForBalanceCheck(chainSlug: string): Promise<Balan
     .where(eq(chains.slug, chainSlug))
     .orderBy(sql`${latestPricePerToken.marketCap} desc nulls last`)
     .limit(BALANCE_CHECK_TOKENS_PER_CHAIN);
+
+  return rows.map((r) => ({ ...r, priceUsd: r.priceUsd != null ? Number(r.priceUsd) : null }));
+}
+
+// The chain's native currency is seeded as its own `tokens` row (see
+// seed.ts) so it gets price coverage from the same sync pipeline as every
+// other tracked token - matched by symbol against chains.nativeToken rather
+// than a hardcoded per-chain sentinel address, and limit(1) ordered by
+// market cap breaks a tie if more than one row ever shares that symbol.
+export async function getNativeTokenPrice(chainSlug: string): Promise<number | null> {
+  const [row] = await db
+    .select({ priceUsd: latestPricePerToken.priceUsd })
+    .from(tokens)
+    .innerJoin(chains, eq(chains.id, tokens.chainId))
+    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+    .where(and(eq(chains.slug, chainSlug), eq(tokens.symbol, chains.nativeToken)))
+    .orderBy(sql`${latestPricePerToken.marketCap} desc nulls last`)
+    .limit(1);
+
+  return row?.priceUsd != null ? Number(row.priceUsd) : null;
 }

@@ -5,13 +5,17 @@ import { useQuery } from "@tanstack/react-query";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { AnimatedNumber } from "@/components/stats/animated-number";
 import { ConnectWalletButton } from "@/components/wallet/connect-wallet-button";
+import { formatUsd } from "@/lib/format";
 
 interface TokenBalance {
   symbol: string;
   address: string;
   logoUrl: string | null;
   balance: string;
+  priceUsd: number | null;
+  valueUsd: number | null;
 }
 
 interface ChainBalanceResult {
@@ -19,7 +23,10 @@ interface ChainBalanceResult {
   chainName: string;
   nativeToken: string;
   nativeBalance: string;
+  nativePriceUsd: number | null;
+  nativeValueUsd: number | null;
   tokenBalances: TokenBalance[];
+  chainTotalUsd: number | null;
 }
 
 interface ChainBalanceError {
@@ -34,7 +41,9 @@ function isError(chain: ChainResult): chain is ChainBalanceError {
   return "error" in chain;
 }
 
-async function fetchBalances(address: string): Promise<{ address: string; chains: ChainResult[] }> {
+async function fetchBalances(
+  address: string,
+): Promise<{ address: string; chains: ChainResult[]; totalUsd: number | null }> {
   const res = await fetch(`/api/wallet/balances?address=${address}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -57,7 +66,14 @@ function ChainCard({ chain }: { chain: ChainResult }) {
 
   return (
     <Card className="p-4">
-      <p className="font-medium">{chain.chainName}</p>
+      <div className="flex items-center justify-between">
+        <p className="font-medium">{chain.chainName}</p>
+        {chain.chainTotalUsd != null && (
+          <p className="tabular-nums text-sm font-medium text-muted-foreground">
+            {formatUsd(chain.chainTotalUsd)}
+          </p>
+        )}
+      </div>
       {!hasAnyBalance ? (
         <p className="mt-1 text-sm text-muted-foreground">No balance found on this chain.</p>
       ) : (
@@ -65,7 +81,12 @@ function ChainCard({ chain }: { chain: ChainResult }) {
           {Number(chain.nativeBalance) > 0 && (
             <div className="flex items-center justify-between text-sm">
               <span className="text-muted-foreground">{chain.nativeToken}</span>
-              <span className="tabular-nums font-medium">{chain.nativeBalance}</span>
+              <span className="flex items-baseline gap-2">
+                <span className="tabular-nums font-medium">{chain.nativeBalance}</span>
+                <span className="tabular-nums text-xs text-muted-foreground">
+                  {chain.nativeValueUsd != null ? formatUsd(chain.nativeValueUsd) : "—"}
+                </span>
+              </span>
             </div>
           )}
           {chain.tokenBalances.map((token) => (
@@ -74,7 +95,12 @@ function ChainCard({ chain }: { chain: ChainResult }) {
                 <EntityLogo src={token.logoUrl} name={token.symbol} size={16} />
                 {token.symbol}
               </span>
-              <span className="tabular-nums font-medium">{token.balance}</span>
+              <span className="flex items-baseline gap-2">
+                <span className="tabular-nums font-medium">{token.balance}</span>
+                <span className="tabular-nums text-xs text-muted-foreground">
+                  {token.valueUsd != null ? formatUsd(token.valueUsd) : "—"}
+                </span>
+              </span>
             </div>
           ))}
         </div>
@@ -128,11 +154,25 @@ export function WalletDashboard() {
       )}
 
       {data && (
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {data.chains.map((chain) => (
-            <ChainCard key={chain.chainSlug} chain={chain} />
-          ))}
-        </div>
+        <>
+          {data.totalUsd != null && (
+            <Card className="mt-4 p-4">
+              <p className="text-sm text-muted-foreground">Total value</p>
+              <p className="mt-1 text-3xl font-semibold tracking-tight tabular-nums">
+                <AnimatedNumber value={data.totalUsd} format="usd" />
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                24h change: not yet available — DeFiHub doesn&apos;t track historical wallet snapshots.
+              </p>
+            </Card>
+          )}
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {data.chains.map((chain) => (
+              <ChainCard key={chain.chainSlug} chain={chain} />
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

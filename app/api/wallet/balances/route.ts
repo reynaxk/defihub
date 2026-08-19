@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createPublicClient, erc20Abi, formatUnits, http, isAddress, type Address } from "viem";
 import { auth } from "@/lib/auth/config";
 import { checkRateLimit } from "@/lib/security/rate-limit";
-import { getTokensForBalanceCheck } from "@/lib/database/queries/tokens";
+import { getNativeTokenPrice, getTokensForBalanceCheck } from "@/lib/database/queries/tokens";
 import { EVM_CHAINS, VIEM_CHAIN_BY_SLUG, rpcUrlFor } from "@/lib/chains/rpc-client";
 
 // Each request fans out to 7 chains' RPC endpoints (1 native balance + 1
@@ -15,6 +15,8 @@ interface TokenBalance {
   address: string;
   logoUrl: string | null;
   balance: string;
+  priceUsd: number | null;
+  valueUsd: number | null;
 }
 
 interface ChainBalanceResult {
@@ -22,7 +24,12 @@ interface ChainBalanceResult {
   chainName: string;
   nativeToken: string;
   nativeBalance: string;
+  nativePriceUsd: number | null;
+  nativeValueUsd: number | null;
   tokenBalances: TokenBalance[];
+  // null (not 0) when there's a real balance but no tracked price covers any
+  // of it - a $0 total would read as "worth nothing" instead of "unknown".
+  chainTotalUsd: number | null;
 }
 
 async function readChainBalances(
@@ -59,7 +66,7 @@ async function readChainBalances(
   // and it's already calling multicall on these exact contracts, so reading
   // the real value straight from each token contract is both more correct
   // and doesn't need to wait on that sync fix.
-  const [nativeBalance, multicallResults] = await Promise.all([
+  const [nativeBalance, multicallResults, nativePriceUsd] = await Promise.all([
     client.getBalance({ address }),
     trackedTokens.length === 0
       ? []
@@ -78,6 +85,7 @@ async function readChainBalances(
             })),
           ],
         }),
+    getNativeTokenPrice(chain.slug),
   ]);
 
   const tokenBalances: TokenBalance[] = trackedTokens
@@ -98,21 +106,33 @@ async function readChainBalances(
         decimalsResult && decimalsResult.status === "success"
           ? (decimalsResult.result as number)
           : token.decimals;
+      const balanceStr = formatUnits(balance, decimals);
       return {
         symbol: token.symbol,
         address: token.address,
         logoUrl: token.logoUrl,
-        balance: formatUnits(balance, decimals),
+        balance: balanceStr,
+        priceUsd: token.priceUsd,
+        valueUsd: token.priceUsd != null ? Number(balanceStr) * token.priceUsd : null,
       };
     })
     .filter((t): t is TokenBalance => t !== null);
+
+  const nativeBalanceStr = formatUnits(nativeBalance, 18);
+  const nativeValueUsd = nativePriceUsd != null ? Number(nativeBalanceStr) * nativePriceUsd : null;
+  const pricedValues = [nativeValueUsd, ...tokenBalances.map((t) => t.valueUsd)].filter(
+    (v): v is number => v != null,
+  );
 
   return {
     chainSlug: chain.slug,
     chainName: chain.name,
     nativeToken: chain.nativeToken,
-    nativeBalance: formatUnits(nativeBalance, 18),
+    nativeBalance: nativeBalanceStr,
+    nativePriceUsd,
+    nativeValueUsd,
     tokenBalances,
+    chainTotalUsd: pricedValues.length > 0 ? pricedValues.reduce((sum, v) => sum + v, 0) : null,
   };
 }
 
@@ -157,5 +177,10 @@ export async function GET(request: Request) {
     return { chainSlug: EVM_CHAINS[i].slug, chainName: EVM_CHAINS[i].name, error: "Couldn't reach this chain" };
   });
 
-  return NextResponse.json({ address, chains });
+  const pricedChainTotals = chains
+    .map((c) => ("chainTotalUsd" in c ? c.chainTotalUsd : null))
+    .filter((v): v is number => v != null);
+  const totalUsd = pricedChainTotals.length > 0 ? pricedChainTotals.reduce((sum, v) => sum + v, 0) : null;
+
+  return NextResponse.json({ address, chains, totalUsd });
 }

@@ -110,7 +110,11 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <WatchlistButton isSignedIn={Boolean(session?.user)} initialWatching={watching} protocolId={protocol.id} />
+          <WatchlistButton
+            isSignedIn={Boolean(session?.user)}
+            initialWatching={watching}
+            target={{ protocolId: protocol.id }}
+          />
           {protocol.website && (
             <Link
               href={protocol.website}

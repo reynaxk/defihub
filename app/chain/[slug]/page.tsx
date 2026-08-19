@@ -78,7 +78,11 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <WatchlistButton isSignedIn={Boolean(session?.user)} initialWatching={watching} chainId={chain.id} />
+          <WatchlistButton
+            isSignedIn={Boolean(session?.user)}
+            initialWatching={watching}
+            target={{ chainId: chain.id }}
+          />
           {chain.explorerUrl && (
             <Link
               href={chain.explorerUrl}

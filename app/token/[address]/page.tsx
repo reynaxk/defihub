@@ -75,7 +75,11 @@ export default async function TokenDetailPage({
             </div>
           </div>
         </div>
-        <WatchlistButton isSignedIn={Boolean(session?.user)} initialWatching={watching} tokenId={token.id} />
+        <WatchlistButton
+          isSignedIn={Boolean(session?.user)}
+          initialWatching={watching}
+          target={{ tokenId: token.id }}
+        />
       </div>
 
       <p className="mt-4 max-w-3xl break-all font-mono text-xs text-muted-foreground">{token.address}</p>

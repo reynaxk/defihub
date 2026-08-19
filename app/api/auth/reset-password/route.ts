@@ -19,7 +19,7 @@ const IP_LIMIT = { limit: 20, windowMs: 60 * 60 * 1000 };
 
 export async function POST(request: Request) {
   const ip = getClientIp(request);
-  const rateLimit = checkRateLimit(`reset-password:${ip}`, IP_LIMIT);
+  const rateLimit = await checkRateLimit(`reset-password:${ip}`, IP_LIMIT);
   if (!rateLimit.allowed) {
     return NextResponse.json(
       { error: "Too many attempts. Try again later." },

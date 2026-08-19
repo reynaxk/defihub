@@ -37,7 +37,7 @@ export async function POST(request: Request) {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const limited = checkRateLimit(`create-alert:${session.user.id}`, CREATE_ALERT_LIMIT);
+  const limited = await checkRateLimit(`create-alert:${session.user.id}`, CREATE_ALERT_LIMIT);
   if (!limited.allowed) {
     return NextResponse.json(
       { error: "Rate limit exceeded. Try again later." },

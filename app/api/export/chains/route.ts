@@ -4,7 +4,7 @@ import { toCsv, csvResponse } from "@/lib/utils/csv";
 import type { ChainListItem } from "@/lib/database/queries/chains";
 
 export async function GET(request: Request) {
-  const limited = checkPublicApiRateLimit(request);
+  const limited = await checkPublicApiRateLimit(request);
   if (limited) return limited;
 
   const rows = await getTopChains();

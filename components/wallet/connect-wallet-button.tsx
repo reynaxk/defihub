@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Wallet as WalletIcon } from "lucide-react";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { Button } from "@/components/ui/button";
@@ -18,10 +19,30 @@ export function ConnectWalletButton() {
   const { address, isConnected } = useAccount();
   const { connect, connectors, isPending, error } = useConnect();
   const { disconnect } = useDisconnect();
+  // Selecting "Disconnect" can't call disconnect() directly from the item's
+  // onClick: that flips isConnected to false and swaps this component's
+  // whole returned subtree (the dropdown's trigger button unmounts,
+  // replaced by the "Connect Wallet" button below), which can happen before
+  // Base UI has finished closing the menu and restoring focus to that same
+  // trigger - the DOM node it tries to focus is already gone, silently
+  // dropping keyboard/screen-reader focus to document.body. Deferring the
+  // actual disconnect to onOpenChangeComplete (fired only after the close
+  // animation, and Base UI's own focus restoration, are done) avoids the
+  // race. The pending flag distinguishes "closed because Disconnect was
+  // clicked" from any other close reason (Escape, outside click), which
+  // also fires onOpenChangeComplete(false) but shouldn't disconnect anything.
+  const [pendingDisconnect, setPendingDisconnect] = useState(false);
 
   if (isConnected && address) {
     return (
-      <DropdownMenu>
+      <DropdownMenu
+        onOpenChangeComplete={(open) => {
+          if (!open && pendingDisconnect) {
+            setPendingDisconnect(false);
+            disconnect();
+          }
+        }}
+      >
         <DropdownMenuTrigger
           render={<Button variant="outline" size="sm" />}
           aria-label="Wallet menu"
@@ -30,7 +51,7 @@ export function ConnectWalletButton() {
           {truncateAddress(address)}
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem onClick={() => disconnect()}>Disconnect</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setPendingDisconnect(true)}>Disconnect</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     );

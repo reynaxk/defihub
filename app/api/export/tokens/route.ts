@@ -5,7 +5,7 @@ import { toCsv, csvResponse } from "@/lib/utils/csv";
 const VALID_SORTS: TokenSort[] = ["marketCap", "price", "volume24h", "priceChange24h"];
 
 export async function GET(request: Request) {
-  const limited = checkPublicApiRateLimit(request);
+  const limited = await checkPublicApiRateLimit(request);
   if (limited) return limited;
 
   const { searchParams } = new URL(request.url);

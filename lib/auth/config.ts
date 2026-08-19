@@ -48,8 +48,10 @@ const providers: Provider[] = [
       const { email, password } = parsed.data;
 
       const ip = getClientIp(request);
-      const ipLimit = checkRateLimit(`login-ip:${ip}`, LOGIN_IP_LIMIT);
-      const emailLimit = checkRateLimit(`login-email:${email}`, LOGIN_EMAIL_LIMIT);
+      const [ipLimit, emailLimit] = await Promise.all([
+        checkRateLimit(`login-ip:${ip}`, LOGIN_IP_LIMIT),
+        checkRateLimit(`login-email:${email}`, LOGIN_EMAIL_LIMIT),
+      ]);
       if (!ipLimit.allowed || !emailLimit.allowed) throw new RateLimitedSignin();
 
       const [user] = await db.select().from(users).where(eq(users.email, email));

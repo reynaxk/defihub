@@ -126,7 +126,7 @@ export async function GET(request: Request) {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const limited = checkRateLimit(`wallet-balances:${session.user.id}`, BALANCE_CHECK_LIMIT);
+  const limited = await checkRateLimit(`wallet-balances:${session.user.id}`, BALANCE_CHECK_LIMIT);
   if (!limited.allowed) {
     return NextResponse.json(
       { error: "Rate limit exceeded. Try again shortly." },

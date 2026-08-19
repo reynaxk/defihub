@@ -383,6 +383,26 @@ export const alerts = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Rate limiting
+//
+// Postgres-backed, not in-memory: this app deploys as Vercel serverless
+// functions (vercel.json's `crons` array only has meaning there), which
+// routes concurrent requests across multiple isolated instances and cold-
+// starts routinely - an in-memory Map's state isn't shared across any of
+// that, so it couldn't actually enforce a limit under real traffic (every
+// instance sees its own request as the first one). The database is the one
+// piece of shared state every instance already has a connection to, so it's
+// the natural place for this without introducing new infrastructure
+// (Redis/Upstash) just for rate limiting. See lib/security/rate-limit.ts.
+// ---------------------------------------------------------------------------
+
+export const rateLimitBuckets = pgTable("rate_limit_buckets", {
+  key: text("key").primaryKey(),
+  count: integer("count").notNull(),
+  windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+});
+
+// ---------------------------------------------------------------------------
 // Relations (enables db.query.* relational API)
 // ---------------------------------------------------------------------------
 

@@ -18,7 +18,7 @@ const REGISTER_LIMIT = { limit: 5, windowMs: 60 * 60 * 1000 };
 
 export async function POST(request: Request) {
   const ip = getClientIp(request);
-  const rateLimit = checkRateLimit(`register:${ip}`, REGISTER_LIMIT);
+  const rateLimit = await checkRateLimit(`register:${ip}`, REGISTER_LIMIT);
   if (!rateLimit.allowed) {
     return NextResponse.json(
       { error: "Too many accounts created from this address. Try again later." },

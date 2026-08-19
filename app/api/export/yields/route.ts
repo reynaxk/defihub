@@ -6,7 +6,7 @@ import { parseOptionalNumber } from "@/lib/utils/query-params";
 type YieldPool = Awaited<ReturnType<typeof getYieldPools>>[number];
 
 export async function GET(request: Request) {
-  const limited = checkPublicApiRateLimit(request);
+  const limited = await checkPublicApiRateLimit(request);
   if (limited) return limited;
 
   const { searchParams } = new URL(request.url);

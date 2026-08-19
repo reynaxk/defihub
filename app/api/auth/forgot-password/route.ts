@@ -29,8 +29,10 @@ export async function POST(request: Request) {
   }
   const { email } = parsed.data;
 
-  const ipLimit = checkRateLimit(`forgot-password-ip:${ip}`, IP_LIMIT);
-  const emailLimit = checkRateLimit(`forgot-password-email:${email}`, EMAIL_LIMIT);
+  const [ipLimit, emailLimit] = await Promise.all([
+    checkRateLimit(`forgot-password-ip:${ip}`, IP_LIMIT),
+    checkRateLimit(`forgot-password-email:${email}`, EMAIL_LIMIT),
+  ]);
   if (!ipLimit.allowed || !emailLimit.allowed) {
     // Same response even when rate-limited - a 429 here would itself leak
     // "this email gets rate-limited, so it must exist" over enough requests.

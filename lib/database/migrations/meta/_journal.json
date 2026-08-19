@@ -92,6 +92,13 @@
       "when": 1787090778533,
       "tag": "0012_onchain_verifications_chain_id_not_null",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1787099264570,
+      "tag": "0013_alerts_is_firing",
+      "breakpoints": true
     }
   ]
 }

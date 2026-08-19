@@ -210,7 +210,14 @@ export async function checkAlerts() {
       reading.previous,
     );
 
-    if (fires) {
+    // Only email on a false->true transition, not every 10-minute tick the
+    // condition still holds - an "above $X" alert typically stays above $X
+    // for hours/days once crossed, so without this check every enabled
+    // alert would re-send an email every single run for as long as its
+    // condition remains true. isFiring tracks the condition's state as of
+    // the last check (updated below regardless of outcome) independently of
+    // lastTriggeredAt, which stays "the last time we actually emailed".
+    if (fires && !alert.isFiring) {
       await sendEmail({
         to: userEmail,
         subject: `DeFiHub alert: ${reading.displayName}`,
@@ -224,6 +231,10 @@ export async function checkAlerts() {
       });
       await db.update(alerts).set({ lastTriggeredAt: new Date() }).where(eq(alerts.id, alert.id));
       triggered++;
+    }
+
+    if (fires !== alert.isFiring) {
+      await db.update(alerts).set({ isFiring: fires }).where(eq(alerts.id, alert.id));
     }
   }
 

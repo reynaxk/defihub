@@ -352,6 +352,12 @@ export const alerts = pgTable(
     condition: alertConditionEnum("condition").notNull(),
     threshold: numeric("threshold", { precision: 24, scale: 8 }).notNull(),
     enabled: boolean("enabled").default(true).notNull(),
+    // Whether the condition evaluated true as of the most recent check -
+    // updated every run regardless of outcome, distinct from
+    // lastTriggeredAt (only updated when we actually emailed). Lets the
+    // worker email only on a false->true transition instead of every 10
+    // minutes the condition happens to still hold (see workers/alerts/check.ts).
+    isFiring: boolean("is_firing").default(false).notNull(),
     lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
     lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

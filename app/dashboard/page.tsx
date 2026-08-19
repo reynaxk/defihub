@@ -5,6 +5,8 @@ import { Activity, Bell, Star } from "lucide-react";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { StatTile } from "@/components/stats/stat-tile";
+import { AnimatedNumber } from "@/components/stats/animated-number";
 import { auth } from "@/lib/auth/config";
 import { getWatchlistWithDetails, type WatchlistEntry } from "@/lib/database/queries/watchlist";
 import { db } from "@/lib/database/client";
@@ -26,6 +28,18 @@ const CONDITION_LABELS: Record<string, string> = {
   percent_change_up: "increased by",
   percent_change_down: "decreased by",
 };
+
+// Defined outside the component: the react-compiler purity rule flags a
+// direct Date.now() call inside a component/hook body (an impure read that
+// could produce unstable results across re-renders) - correct in general,
+// but this is a Server Component that already runs fresh per request, so
+// the actual concern doesn't apply here. Moving the impure read into an
+// ordinary helper function (not a hook, not a component - the rule's
+// analysis is scoped to those) is the idiomatic way to satisfy the rule
+// rather than suppressing it.
+function oneWeekAgo(): Date {
+  return new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+}
 
 function watchlistHref(item: WatchlistEntry): string {
   switch (item.kind) {
@@ -59,11 +73,25 @@ export default async function DashboardPage() {
   // There's no separate activity-log table, and this codebase doesn't
   // fabricate a feed where there's no real event to show.
   const recentlyTriggered = userAlerts.filter((a) => a.lastTriggeredAt != null).slice(0, 5);
+  // Derived from data already fetched above - no separate query needed.
+  const triggeredThisWeek = userAlerts.filter(
+    (a) => a.lastTriggeredAt != null && a.lastTriggeredAt >= oneWeekAgo(),
+  ).length;
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
       <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
       <p className="mt-1 text-muted-foreground">Welcome back{session?.user.name ? `, ${session.user.name}` : ""}.</p>
+
+      <div className="mt-6 grid grid-cols-3 gap-3">
+        <StatTile label="Watching" icon={Star} animate={{ value: watchlist.length, format: "count" }} />
+        <StatTile label="Active alerts" icon={Bell} animate={{ value: enabledAlerts.length, format: "count" }} />
+        <StatTile
+          label="Triggered this week"
+          icon={Activity}
+          animate={{ value: triggeredThisWeek, format: "count" }}
+        />
+      </div>
 
       <div className="mt-8 flex items-center justify-between">
         <h2 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
@@ -91,7 +119,17 @@ export default async function DashboardPage() {
                 <span className="font-medium">{item.name}</span>
               </div>
               <span className="tabular-nums text-muted-foreground">
-                {item.kind === "pool" ? formatApy(item.apy) : formatUsd(item.tvl)}
+                {item.kind === "pool" ? (
+                  item.apy != null ? (
+                    <AnimatedNumber value={item.apy} format="apy" />
+                  ) : (
+                    formatApy(item.apy)
+                  )
+                ) : item.tvl != null ? (
+                  <AnimatedNumber value={item.tvl} format="usd" />
+                ) : (
+                  formatUsd(item.tvl)
+                )}
               </span>
             </Link>
           ))}

@@ -1,14 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { formatPercent, formatTokenPrice, formatUsd } from "@/lib/format";
+import { formatApy, formatPercent, formatTokenPrice, formatUsd } from "@/lib/format";
 
-export type AnimatedNumberFormat = "usd" | "tokenPrice" | "percent" | "count";
+export type AnimatedNumberFormat = "usd" | "tokenPrice" | "percent" | "apy" | "count";
 
 const FORMATTERS: Record<AnimatedNumberFormat, (n: number) => string> = {
   usd: (n) => formatUsd(n),
   tokenPrice: (n) => formatTokenPrice(n),
   percent: (n) => formatPercent(n, { signed: true }),
+  apy: (n) => formatApy(n),
   count: (n) => Math.round(n).toLocaleString("en-US"),
 };
 

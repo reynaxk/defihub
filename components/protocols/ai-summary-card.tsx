@@ -1,9 +1,55 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { Sparkles } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
+import { Lightbulb, ShieldAlert, Sparkles, TrendingUp } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+
+interface ProtocolSummarySections {
+  overview: string;
+  insights: string[];
+  risks: string[];
+  opportunities: string[];
+}
+
+interface Summary {
+  sections: ProtocolSummarySections;
+  model: string;
+  createdAt: string;
+}
+
+function SectionList({
+  icon: Icon,
+  label,
+  items,
+  className,
+}: {
+  icon: typeof Lightbulb;
+  label: string;
+  items: string[];
+  className?: string;
+}) {
+  if (items.length === 0) return null;
+
+  return (
+    <div className="mt-4">
+      <h3 className={`flex items-center gap-1.5 text-xs font-medium tracking-wide uppercase ${className ?? "text-muted-foreground"}`}>
+        <Icon className="size-3.5" />
+        {label}
+      </h3>
+      <ul className="mt-2 flex flex-col gap-1.5">
+        {items.map((item, i) => (
+          <li key={i} className="flex gap-2 text-sm text-foreground">
+            <span className="text-muted-foreground">–</span>
+            <span>{item}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 export function AiSummaryCard({
   slug,
@@ -14,7 +60,7 @@ export function AiSummaryCard({
   slug: string;
   isSignedIn: boolean;
   aiAvailable: boolean;
-  initialSummary: { content: string; model: string; createdAt: string } | null;
+  initialSummary: Summary | null;
 }) {
   const [summary, setSummary] = useState(initialSummary);
   const [isPending, startTransition] = useTransition();
@@ -37,7 +83,7 @@ export function AiSummaryCard({
   }
 
   return (
-    <div className="mt-6 rounded-lg border border-border bg-card p-4">
+    <Card className="mt-6 p-4">
       <div className="flex items-center justify-between gap-3">
         <h2 className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
           <Sparkles className="size-4" />
@@ -51,7 +97,25 @@ export function AiSummaryCard({
       </div>
 
       {summary ? (
-        <p className="mt-3 text-sm text-foreground">{summary.content}</p>
+        <>
+          <p className="mt-3 text-sm text-foreground">{summary.sections.overview}</p>
+          <SectionList icon={Lightbulb} label="Insights" items={summary.sections.insights} />
+          <SectionList
+            icon={ShieldAlert}
+            label="Risks"
+            items={summary.sections.risks}
+            className="text-destructive"
+          />
+          <SectionList
+            icon={TrendingUp}
+            label="Opportunities"
+            items={summary.sections.opportunities}
+            className="text-[var(--success-text)]"
+          />
+          <p className="mt-4 text-xs text-muted-foreground">
+            Generated {formatDistanceToNow(new Date(summary.createdAt), { addSuffix: true })} · {summary.model}
+          </p>
+        </>
       ) : (
         <p className="mt-3 text-sm text-muted-foreground">
           {aiAvailable
@@ -61,6 +125,6 @@ export function AiSummaryCard({
             : "AI summary unavailable."}
         </p>
       )}
-    </div>
+    </Card>
   );
 }

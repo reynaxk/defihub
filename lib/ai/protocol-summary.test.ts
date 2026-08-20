@@ -13,7 +13,7 @@ import { closeDb, db } from "@/lib/database/client";
 import { protocolAiSummaries, protocols } from "@/lib/database/schema";
 import { getCachedProtocolSummary } from "./protocol-summary";
 
-async function seedSummary(tvlAtGeneration: number | null) {
+async function seedRawSummary(content: string, tvlAtGeneration: number | null) {
   const [protocol] = await db
     .insert(protocols)
     .values({ name: `Test Protocol ${randomUUID()}`, slug: `test-protocol-${randomUUID()}` })
@@ -21,12 +21,19 @@ async function seedSummary(tvlAtGeneration: number | null) {
 
   await db.insert(protocolAiSummaries).values({
     protocolId: protocol.id,
-    content: "A test summary.",
+    content,
     model: "test-model",
     tvlAtGeneration: tvlAtGeneration != null ? tvlAtGeneration.toFixed(2) : null,
   });
 
   return protocol.id;
+}
+
+function seedSummary(tvlAtGeneration: number | null) {
+  return seedRawSummary(
+    JSON.stringify({ overview: "A test summary.", insights: [], risks: [], opportunities: [] }),
+    tvlAtGeneration,
+  );
 }
 
 describe("getCachedProtocolSummary", () => {
@@ -55,7 +62,7 @@ describe("getCachedProtocolSummary", () => {
 
     const result = await getCachedProtocolSummary(id, 1_000_000);
     expect(result).not.toBeNull();
-    expect(result?.content).toBe("A test summary.");
+    expect(result?.sections.overview).toBe("A test summary.");
   });
 
   it("stays fresh when the TVL baseline was zero and current TVL is still zero", async () => {
@@ -103,5 +110,29 @@ describe("getCachedProtocolSummary", () => {
 
     const result = await getCachedProtocolSummary(id, null);
     expect(result).not.toBeNull();
+  });
+
+  it("treats legacy plain-text content (pre structured-output) as a cache miss instead of crashing", async () => {
+    // Regression test: rows written before the Phase 7 structured-output
+    // migration store plain prose in `content`, not JSON. JSON.parse on
+    // that string throws - this must be caught and treated as "nothing
+    // usable cached" (triggering regeneration), never propagate and take
+    // down the protocol page.
+    const id = await seedRawSummary(
+      "Aave is a decentralized lending protocol with roughly $10B in TVL.",
+      1_000_000,
+    );
+    createdProtocolIds.push(id);
+
+    const result = await getCachedProtocolSummary(id, 1_000_000);
+    expect(result).toBeNull();
+  });
+
+  it("treats valid JSON that doesn't match the summary schema as a cache miss instead of crashing", async () => {
+    const id = await seedRawSummary(JSON.stringify({ unexpected: "shape" }), 1_000_000);
+    createdProtocolIds.push(id);
+
+    const result = await getCachedProtocolSummary(id, 1_000_000);
+    expect(result).toBeNull();
   });
 });

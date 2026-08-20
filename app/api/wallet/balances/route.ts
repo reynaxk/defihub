@@ -2,28 +2,15 @@ import { NextResponse } from "next/server";
 import { createPublicClient, erc20Abi, formatUnits, http, isAddress, type Address } from "viem";
 import { auth } from "@/lib/auth/config";
 import { checkRateLimit } from "@/lib/security/rate-limit";
-import { getTokensForBalanceCheck } from "@/lib/database/queries/tokens";
+import { getNativeTokenPrice, getTokensForBalanceCheck } from "@/lib/database/queries/tokens";
 import { EVM_CHAINS, VIEM_CHAIN_BY_SLUG, rpcUrlFor } from "@/lib/chains/rpc-client";
+import { aggregateUsdValues, computeValueUsd } from "@/lib/wallet/valuation";
+import type { ChainBalanceResult, ChainResult, TokenBalance, WalletBalancesResponse } from "@/lib/wallet/types";
 
 // Each request fans out to 7 chains' RPC endpoints (1 native balance + 1
 // multicall each) - modest per-user cap since this is real external RPC
 // load, not a free local computation.
 const BALANCE_CHECK_LIMIT = { limit: 20, windowMs: 60 * 1000 };
-
-interface TokenBalance {
-  symbol: string;
-  address: string;
-  logoUrl: string | null;
-  balance: string;
-}
-
-interface ChainBalanceResult {
-  chainSlug: string;
-  chainName: string;
-  nativeToken: string;
-  nativeBalance: string;
-  tokenBalances: TokenBalance[];
-}
 
 async function readChainBalances(
   chain: (typeof EVM_CHAINS)[number],
@@ -59,7 +46,7 @@ async function readChainBalances(
   // and it's already calling multicall on these exact contracts, so reading
   // the real value straight from each token contract is both more correct
   // and doesn't need to wait on that sync fix.
-  const [nativeBalance, multicallResults] = await Promise.all([
+  const [nativeBalance, multicallResults, nativePriceUsd] = await Promise.all([
     client.getBalance({ address }),
     trackedTokens.length === 0
       ? []
@@ -78,6 +65,7 @@ async function readChainBalances(
             })),
           ],
         }),
+    getNativeTokenPrice(chain.slug),
   ]);
 
   const tokenBalances: TokenBalance[] = trackedTokens
@@ -98,28 +86,40 @@ async function readChainBalances(
         decimalsResult && decimalsResult.status === "success"
           ? (decimalsResult.result as number)
           : token.decimals;
+      const balanceStr = formatUnits(balance, decimals);
       return {
         symbol: token.symbol,
         address: token.address,
         logoUrl: token.logoUrl,
-        balance: formatUnits(balance, decimals),
+        balance: balanceStr,
+        priceUsd: token.priceUsd,
+        valueUsd: computeValueUsd(balanceStr, token.priceUsd),
       };
     })
     .filter((t): t is TokenBalance => t !== null);
+
+  const nativeBalanceStr = formatUnits(nativeBalance, 18);
+  const nativeValueUsd = computeValueUsd(nativeBalanceStr, nativePriceUsd);
+  // A zero native balance has no "hidden" value to miss regardless of price
+  // coverage, so it's excluded from the isPartial check the same way
+  // zero-balance tokens already are (filtered out above before this point).
+  const hasNativeBalance = Number(nativeBalanceStr) > 0;
+  const { total: chainTotalUsd, isPartial } = aggregateUsdValues([
+    ...(hasNativeBalance ? [nativeValueUsd] : []),
+    ...tokenBalances.map((t) => t.valueUsd),
+  ]);
 
   return {
     chainSlug: chain.slug,
     chainName: chain.name,
     nativeToken: chain.nativeToken,
-    nativeBalance: formatUnits(nativeBalance, 18),
+    nativeBalance: nativeBalanceStr,
+    nativePriceUsd,
+    nativeValueUsd,
     tokenBalances,
+    chainTotalUsd,
+    isPartial,
   };
-}
-
-interface ChainBalanceError {
-  chainSlug: string;
-  chainName: string;
-  error: string;
 }
 
 export async function GET(request: Request) {
@@ -151,11 +151,22 @@ export async function GET(request: Request) {
   // previously hid a real config bug (missing multicall3 contract address)
   // behind "couldn't reach this chain" for every chain, making it far
   // harder to diagnose than it needed to be.
-  const chains: (ChainBalanceResult | ChainBalanceError)[] = settled.map((result, i) => {
+  const chains: ChainResult[] = settled.map((result, i) => {
     if (result.status === "fulfilled") return result.value;
     console.error(`[wallet-balances] ${EVM_CHAINS[i].slug} failed:`, result.reason);
     return { chainSlug: EVM_CHAINS[i].slug, chainName: EVM_CHAINS[i].name, error: "Couldn't reach this chain" };
   });
 
-  return NextResponse.json({ address, chains });
+  const okChains = chains.filter((c): c is ChainBalanceResult => !("error" in c));
+  const { total: totalUsd, isPartial: anyChainFullyUnpriced } = aggregateUsdValues(
+    okChains.map((c) => c.chainTotalUsd),
+  );
+  // Partial at the top level if either some chain has zero price coverage
+  // (caught above) or a chain has a real total but is itself only
+  // partially priced internally - a non-null chainTotalUsd doesn't reveal
+  // that on its own.
+  const isPartial = anyChainFullyUnpriced || okChains.some((c) => c.isPartial);
+
+  const response: WalletBalancesResponse = { address, chains, totalUsd, isPartial };
+  return NextResponse.json(response);
 }

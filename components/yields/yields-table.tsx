@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { DataTable, type DataTableColumn } from "@/components/shared/data-table";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchIconButton } from "@/components/shared/watch-icon-button";
 import { cn } from "@/lib/utils";
@@ -56,87 +56,107 @@ export function YieldsTable({
   isSignedIn?: boolean;
   watchedPoolIds?: Set<string>;
 }) {
+  const columns: DataTableColumn<YieldPool>[] = [
+    {
+      key: "pool",
+      header: "Pool",
+      cellClassName: "font-medium",
+      render: (pool) => (
+        <div className="flex items-center gap-2">
+          {pool.symbol}
+          {pool.stablecoin && <Badge variant="secondary">Stable</Badge>}
+        </div>
+      ),
+    },
+    {
+      key: "protocol",
+      header: "Protocol",
+      headClassName: "hidden sm:table-cell",
+      cellClassName: "hidden text-muted-foreground sm:table-cell",
+      render: (pool) =>
+        pool.protocolSlug ? (
+          <Link href={`/protocol/${pool.protocolSlug}`} className="flex items-center gap-2 hover:text-foreground">
+            <EntityLogo src={pool.protocolLogoUrl} name={pool.protocolName ?? pool.symbol} size={18} />
+            {pool.protocolName}
+          </Link>
+        ) : (
+          "—"
+        ),
+    },
+    {
+      key: "chain",
+      header: "Chain",
+      headClassName: "hidden md:table-cell",
+      cellClassName: "hidden md:table-cell",
+      render: (pool) => (
+        <Link href={`/chain/${pool.chainSlug}`} className="flex items-center gap-2 hover:text-foreground">
+          <EntityLogo src={pool.chainLogoUrl} name={pool.chainName} size={18} />
+          {pool.chainName}
+        </Link>
+      ),
+    },
+    {
+      key: "tvl",
+      header: "TVL",
+      headClassName: "text-right",
+      cellClassName: "text-right tabular-nums",
+      render: (pool) => formatUsd(pool.tvlUsd),
+    },
+    {
+      key: "apyBase",
+      header: "Base APY",
+      headClassName: "hidden text-right lg:table-cell",
+      cellClassName: "hidden text-right tabular-nums text-muted-foreground lg:table-cell",
+      render: (pool) => formatApy(pool.apyBase),
+    },
+    {
+      key: "apyReward",
+      header: "Reward APY",
+      headClassName: "hidden text-right lg:table-cell",
+      cellClassName: "hidden text-right tabular-nums text-muted-foreground lg:table-cell",
+      render: (pool) => formatApy(pool.apyReward),
+    },
+    {
+      key: "apy",
+      header: "APY",
+      headClassName: "text-right",
+      cellClassName: "text-right tabular-nums",
+      render: (pool) => <ApyCell apy={pool.apy} />,
+    },
+    {
+      key: "risk",
+      header: "Risk",
+      headClassName: "hidden text-center xl:table-cell",
+      cellClassName: "hidden text-center xl:table-cell",
+      render: (pool) =>
+        pool.ilRisk == null ? (
+          <span className="text-muted-foreground">—</span>
+        ) : (
+          <Badge variant={pool.ilRisk === "yes" ? "destructive" : "outline"}>
+            {pool.ilRisk === "yes" ? "IL risk" : "Low IL"}
+          </Badge>
+        ),
+    },
+  ];
+
   return (
-    <div className="overflow-x-auto rounded-lg border border-border">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            {watchedPoolIds && <TableHead className="w-8" />}
-            <TableHead>Pool</TableHead>
-            <TableHead className="hidden sm:table-cell">Protocol</TableHead>
-            <TableHead className="hidden md:table-cell">Chain</TableHead>
-            <TableHead className="text-right">TVL</TableHead>
-            <TableHead className="hidden text-right lg:table-cell">Base APY</TableHead>
-            <TableHead className="hidden text-right lg:table-cell">Reward APY</TableHead>
-            <TableHead className="text-right">APY</TableHead>
-            <TableHead className="hidden text-center xl:table-cell">Risk</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {pools.map((pool) => (
-            <TableRow key={pool.id}>
-              {watchedPoolIds && (
-                <TableCell>
-                  <WatchIconButton
-                    target={{ yieldPoolId: pool.id }}
-                    isSignedIn={isSignedIn}
-                    initialWatching={watchedPoolIds.has(pool.id)}
-                    label={`the ${pool.symbol} pool`}
-                  />
-                </TableCell>
-              )}
-              <TableCell className="font-medium">
-                <div className="flex items-center gap-2">
-                  {pool.symbol}
-                  {pool.stablecoin && <Badge variant="secondary">Stable</Badge>}
-                </div>
-              </TableCell>
-              <TableCell className="hidden text-muted-foreground sm:table-cell">
-                {pool.protocolSlug ? (
-                  <Link href={`/protocol/${pool.protocolSlug}`} className="flex items-center gap-2 hover:text-foreground">
-                    <EntityLogo src={pool.protocolLogoUrl} name={pool.protocolName ?? pool.symbol} size={18} />
-                    {pool.protocolName}
-                  </Link>
-                ) : (
-                  "—"
-                )}
-              </TableCell>
-              <TableCell className="hidden md:table-cell">
-                <Link href={`/chain/${pool.chainSlug}`} className="flex items-center gap-2 hover:text-foreground">
-                  <EntityLogo src={pool.chainLogoUrl} name={pool.chainName} size={18} />
-                  {pool.chainName}
-                </Link>
-              </TableCell>
-              <TableCell className="text-right tabular-nums">{formatUsd(pool.tvlUsd)}</TableCell>
-              <TableCell className="hidden text-right tabular-nums text-muted-foreground lg:table-cell">
-                {formatApy(pool.apyBase)}
-              </TableCell>
-              <TableCell className="hidden text-right tabular-nums text-muted-foreground lg:table-cell">
-                {formatApy(pool.apyReward)}
-              </TableCell>
-              <TableCell className="text-right tabular-nums">
-                <ApyCell apy={pool.apy} />
-              </TableCell>
-              <TableCell className="hidden text-center xl:table-cell">
-                {pool.ilRisk == null ? (
-                  <span className="text-muted-foreground">—</span>
-                ) : (
-                  <Badge variant={pool.ilRisk === "yes" ? "destructive" : "outline"}>
-                    {pool.ilRisk === "yes" ? "IL risk" : "Low IL"}
-                  </Badge>
-                )}
-              </TableCell>
-            </TableRow>
-          ))}
-          {pools.length === 0 && (
-            <TableRow>
-              <TableCell colSpan={watchedPoolIds ? 9 : 8} className="py-10 text-center text-muted-foreground">
-                No pools match these filters.
-              </TableCell>
-            </TableRow>
-          )}
-        </TableBody>
-      </Table>
-    </div>
+    <DataTable
+      columns={columns}
+      rows={pools}
+      rowKey={(pool) => pool.id}
+      emptyMessage="No pools match these filters."
+      watchColumn={
+        watchedPoolIds
+          ? (pool) => (
+              <WatchIconButton
+                target={{ yieldPoolId: pool.id }}
+                isSignedIn={isSignedIn}
+                initialWatching={watchedPoolIds.has(pool.id)}
+                label={`the ${pool.symbol} pool`}
+              />
+            )
+          : undefined
+      }
+    />
   );
 }

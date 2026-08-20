@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, Coins, DollarSign, Layers, Sprout, Wallet } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { StatTile } from "@/components/stats/stat-tile";
 import { PercentChange } from "@/components/shared/percent-change";
 import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
@@ -122,13 +123,13 @@ export default async function HomePage() {
 
       <section className="py-8">
         <h2 className="mb-4 text-xl font-semibold tracking-tight">Total DeFi TVL</h2>
-        <div className="rounded-lg border border-border bg-card p-4">
+        <Card className="p-4">
           <RangedAreaChart
             data={globalHistory.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))}
             height={320}
             defaultRange="90d"
           />
-        </div>
+        </Card>
       </section>
 
       <section className="py-8">

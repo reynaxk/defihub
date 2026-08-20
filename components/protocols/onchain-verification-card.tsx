@@ -1,5 +1,6 @@
 import { ShieldCheck } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
+import { Card } from "@/components/ui/card";
 import { formatUsd } from "@/lib/format";
 
 interface Verification {
@@ -21,7 +22,7 @@ export function OnchainVerificationCard({ verifications }: { verifications: Veri
   const chainLabel = chainNames.length === 1 ? chainNames[0] : "multiple chains";
 
   return (
-    <div className="mt-6 rounded-lg border border-border bg-card p-4">
+    <Card className="mt-6 p-4">
       <h2 className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
         <ShieldCheck className="size-4" />
         Verified on-chain
@@ -57,6 +58,6 @@ export function OnchainVerificationCard({ verifications }: { verifications: Veri
           </div>
         ))}
       </div>
-    </div>
+    </Card>
   );
 }

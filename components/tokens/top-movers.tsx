@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { EntityLogo } from "@/components/shared/entity-logo";
+import { Card } from "@/components/ui/card";
 import { Sparkline } from "@/components/tokens/sparkline";
 import { formatPercent, formatTokenPrice } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -12,7 +13,7 @@ function MoverRow({ mover }: { mover: TokenMover }) {
   return (
     <Link
       href={`/token/${mover.address}?chain=${mover.chainSlug}`}
-      className="flex items-center justify-between gap-3 rounded-md px-2 py-2 hover:bg-muted"
+      className="flex items-center justify-between gap-3 rounded-md px-2 py-2 transition-colors duration-150 hover:bg-muted"
     >
       <div className="flex items-center gap-2 overflow-hidden">
         <EntityLogo src={mover.logoUrl} name={mover.symbol} size={22} />
@@ -80,7 +81,7 @@ export function TopMovers({
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <div className="rounded-lg border border-border bg-card p-4">
+        <Card className="p-4">
           <h3 className="mb-1 text-sm font-medium text-muted-foreground">Top gainers ({window})</h3>
           <div className="flex flex-col">
             {active.gainers.length === 0 ? (
@@ -89,8 +90,8 @@ export function TopMovers({
               active.gainers.map((m) => <MoverRow key={`${m.chainSlug}-${m.address}`} mover={m} />)
             )}
           </div>
-        </div>
-        <div className="rounded-lg border border-border bg-card p-4">
+        </Card>
+        <Card className="p-4">
           <h3 className="mb-1 text-sm font-medium text-muted-foreground">Top losers ({window})</h3>
           <div className="flex flex-col">
             {active.losers.length === 0 ? (
@@ -99,7 +100,7 @@ export function TopMovers({
               active.losers.map((m) => <MoverRow key={`${m.chainSlug}-${m.address}`} mover={m} />)
             )}
           </div>
-        </div>
+        </Card>
       </div>
     </div>
   );

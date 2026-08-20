@@ -8,6 +8,9 @@ import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
 import { ProtocolsTable } from "@/components/protocols/protocols-table";
 import { TokensTable } from "@/components/tokens/tokens-table";
 import { PercentChange } from "@/components/shared/percent-change";
+import { SectionNav } from "@/components/shared/section-nav";
+import { DistributionBarList } from "@/components/shared/distribution-bar-list";
+import { Card } from "@/components/ui/card";
 import { getChainBySlug } from "@/lib/database/queries/chains";
 import { getTokensList } from "@/lib/database/queries/tokens";
 import {
@@ -16,7 +19,7 @@ import {
   isWatchingChain,
 } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
-import { formatPercent, formatUsd } from "@/lib/format";
+import { formatUsd } from "@/lib/format";
 
 const TOP_TOKENS_LIMIT = 8;
 
@@ -63,7 +66,6 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
   const categoryBreakdown = [...categoryTotals.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, 8);
-  const categoryTotal = categoryBreakdown.reduce((sum, [, tvl]) => sum + tvl, 0);
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -76,7 +78,11 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <WatchlistButton isSignedIn={Boolean(session?.user)} initialWatching={watching} chainId={chain.id} />
+          <WatchlistButton
+            isSignedIn={Boolean(session?.user)}
+            initialWatching={watching}
+            target={{ chainId: chain.id }}
+          />
           {chain.explorerUrl && (
             <Link
               href={chain.explorerUrl}
@@ -89,6 +95,15 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
           )}
         </div>
       </div>
+
+      <SectionNav
+        sections={[
+          { id: "tvl", label: "TVL" },
+          ...(categoryBreakdown.length > 0 ? [{ id: "category-breakdown", label: "Categories" }] : []),
+          { id: "top-protocols", label: "Protocols" },
+          ...(chainTokens.length > 0 ? [{ id: "tokens", label: "Tokens" }] : []),
+        ]}
+      />
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <StatTile
@@ -108,37 +123,24 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
         <StatTile label="Chain ID" value={chain.chainId != null ? String(chain.chainId) : "—"} />
       </div>
 
-      <div className="mt-8 rounded-lg border border-border bg-card p-4">
+      <Card id="tvl" className="mt-8 scroll-mt-28 p-4">
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
         <RangedAreaChart data={history.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))} />
-      </div>
+      </Card>
 
       {categoryBreakdown.length > 0 && (
-        <div className="mt-8">
+        <div id="category-breakdown" className="mt-8 scroll-mt-28">
           <h2 className="mb-4 text-xl font-semibold tracking-tight">TVL by category</h2>
-          <div className="rounded-lg border border-border bg-card p-4">
-            <div className="flex flex-col gap-3">
-              {categoryBreakdown.map(([category, tvl]) => {
-                const share = categoryTotal > 0 ? (tvl / categoryTotal) * 100 : 0;
-                return (
-                  <div key={category} className="flex items-center gap-3">
-                    <span className="w-32 shrink-0 truncate text-sm font-medium">{category}</span>
-                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full rounded-full bg-primary" style={{ width: `${Math.min(100, share)}%` }} />
-                    </div>
-                    <span className="w-16 shrink-0 text-right text-sm tabular-nums text-muted-foreground">
-                      {formatPercent(share)}
-                    </span>
-                    <span className="w-24 shrink-0 text-right text-sm font-medium tabular-nums">{formatUsd(tvl)}</span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+          <Card className="p-4">
+            <DistributionBarList
+              items={categoryBreakdown.map(([category, tvl]) => ({ key: category, label: category, value: tvl }))}
+              emptyMessage="No category breakdown available yet."
+            />
+          </Card>
         </div>
       )}
 
-      <div className="mt-8">
+      <div id="top-protocols" className="mt-8 scroll-mt-28">
         <h2 className="mb-4 text-xl font-semibold tracking-tight">Top protocols on {chain.name}</h2>
         <ProtocolsTable
           protocols={topProtocols}
@@ -148,7 +150,7 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
       </div>
 
       {chainTokens.length > 0 && (
-        <div className="mt-8">
+        <div id="tokens" className="mt-8 scroll-mt-28">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-xl font-semibold tracking-tight">Tokens on {chain.name}</h2>
             <Link href={`/tokens?chain=${chain.slug}`} className="text-sm text-primary hover:underline">

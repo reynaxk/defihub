@@ -112,7 +112,7 @@ export default async function DashboardPage() {
             <Link
               key={item.id}
               href={watchlistHref(item)}
-              className="flex items-center justify-between rounded-xl bg-card p-3 text-card-foreground ring-1 ring-foreground/10 transition-all duration-200 hover:-translate-y-0.5 hover:ring-primary/30 hover:shadow-md"
+              className="flex items-center justify-between rounded-xl bg-card p-3 text-card-foreground ring-1 ring-foreground/10 transition-all duration-200 hover:ring-primary/30 hover:shadow-md motion-safe:hover:-translate-y-0.5"
             >
               <div className="flex items-center gap-2">
                 <EntityLogo src={item.logoUrl} name={item.name} size={28} />

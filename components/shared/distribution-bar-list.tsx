@@ -45,24 +45,24 @@ export function DistributionBarList({
           </>
         );
         return (
-          <div key={item.key} className="flex items-center gap-3">
+          <div key={item.key} className="flex items-center gap-2 sm:gap-3">
             {item.href ? (
               <Link
                 href={item.href}
-                className="flex w-36 shrink-0 items-center gap-2 font-medium hover:text-primary"
+                className="flex w-20 shrink-0 items-center gap-1.5 font-medium hover:text-primary sm:w-36 sm:gap-2"
               >
                 {label}
               </Link>
             ) : (
-              <span className="flex w-36 shrink-0 items-center gap-2 font-medium">{label}</span>
+              <span className="flex w-20 shrink-0 items-center gap-1.5 font-medium sm:w-36 sm:gap-2">{label}</span>
             )}
-            <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+            <div className="h-2 min-w-4 flex-1 overflow-hidden rounded-full bg-muted">
               <div className="h-full rounded-full bg-primary" style={{ width: `${Math.min(100, share)}%` }} />
             </div>
-            <span className="w-16 shrink-0 text-right text-sm tabular-nums text-muted-foreground">
+            <span className="w-10 shrink-0 text-right text-xs tabular-nums text-muted-foreground sm:w-16 sm:text-sm">
               {formatPercent(share)}
             </span>
-            <span className="w-24 shrink-0 text-right text-sm font-medium tabular-nums">
+            <span className="w-16 shrink-0 text-right text-xs font-medium tabular-nums sm:w-24 sm:text-sm">
               {valueFormatter(item.value)}
             </span>
           </div>

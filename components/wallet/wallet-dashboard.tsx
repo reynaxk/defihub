@@ -27,6 +27,7 @@ interface ChainBalanceResult {
   nativeValueUsd: number | null;
   tokenBalances: TokenBalance[];
   chainTotalUsd: number | null;
+  isPartial: boolean;
 }
 
 interface ChainBalanceError {
@@ -43,7 +44,7 @@ function isError(chain: ChainResult): chain is ChainBalanceError {
 
 async function fetchBalances(
   address: string,
-): Promise<{ address: string; chains: ChainResult[]; totalUsd: number | null }> {
+): Promise<{ address: string; chains: ChainResult[]; totalUsd: number | null; isPartial: boolean }> {
   const res = await fetch(`/api/wallet/balances?address=${address}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -71,6 +72,7 @@ function ChainCard({ chain }: { chain: ChainResult }) {
         {chain.chainTotalUsd != null && (
           <p className="tabular-nums text-sm font-medium text-muted-foreground">
             {formatUsd(chain.chainTotalUsd)}
+            {chain.isPartial && <span className="ml-1 font-normal">(partial)</span>}
           </p>
         )}
       </div>
@@ -157,11 +159,15 @@ export function WalletDashboard() {
         <>
           {data.totalUsd != null && (
             <Card className="mt-4 p-4">
-              <p className="text-sm text-muted-foreground">Total value</p>
+              <p className="text-sm text-muted-foreground">
+                Total value{data.isPartial && " (partial)"}
+              </p>
               <p className="mt-1 text-3xl font-semibold tracking-tight tabular-nums">
                 <AnimatedNumber value={data.totalUsd} format="usd" />
               </p>
               <p className="mt-1 text-xs text-muted-foreground">
+                {data.isPartial &&
+                  "Some held assets have no tracked price yet, so this total doesn't cover everything. "}
                 24h change: not yet available — DeFiHub doesn&apos;t track historical wallet snapshots.
               </p>
             </Card>

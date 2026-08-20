@@ -59,6 +59,12 @@ export function SectionNav({ sections }: { sections: SectionNavItem[] }) {
     if (!el) return;
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     el.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+    // Syncs the URL to the section without the browser's own instant-jump
+    // side effect that setting location.hash (or letting a native anchor
+    // navigation run) would cause - the scrollIntoView above already
+    // handles the actual (smooth) scroll; this only makes the section
+    // shareable/bookmarkable and restorable via back/forward.
+    history.pushState(null, "", `#${id}`);
   }
 
   if (sections.length < 2) return null;
@@ -74,6 +80,11 @@ export function SectionNav({ sections }: { sections: SectionNavItem[] }) {
             key={s.id}
             href={`#${s.id}`}
             onClick={(e) => {
+              // Only intercept a plain, unmodified primary-button click.
+              // Cmd/Ctrl/Shift/Alt-modified clicks (open in new tab/window)
+              // and non-primary-button clicks must fall through to the
+              // browser's native anchor behavior untouched.
+              if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
               e.preventDefault();
               scrollToSection(s.id);
             }}

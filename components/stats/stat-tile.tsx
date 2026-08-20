@@ -33,7 +33,9 @@ export function StatTile({
   return (
     <Card interactive className="p-4">
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        {Icon && <Icon className="size-4 transition-transform duration-200 group-hover/card:scale-110" />}
+        {Icon && (
+          <Icon className="size-4 transition-transform duration-200 motion-safe:group-hover/card:scale-110" />
+        )}
         {label}
       </div>
       <div className={cn("mt-1.5 text-2xl font-semibold tabular-nums text-foreground", valueClassName)}>

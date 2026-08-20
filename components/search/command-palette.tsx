@@ -58,6 +58,18 @@ export function CommandPalette({ className }: { className?: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  // Arrow-key navigation moves the highlight, but the listbox scrolls
+  // independently of it - without this, highlighting an option outside the
+  // current scroll position leaves it selectable (Enter still works) but
+  // invisible. `block: "nearest"` only scrolls if the option isn't already
+  // in view, so it doesn't fight manual mouse scrolling.
+  useEffect(() => {
+    if (highlightedIndex < 0) return;
+    document
+      .getElementById(`${listboxId}-option-${highlightedIndex}`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [highlightedIndex, listboxId]);
+
   const showDropdown = queryLongEnough;
 
   return (
@@ -103,46 +115,64 @@ export function CommandPalette({ className }: { className?: string }) {
         </div>
 
         {showDropdown && (
-          <div id={listboxId} role="listbox" className="max-h-80 overflow-y-auto border-t border-border">
+          <div className="max-h-80 overflow-y-auto border-t border-border">
             {loading && groups.length === 0 && (
-              <div className="px-3 py-6 text-center text-sm text-muted-foreground">Searching…</div>
+              <div role="status" className="px-3 py-6 text-center text-sm text-muted-foreground">
+                Searching…
+              </div>
             )}
             {!loading && groups.length === 0 && (
-              <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+              <div role="status" className="px-3 py-6 text-center text-sm text-muted-foreground">
                 No matches for &ldquo;{query}&rdquo;
               </div>
             )}
-            {groups.map((group) => (
-              <div key={group.kind} className="border-b border-border py-1.5 last:border-b-0">
-                <div className="px-3 py-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-                  {KIND_LABELS[group.kind]}
-                </div>
-                {group.items.map((item) => {
-                  const flatIndex = flatIndexByKey.get(`${item.kind}-${item.href}`);
-                  return (
-                    <button
-                      key={`${item.kind}-${item.href}`}
-                      id={`${listboxId}-option-${flatIndex}`}
-                      role="option"
-                      type="button"
-                      aria-selected={highlightedIndex === flatIndex}
-                      onClick={() => {
-                        selectResult(item);
-                        setOpen(false);
-                      }}
-                      className={cn(
-                        "flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted",
-                        highlightedIndex === flatIndex && "bg-muted",
-                      )}
+            {/* role="listbox" requires its owned elements to be options (or
+                groups of options) only - the status messages above are
+                deliberately siblings, not children, of this div. */}
+            <div id={listboxId} role="listbox" aria-label="Search results">
+              {groups.map((group) => {
+                const groupLabelId = `${listboxId}-group-${group.kind}`;
+                return (
+                  <div
+                    key={group.kind}
+                    role="group"
+                    aria-labelledby={groupLabelId}
+                    className="border-b border-border py-1.5 last:border-b-0"
+                  >
+                    <div
+                      id={groupLabelId}
+                      className="px-3 py-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase"
                     >
-                      <EntityLogo src={item.logoUrl} name={item.name} size={20} />
-                      <span className="font-medium">{item.name}</span>
-                      {item.subtitle && <span className="text-muted-foreground">{item.subtitle}</span>}
-                    </button>
-                  );
-                })}
-              </div>
-            ))}
+                      {KIND_LABELS[group.kind]}
+                    </div>
+                    {group.items.map((item) => {
+                      const flatIndex = flatIndexByKey.get(`${item.kind}-${item.href}`);
+                      return (
+                        <button
+                          key={`${item.kind}-${item.href}`}
+                          id={`${listboxId}-option-${flatIndex}`}
+                          role="option"
+                          type="button"
+                          aria-selected={highlightedIndex === flatIndex}
+                          onClick={() => {
+                            selectResult(item);
+                            setOpen(false);
+                          }}
+                          className={cn(
+                            "flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted",
+                            highlightedIndex === flatIndex && "bg-muted",
+                          )}
+                        >
+                          <EntityLogo src={item.logoUrl} name={item.name} size={20} />
+                          <span className="font-medium">{item.name}</span>
+                          {item.subtitle && <span className="text-muted-foreground">{item.subtitle}</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
       </DialogContent>

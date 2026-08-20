@@ -85,7 +85,24 @@ export async function getCachedProtocolSummary(
     }
   }
 
-  return { sections: JSON.parse(row.content), model: row.model, createdAt: row.createdAt };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(row.content);
+  } catch {
+    raw = null;
+  }
+  const parsed = raw != null ? protocolSummarySchema.safeParse(raw) : null;
+  if (!parsed?.success) {
+    // Rows written before the structured-output migration store plain
+    // prose (or, in principle, some other JSON shape) rather than the
+    // current { overview, insights, risks, opportunities } object - not a
+    // corrupt cache, just an old format. Treat it exactly like "nothing
+    // cached" so the page falls back to the generate-on-demand flow
+    // instead of crashing on a JSON.parse failure or a schema mismatch.
+    return null;
+  }
+
+  return { sections: parsed.data, model: row.model, createdAt: row.createdAt };
 }
 
 function buildPrompt(input: ProtocolSummaryInput): string {

@@ -56,18 +56,34 @@ export function useWatchToggle({
       return;
     }
     startTransition(async () => {
-      const res = await fetch("/api/watchlist", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(target),
-      });
-      if (!res.ok) {
+      // fetch() itself (network failure) and res.json() (a non-JSON or
+      // truncated body) can both throw - wrapping the whole thing keeps
+      // either case from becoming an unhandled rejection inside the
+      // transition and routes it to the same error toast as a non-ok
+      // response.
+      try {
+        const res = await fetch("/api/watchlist", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(target),
+        });
+        if (!res.ok) {
+          toast.error("Couldn't update your watchlist");
+          return;
+        }
+        const data = await res.json();
+        // Don't trust the response shape blindly - an unexpected payload
+        // (e.g. a proxy/error page returned with a 200) shouldn't silently
+        // set local state to something that isn't actually a boolean.
+        if (typeof data?.watching !== "boolean") {
+          toast.error("Couldn't update your watchlist");
+          return;
+        }
+        setWatching(data.watching);
+        toast.success(data.watching ? "Added to watchlist" : "Removed from watchlist");
+      } catch {
         toast.error("Couldn't update your watchlist");
-        return;
       }
-      const data = await res.json();
-      setWatching(data.watching);
-      toast.success(data.watching ? "Added to watchlist" : "Removed from watchlist");
     });
   }
 

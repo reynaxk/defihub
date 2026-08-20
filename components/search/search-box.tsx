@@ -91,50 +91,64 @@ export function SearchBox({ className }: { className?: string }) {
       </div>
 
       {showDropdown && (
-        <div
-          id={listboxId}
-          role="listbox"
-          className="motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-top-1 absolute top-full left-0 z-50 mt-1.5 w-full min-w-72 overflow-hidden rounded-lg border border-border bg-popover shadow-lg duration-150"
-        >
+        <div className="motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-top-1 absolute top-full left-0 z-50 mt-1.5 w-full min-w-72 overflow-hidden rounded-lg border border-border bg-popover shadow-lg duration-150">
           {loading && groups.length === 0 && (
-            <div className="px-3 py-4 text-center text-sm text-muted-foreground">Searching…</div>
+            <div role="status" className="px-3 py-4 text-center text-sm text-muted-foreground">
+              Searching…
+            </div>
           )}
           {!loading && groups.length === 0 && (
-            <div className="px-3 py-4 text-center text-sm text-muted-foreground">
+            <div role="status" className="px-3 py-4 text-center text-sm text-muted-foreground">
               No matches for &ldquo;{query}&rdquo;
             </div>
           )}
-          {groups.map((group) => (
-            <div key={group.kind} className="border-b border-border py-1.5 last:border-b-0">
-              <div className="px-3 py-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-                {KIND_LABELS[group.kind]}
-              </div>
-              {group.items.map((item) => {
-                const flatIndex = flatIndexByKey.get(`${item.kind}-${item.href}`);
-                return (
-                  <Link
-                    key={`${item.kind}-${item.href}`}
-                    id={`${listboxId}-option-${flatIndex}`}
-                    role="option"
-                    aria-selected={highlightedIndex === flatIndex}
-                    href={item.href}
-                    onClick={() => {
-                      reset();
-                      inputRef.current?.blur();
-                    }}
-                    className={cn(
-                      "flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-muted",
-                      highlightedIndex === flatIndex && "bg-muted",
-                    )}
+          {/* role="listbox" requires its owned elements to be options (or
+              groups of options) only - the status messages above are
+              deliberately siblings, not children, of this div. */}
+          <div id={listboxId} role="listbox" aria-label="Search results">
+            {groups.map((group) => {
+              const groupLabelId = `${listboxId}-group-${group.kind}`;
+              return (
+                <div
+                  key={group.kind}
+                  role="group"
+                  aria-labelledby={groupLabelId}
+                  className="border-b border-border py-1.5 last:border-b-0"
+                >
+                  <div
+                    id={groupLabelId}
+                    className="px-3 py-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase"
                   >
-                    <EntityLogo src={item.logoUrl} name={item.name} size={20} />
-                    <span className="font-medium">{item.name}</span>
-                    {item.subtitle && <span className="text-muted-foreground">{item.subtitle}</span>}
-                  </Link>
-                );
-              })}
-            </div>
-          ))}
+                    {KIND_LABELS[group.kind]}
+                  </div>
+                  {group.items.map((item) => {
+                    const flatIndex = flatIndexByKey.get(`${item.kind}-${item.href}`);
+                    return (
+                      <Link
+                        key={`${item.kind}-${item.href}`}
+                        id={`${listboxId}-option-${flatIndex}`}
+                        role="option"
+                        aria-selected={highlightedIndex === flatIndex}
+                        href={item.href}
+                        onClick={() => {
+                          reset();
+                          inputRef.current?.blur();
+                        }}
+                        className={cn(
+                          "flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-muted",
+                          highlightedIndex === flatIndex && "bg-muted",
+                        )}
+                      >
+                        <EntityLogo src={item.logoUrl} name={item.name} size={20} />
+                        <span className="font-medium">{item.name}</span>
+                        {item.subtitle && <span className="text-muted-foreground">{item.subtitle}</span>}
+                      </Link>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>

@@ -32,10 +32,13 @@ vi.mock("@/lib/database/queries/tokens", () => ({
   getNativeTokenPrice: vi.fn(async () => 2000),
 }));
 
+// The route goes through withResilientClient (rpc-resilient-client.ts,
+// not mocked - its retry/classification logic runs for real), which in
+// turn reads chain config from this module.
 vi.mock("@/lib/chains/rpc-client", () => ({
   EVM_CHAINS: [{ slug: "ethereum", name: "Ethereum", nativeToken: "ETH", chainId: 1 }],
   VIEM_CHAIN_BY_SLUG: new Map([["ethereum", {}]]),
-  rpcUrlFor: () => "http://fake-rpc.invalid",
+  rpcUrlsFor: () => ["http://fake-rpc.invalid"],
 }));
 
 const TEST_ADDRESS = "0x" + "0".repeat(36) + "dead";

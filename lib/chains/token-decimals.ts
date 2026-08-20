@@ -1,5 +1,6 @@
-import { createPublicClient, erc20Abi, http, type Address } from "viem";
-import { VIEM_CHAIN_BY_SLUG, rpcUrlFor } from "./rpc-client";
+import { erc20Abi, type Address } from "viem";
+import { VIEM_CHAIN_BY_SLUG } from "./rpc-client";
+import { withResilientClient } from "./rpc-resilient-client";
 
 export interface DecimalsCallResult {
   status: "success" | "failure";
@@ -32,32 +33,31 @@ export async function resolveDecimals(
 }
 
 // One multicall batching every address's decimals() read for a single
-// chain. Chains with no viem chain definition (non-EVM, e.g. Solana) simply
-// aren't callable here - the token-sync worker skips this function entirely
-// for those and leaves decimals unknown, which is correct: there's no RPC
-// to read a real value from.
-//
-// TODO(Phase E): rewire through the resilient RPC wrapper once it lands,
-// same as the wallet-balances route and the on-chain verification workers.
+// chain, through the resilient RPC wrapper (rpc-resilient-client.ts) for
+// retry/failover consistency with the wallet-balances route and the
+// on-chain verification workers. Chains with no viem chain definition
+// (non-EVM, e.g. Solana) simply aren't callable here - the token-sync
+// worker skips this function entirely for those and leaves decimals
+// unknown, which is correct: there's no RPC to read a real value from. A
+// whole-chain RPC failure (all configured providers exhausted) is left to
+// the caller (workers/tokens/sync.ts) to catch per-chain, same as before.
 export async function fetchOnchainDecimals(
   chainSlug: string,
   addresses: string[],
 ): Promise<Map<string, number>> {
   if (addresses.length === 0) return new Map();
+  if (!VIEM_CHAIN_BY_SLUG.has(chainSlug)) return new Map();
 
-  const viemChain = VIEM_CHAIN_BY_SLUG.get(chainSlug);
-  if (!viemChain) return new Map();
-
-  const client = createPublicClient({ chain: viemChain, transport: http(rpcUrlFor(chainSlug)) });
-
-  return resolveDecimals(addresses, async (addrs) => {
-    const results = await client.multicall({
-      contracts: addrs.map((address) => ({
-        address: address as Address,
-        abi: erc20Abi,
-        functionName: "decimals",
-      })),
-    });
-    return results as DecimalsCallResult[];
-  });
+  return resolveDecimals(addresses, (addrs) =>
+    withResilientClient(chainSlug, async (client) => {
+      const results = await client.multicall({
+        contracts: addrs.map((address) => ({
+          address: address as Address,
+          abi: erc20Abi,
+          functionName: "decimals",
+        })),
+      });
+      return results as DecimalsCallResult[];
+    }),
+  );
 }

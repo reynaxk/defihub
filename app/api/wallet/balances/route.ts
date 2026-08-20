@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import { createPublicClient, erc20Abi, formatUnits, http, isAddress, type Address } from "viem";
+import { erc20Abi, formatUnits, isAddress, type Address } from "viem";
 import { auth } from "@/lib/auth/config";
 import { checkRateLimit } from "@/lib/security/rate-limit";
 import { getNativeTokenPrice, getTokensForBalanceCheck } from "@/lib/database/queries/tokens";
-import { EVM_CHAINS, VIEM_CHAIN_BY_SLUG, rpcUrlFor } from "@/lib/chains/rpc-client";
+import { EVM_CHAINS } from "@/lib/chains/rpc-client";
+import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { aggregateUsdValues, computeValueUsd } from "@/lib/wallet/valuation";
 import type { ChainBalanceResult, ChainResult, TokenBalance, WalletBalancesResponse } from "@/lib/wallet/types";
 
@@ -16,10 +17,6 @@ async function readChainBalances(
   chain: (typeof EVM_CHAINS)[number],
   address: Address,
 ): Promise<ChainBalanceResult> {
-  const viemChain = VIEM_CHAIN_BY_SLUG.get(chain.slug);
-  if (!viemChain) throw new Error(`No viem chain definition for ${chain.slug}`);
-
-  const client = createPublicClient({ chain: viemChain, transport: http(rpcUrlFor(chain.slug)) });
   // Some chains have a tracked "token" row that's actually just a pseudo-
   // ERC-20 representation of the native currency itself - confirmed live on
   // Polygon, where address 0x...1010 (a real, documented Polygon-specific
@@ -46,25 +43,29 @@ async function readChainBalances(
   // and it's already calling multicall on these exact contracts, so reading
   // the real value straight from each token contract is both more correct
   // and doesn't need to wait on that sync fix.
-  const [nativeBalance, multicallResults, nativePriceUsd] = await Promise.all([
-    client.getBalance({ address }),
-    trackedTokens.length === 0
-      ? []
-      : client.multicall({
-          contracts: [
-            ...trackedTokens.map((t) => ({
-              address: t.address as Address,
-              abi: erc20Abi,
-              functionName: "balanceOf",
-              args: [address],
-            })),
-            ...trackedTokens.map((t) => ({
-              address: t.address as Address,
-              abi: erc20Abi,
-              functionName: "decimals",
-            })),
-          ],
-        }),
+  const [[nativeBalance, multicallResults], nativePriceUsd] = await Promise.all([
+    withResilientClient(chain.slug, (client) =>
+      Promise.all([
+        client.getBalance({ address }),
+        trackedTokens.length === 0
+          ? Promise.resolve([])
+          : client.multicall({
+              contracts: [
+                ...trackedTokens.map((t) => ({
+                  address: t.address as Address,
+                  abi: erc20Abi,
+                  functionName: "balanceOf",
+                  args: [address],
+                })),
+                ...trackedTokens.map((t) => ({
+                  address: t.address as Address,
+                  abi: erc20Abi,
+                  functionName: "decimals",
+                })),
+              ],
+            }),
+      ]),
+    ),
     getNativeTokenPrice(chain.slug),
   ]);
 

@@ -1,16 +1,16 @@
-import { createPublicClient, http, parseAbi } from "viem";
+import { parseAbi } from "viem";
 import { db } from "@/lib/database/client";
 import { onchainVerifications, protocols, chains } from "@/lib/database/schema";
 import { priceProvider } from "@/lib/providers";
-import { VIEM_CHAIN_BY_SLUG, rpcUrlFor } from "@/lib/chains/rpc-client";
+import { VIEM_CHAIN_BY_SLUG } from "@/lib/chains/rpc-client";
+import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { VERIFIED_PROTOCOL_TVLS, type VerifiedProtocolTvl } from "./config";
 
 async function readOne(
   entry: VerifiedProtocolTvl,
   priceById: Map<string, number>,
 ): Promise<{ key: string; ok: boolean; error?: string; tvlUsd?: number; blockNumber?: bigint }> {
-  const viemChain = VIEM_CHAIN_BY_SLUG.get(entry.chainSlug);
-  if (!viemChain) {
+  if (!VIEM_CHAIN_BY_SLUG.has(entry.chainSlug)) {
     return { key: entry.key, ok: false, error: `no RPC configured for chain "${entry.chainSlug}"` };
   }
 
@@ -19,7 +19,6 @@ async function readOne(
     return { key: entry.key, ok: false, error: `missing USD price for ${entry.coingeckoId}` };
   }
 
-  const client = createPublicClient({ chain: viemChain, transport: http(rpcUrlFor(entry.chainSlug)) });
   const address = entry.contractAddress as `0x${string}`;
 
   function functionNameFrom(signature: string): string {
@@ -27,26 +26,28 @@ async function readOne(
   }
 
   try {
-    let rawAmount: bigint;
-    let blockNumber: bigint;
+    // Both branches' reads run inside one withResilientClient invocation,
+    // so a retry/failover restarts the whole sequence against the same
+    // provider - blockNumber is fetched first, then passed explicitly to
+    // every readContract call below, rather than fetched concurrently with
+    // the reads, since two independent JSON-RPC calls racing each other
+    // can land on different blocks if one is mined in between, which would
+    // make the persisted blockNumber not actually correspond to the state
+    // that produced tvlUsd. The two reads in the "supply-times-rate"
+    // branch can still run concurrently with each other, since pinning
+    // both to the same explicit height keeps them consistent regardless of
+    // when each request arrives at the RPC node.
+    const [rawAmount, blockNumber] = await withResilientClient(entry.chainSlug, async (client) => {
+      if (entry.read.kind === "direct") {
+        const abi = parseAbi([entry.read.functionSignature]);
+        const functionName = functionNameFrom(entry.read.functionSignature);
+        const blockNumber = await client.getBlockNumber();
+        const rawAmount = (await client.readContract({ address, abi, functionName, blockNumber })) as bigint;
+        return [rawAmount, blockNumber] as const;
+      }
 
-    // blockNumber is fetched first, then passed explicitly to every
-    // readContract call below, rather than fetching it concurrently with
-    // the reads - two independent JSON-RPC calls racing each other can land
-    // on different blocks if one is mined in between, which would make the
-    // persisted blockNumber not actually correspond to the state that
-    // produced tvlUsd. The two reads in the "supply-times-rate" branch can
-    // still run concurrently with each other, since pinning both to the
-    // same explicit height keeps them consistent regardless of when each
-    // request arrives at the RPC node.
-    if (entry.read.kind === "direct") {
-      const abi = parseAbi([entry.read.functionSignature]);
-      const functionName = functionNameFrom(entry.read.functionSignature);
-      blockNumber = await client.getBlockNumber();
-      rawAmount = (await client.readContract({ address, abi, functionName, blockNumber })) as bigint;
-    } else {
       const abi = parseAbi([entry.read.supplyFunctionSignature, entry.read.rateFunctionSignature]);
-      blockNumber = await client.getBlockNumber();
+      const blockNumber = await client.getBlockNumber();
       const [supply, rate] = await Promise.all([
         client.readContract({
           address,
@@ -61,11 +62,12 @@ async function readOne(
           blockNumber,
         }) as Promise<bigint>,
       ]);
-      // Both values are fixed-point at `decimals` places (e.g. 1e18), so the
-      // raw product needs one factor's worth of scale divided back out
+      // Both values are fixed-point at `decimals` places (e.g. 1e18), so
+      // the raw product needs one factor's worth of scale divided back out
       // before it's in the same fixed-point units as a "direct" read.
-      rawAmount = (supply * rate) / BigInt(10) ** BigInt(entry.decimals);
-    }
+      const rawAmount = (supply * rate) / BigInt(10) ** BigInt(entry.decimals);
+      return [rawAmount, blockNumber] as const;
+    });
 
     const tvlUsd = (Number(rawAmount) / 10 ** entry.decimals) * price;
     return { key: entry.key, ok: true, tvlUsd, blockNumber };

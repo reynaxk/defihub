@@ -33,7 +33,20 @@ export function SectionNav({ sections }: { sections: SectionNavItem[] }) {
     // id present in the set - is robust to both.
     const intersectingIds = new Set<string>();
 
+    // The observer's activation band never reaches the last section if the
+    // page doesn't have enough room below it to scroll that far, so the
+    // bottom-of-page check is given priority here rather than living as a
+    // separate, independent code path - a second listener racing this one
+    // (whichever fires last wins) could otherwise flip the correct
+    // bottom-detected last-section state back to a stale intersecting-set
+    // result. One function, called from both the observer and the scroll
+    // listener below, makes the decision every time.
     function updateActiveFromIntersecting() {
+      const nearBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4;
+      if (nearBottom) {
+        setActiveId(sections[sections.length - 1].id);
+        return;
+      }
       const topmost = sections.find((s) => intersectingIds.has(s.id));
       if (topmost) setActiveId(topmost.id);
     }
@@ -54,20 +67,17 @@ export function SectionNav({ sections }: { sections: SectionNavItem[] }) {
     );
     for (const el of elements) observer.observe(el);
 
-    // The observer's activation band never reaches the last section if the
-    // page doesn't have enough room below it to scroll that far - without
-    // this, scrolling all the way to the bottom of the page can leave a
-    // non-last section marked active. Bottom-of-page is checked directly
-    // instead, overriding the observer's result in just that case.
-    function onScroll() {
-      const nearBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4;
-      if (nearBottom) setActiveId(sections[sections.length - 1].id);
-    }
-    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("scroll", updateActiveFromIntersecting, { passive: true });
+    // Runs once immediately rather than waiting for the next scroll event -
+    // a page that loads (or is restored via back/forward navigation, whose
+    // scroll position the browser restores directly rather than firing a
+    // user scroll) already positioned at the bottom would otherwise show a
+    // non-last section as active until the user scrolls again.
+    updateActiveFromIntersecting();
 
     return () => {
       observer.disconnect();
-      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("scroll", updateActiveFromIntersecting);
     };
   }, [sections]);
 

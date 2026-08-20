@@ -8,6 +8,27 @@ export interface RpcAttempt {
   message: string;
 }
 
+// Operator-configured RPC URLs (ETHEREUM_RPC_URL, *_RPC_URL_FALLBACK - see
+// rpc-client.ts) commonly embed a provider API key directly in the path
+// (Alchemy/Infura-style), so the full URL must never reach a log line or an
+// error surfaced to a caller. Reduced to scheme+host only - enough to tell
+// providers apart in a log without leaking the credential.
+function redactRpcUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return "[unparseable-rpc-url]";
+  }
+}
+
+// viem's own error messages (e.g. HttpRequestError) also embed the request
+// URL verbatim - redacting the exact URL string wherever it appears in the
+// message, not just the field that carries it separately, covers that too.
+function redactUrlInMessage(message: string, url: string): string {
+  return url ? message.split(url).join(redactRpcUrl(url)) : message;
+}
+
 export class RpcUnavailableError extends Error {
   constructor(
     public readonly chainSlug: string,
@@ -77,7 +98,7 @@ export async function withResilientClient<T>(
       } catch (err) {
         const kind = classifyRpcError(err);
         const message = err instanceof Error ? err.message : String(err);
-        attempts.push({ url, kind, message });
+        attempts.push({ url: redactRpcUrl(url), kind, message: redactUrlInMessage(message, url) });
 
         const isLastAttemptForThisProvider = attempt === MAX_RETRIES_PER_PROVIDER;
         if (!isRetryableRpcFailure(kind) || isLastAttemptForThisProvider) break;

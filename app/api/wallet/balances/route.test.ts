@@ -75,11 +75,15 @@ describe("GET /api/wallet/balances", () => {
     const body = await response.json();
 
     expect(body.chains[0].tokenBalances).toEqual([]);
+    // The dropped balance had unknown (not zero) value - the response must
+    // not silently claim completeness it doesn't have.
+    expect(body.chains[0].isPartial).toBe(true);
+    expect(body.isPartial).toBe(true);
   });
 
-  it("uses the live on-chain decimals value when the read succeeds, ignoring an unconfirmed DB value", async () => {
+  it("uses the live on-chain decimals value when the read succeeds, ignoring a conflicting DB value", async () => {
     mockGetTokensForBalanceCheck.mockResolvedValue([
-      { address: "0xtoken", symbol: "TOK", decimals: null, logoUrl: null, priceUsd: 1 },
+      { address: "0xtoken", symbol: "TOK", decimals: 18, logoUrl: null, priceUsd: 1 },
     ]);
     mockGetBalance.mockResolvedValue(BigInt(0));
     mockMulticall.mockResolvedValue([

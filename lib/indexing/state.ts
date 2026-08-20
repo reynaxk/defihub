@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { indexingState } from "@/lib/database/schema";
 
@@ -56,10 +56,9 @@ export async function updateIndexingState(
   component: string,
   patch: IndexingStateUpdate,
 ): Promise<void> {
-  const values = {
-    chainSlug,
-    component,
-    status: patch.status ?? ("idle" as const),
+  // Shared between insert and update - status is deliberately NOT included
+  // here (see below), since "omitted" means different things on each path.
+  const shared = {
     updatedAt: new Date(),
     ...(patch.lastProcessedBlock != null ? { lastProcessedBlock: patch.lastProcessedBlock.toString() } : {}),
     ...(patch.lastSuccessfulSyncAt ? { lastSuccessfulSyncAt: patch.lastSuccessfulSyncAt } : {}),
@@ -69,9 +68,33 @@ export async function updateIndexingState(
 
   await db
     .insert(indexingState)
-    .values(values)
+    .values({
+      chainSlug,
+      component,
+      // A brand-new row has no prior status to preserve, so "idle" is a
+      // safe default here - unlike on the update path below.
+      status: patch.status ?? ("idle" as const),
+      ...shared,
+    })
     .onConflictDoUpdate({
       target: [indexingState.chainSlug, indexingState.component],
-      set: values,
+      set: {
+        ...shared,
+        // A partial update that doesn't mention status (e.g. touching only
+        // `error`) must never silently reset an existing "running"/"error"
+        // status back to "idle" - only write it when the caller actually
+        // passed one.
+        ...(patch.status != null ? { status: patch.status } : {}),
+        // Guards against cursor regression from a delayed or retried
+        // writer: two overlapping/out-of-order calls for the same
+        // (chainSlug, component) must never move lastProcessedBlock
+        // backwards, or a block range already scanned would look
+        // unscanned again next run.
+        ...(patch.lastProcessedBlock != null
+          ? {
+              lastProcessedBlock: sql`greatest(${indexingState.lastProcessedBlock}, excluded.last_processed_block)`,
+            }
+          : {}),
+      },
     });
 }

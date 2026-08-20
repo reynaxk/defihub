@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./rpc-client", () => ({
-  VIEM_CHAIN_BY_SLUG: new Map([["testchain", {}]]),
-  rpcUrlsFor: (slug: string) =>
-    slug === "testchain" ? ["https://primary.invalid", "https://secondary.invalid"] : [],
+  VIEM_CHAIN_BY_SLUG: new Map([
+    ["testchain", {}],
+    ["secretchain", {}],
+  ]),
+  rpcUrlsFor: (slug: string) => {
+    if (slug === "testchain") return ["https://primary.invalid", "https://secondary.invalid"];
+    if (slug === "secretchain") return ["https://rpc.invalid/v2/super-secret-api-key-12345"];
+    return [];
+  },
 }));
 
 const createPublicClientMock = vi.fn();
@@ -182,6 +188,30 @@ describe("withResilientClient", () => {
 
     expect(result).toBe(BigInt(1));
     expect(primaryBalance).toHaveBeenCalledTimes(1);
+  });
+
+  it("never leaks the full RPC URL (which may embed a provider API key) in the thrown error", async () => {
+    const failing = fakeClient(
+      vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED https://rpc.invalid/v2/super-secret-api-key-12345")),
+    );
+    createPublicClientMock.mockReturnValueOnce(failing);
+
+    const resultPromise = withResilientClient("secretchain", (client) => client.getBalance({} as never));
+    const assertion = expect(resultPromise).rejects.toThrow(RpcUnavailableError);
+    await vi.runAllTimersAsync();
+
+    try {
+      await resultPromise;
+      expect.unreachable("expected withResilientClient to reject");
+    } catch (err) {
+      expect(err).toBeInstanceOf(RpcUnavailableError);
+      const unavailable = err as RpcUnavailableError;
+      expect(unavailable.message).not.toContain("super-secret-api-key-12345");
+      expect(unavailable.attempts[0].url).not.toContain("super-secret-api-key-12345");
+      expect(unavailable.attempts[0].message).not.toContain("super-secret-api-key-12345");
+      expect(unavailable.attempts[0].url).toBe("https://rpc.invalid");
+    }
+    await assertion;
   });
 
   it("throws immediately for a chain with no viem chain definition", async () => {

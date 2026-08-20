@@ -40,13 +40,30 @@ export function RangedAreaChart({
   // switching back to the default range, with no reset needed.
   const [fetchedData, setFetchedData] = useState<TvlPoint[] | null>(null);
   const [fetchedRange, setFetchedRange] = useState<ChartRangeKey | null>(null);
+  // The cutoff the server actually applied for `fetchedRange` (returned
+  // alongside the data) - the source of truth for isPartial below, not the
+  // returned data's own latest timestamp, which could disagree with the
+  // real applied cutoff if indexing is stale.
+  const [fetchedSince, setFetchedSince] = useState<string | null>(null);
+  // Which range's fetch most recently failed, rather than a plain boolean -
+  // lets `fetchError` below be derived (erroredRange === range) instead of
+  // needing an explicit reset when `range` changes, the same trick
+  // `isPending` uses. Cleared on the next successful fetch for that range
+  // (e.g. a retry), inside the effect's async .then, never synchronously in
+  // the effect body itself (the React Compiler's set-state-in-effect check
+  // flags that).
+  const [erroredRange, setErroredRange] = useState<ChartRangeKey | null>(null);
+  const fetchError = erroredRange === range;
+  // Bumped to re-run the fetch effect for the same range - the only way to
+  // retry, since the effect otherwise only fires on a `range` change.
+  const [retryToken, setRetryToken] = useState(0);
   // Derived, not stored: a fetch-requiring range is selected but its data
   // hasn't landed yet. Storing this as its own state would mean setting it
   // synchronously at the top of the effect below, which the React
   // Compiler's set-state-in-effect check (correctly) flags - deriving it
   // from the same fetchedRange/range comparison the render already needs
   // sidesteps that entirely.
-  const isPending = Boolean(fetchEndpoint) && range !== defaultRange && fetchedRange !== range;
+  const isPending = Boolean(fetchEndpoint) && range !== defaultRange && fetchedRange !== range && !fetchError;
 
   useEffect(() => {
     if (!fetchEndpoint || range === defaultRange) return;
@@ -57,7 +74,7 @@ export function RangedAreaChart({
     const separator = fetchEndpoint.includes("?") ? "&" : "?";
     fetch(`${fetchEndpoint}${separator}range=${range}`)
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`history fetch failed: ${res.status}`))))
-      .then((body: { history: Record<string, unknown>[] }) => {
+      .then((body: { history: Record<string, unknown>[]; since: string | null }) => {
         if (cancelled) return;
         setFetchedData(
           body.history.map((row) => ({
@@ -65,34 +82,38 @@ export function RangedAreaChart({
             value: (valueField ? row[valueField] : row.value) as number | null,
           })),
         );
+        setFetchedSince(body.since);
         setFetchedRange(range);
+        setErroredRange(null);
       })
       .catch(() => {
-        if (!cancelled) {
-          setFetchedData([]);
-          setFetchedRange(range);
-        }
+        // Deliberately does not touch fetchedData/fetchedRange - the chart
+        // keeps showing the last known-good data (falls back to `data`
+        // below) instead of going blank on a transient network error, and
+        // the retry control re-runs this same effect for the same range.
+        if (!cancelled) setErroredRange(range);
       });
     return () => {
       cancelled = true;
     };
-  }, [fetchEndpoint, range, defaultRange, valueField]);
+  }, [fetchEndpoint, range, defaultRange, valueField, retryToken]);
 
   const { filtered, isPartial } = useMemo(() => {
     if (fetchEndpoint) {
-      // Already bounded server-side to exactly the selected range - no
-      // further filtering needed. `isPartial` still applies: the server
-      // just returns whatever exists at-or-after the cutoff, so a range
-      // asking further back than real history goes is detectable the same
-      // way as the client-filter path below.
       const activeData = fetchedRange === range && fetchedData ? fetchedData : data;
-      const active = CHART_RANGES.find((r) => r.key === range);
-      if (!active || active.days == null || activeData.length === 0) {
-        return { filtered: activeData, isPartial: false };
+      if (fetchedRange === range && fetchedData) {
+        // Bounded server-side to exactly the selected range already.
+        // isPartial comes from the cutoff the server actually applied, not
+        // recomputed from the returned data's own latest timestamp.
+        if (fetchedSince == null || activeData.length === 0) return { filtered: activeData, isPartial: false };
+        const cutoff = new Date(fetchedSince).getTime();
+        const earliestTime = Math.min(...activeData.map((d) => new Date(d.timestamp).getTime()));
+        return { filtered: activeData, isPartial: earliestTime > cutoff };
       }
-      const timestamps = activeData.map((d) => new Date(d.timestamp).getTime());
-      const cutoff = Math.max(...timestamps) - active.days * 24 * 60 * 60 * 1000;
-      return { filtered: activeData, isPartial: Math.min(...timestamps) > cutoff };
+      // Not yet fetched for this range (still pending, or the fetch
+      // failed) - showing the last known-good data rather than guessing at
+      // partial-ness for a range that hasn't actually loaded.
+      return { filtered: activeData, isPartial: false };
     }
 
     const active = CHART_RANGES.find((r) => r.key === range);
@@ -112,7 +133,7 @@ export function RangedAreaChart({
     // as a data bug rather than the expected "still early" state it is.
     const isPartial = earliestTime > cutoff;
     return { filtered, isPartial };
-  }, [data, range, fetchEndpoint, fetchedData, fetchedRange]);
+  }, [data, range, fetchEndpoint, fetchedData, fetchedRange, fetchedSince]);
 
   const activeLabel = CHART_RANGES.find((r) => r.key === range)?.label;
 
@@ -136,7 +157,19 @@ export function RangedAreaChart({
           </button>
         ))}
       </div>
-      {isPartial && (
+      {fetchError && (
+        <p className="mb-2 flex items-center justify-end gap-2 text-right text-xs text-muted-foreground">
+          Couldn&apos;t load this range.
+          <button
+            type="button"
+            onClick={() => setRetryToken((n) => n + 1)}
+            className="font-medium text-foreground underline underline-offset-2 hover:no-underline"
+          >
+            Retry
+          </button>
+        </p>
+      )}
+      {!fetchError && isPartial && (
         <p className="mb-2 text-right text-xs text-muted-foreground">
           Showing all available history — not enough data yet for the full {activeLabel} range.
         </p>

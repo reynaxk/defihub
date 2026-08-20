@@ -56,6 +56,10 @@ export async function fetchOnchainDecimals(
           abi: erc20Abi,
           functionName: "decimals",
         })),
+        // Explicit rather than relying on viem's implicit default (which is
+        // already `true`) - a per-address failure must come back as a
+        // failed result for this address, never abort the whole batch.
+        allowFailure: true,
       });
       return results as DecimalsCallResult[];
     }),

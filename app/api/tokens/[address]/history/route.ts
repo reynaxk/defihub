@@ -27,6 +27,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ addr
   const tokenId = await getTokenIdByAddress(address, searchParams.get("chain") ?? undefined);
   if (!tokenId) return NextResponse.json({ error: "Token not found" }, { status: 404 });
 
-  const history = await getTokenHistory(tokenId, sinceForRange(range));
-  return NextResponse.json({ history });
+  const since = sinceForRange(range);
+  const history = await getTokenHistory(tokenId, since);
+  return NextResponse.json({ history, since: since ? since.toISOString() : null });
 }

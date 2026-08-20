@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { closeDb } from "../../lib/database/client";
+import { confirmationsFor } from "../../lib/chains/confirmations";
 import { withResilientClient } from "../../lib/chains/rpc-resilient-client";
 import { scanFromCursor } from "../../lib/indexing/events";
 import { logger } from "../../lib/observability/logger";
@@ -23,7 +24,10 @@ const POOL_ADDRESS = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640";
 const SWAP_EVENT =
   "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)";
 // A small, bounded window - this is a proof the primitives work, not a
-// real backfill.
+// real backfill. Only applies the first time this component has no
+// persisted cursor yet - a second run days later resumes from that cursor
+// instead and scans the whole gap in chunks, so running this by hand after
+// a long pause means more requests than this constant implies.
 const SCAN_WINDOW_BLOCKS = BigInt(1000);
 
 async function main() {
@@ -37,6 +41,10 @@ async function main() {
     eventSignature: SWAP_EVENT,
     currentBlock,
     startBlock,
+    // Even a reference example must not persist a cursor at the
+    // unconfirmed tip - whatever pattern this shows gets copied into the
+    // first real indexer.
+    confirmations: confirmationsFor(CHAIN_SLUG),
     onLogs: async (logs) => {
       logger.info("scanned swap events", {
         component: "onchain-events-example",

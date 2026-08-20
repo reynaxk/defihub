@@ -16,6 +16,14 @@ const MIN_TVL_USD = 10_000;
 export async function syncYields(): Promise<void> {
   await withSyncRun("yields", async () => {
     const pools = await defiDataProvider.getYieldPools();
+    if (pools.length === 0) {
+      // An empty upstream response is a provider problem (outage, schema
+      // change, rate limit), not a quiet no-op - recording it as success
+      // would hide an ingestion outage behind a healthy sync-health status.
+      // Genuinely zero pools meeting the chain/TVL filter (the normal case)
+      // is handled separately below, after this check.
+      throw new Error("yield provider returned zero pools");
+    }
     const relevant = pools.filter(
       (p) => SUPPORTED_DEFILLAMA_NAMES.has(p.chain) && (p.tvlUsd ?? 0) >= MIN_TVL_USD,
     );

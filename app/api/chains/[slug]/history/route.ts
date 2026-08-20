@@ -25,6 +25,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
   const chainId = await getChainIdBySlug(slug);
   if (!chainId) return NextResponse.json({ error: "Chain not found" }, { status: 404 });
 
-  const history = await getChainHistory(chainId, sinceForRange(range));
-  return NextResponse.json({ history });
+  const since = sinceForRange(range);
+  const history = await getChainHistory(chainId, since);
+  return NextResponse.json({ history, since: since ? since.toISOString() : null });
 }

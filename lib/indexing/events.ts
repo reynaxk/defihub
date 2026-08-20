@@ -57,13 +57,24 @@ export interface ScanFromCursorParams {
   component: string;
   address: Address;
   eventSignature: string;
-  // How far to scan up to this run (typically the chain's current block,
-  // from a prior getBlockNumber call).
+  // The chain head, typically from a prior getBlockNumber call - NOT
+  // scanned to directly. See `confirmations` below.
   currentBlock: bigint;
   // Used only the first time this (chainSlug, component) has no persisted
   // cursor yet.
   startBlock: bigint;
   chunkSize?: bigint;
+  // Confirmation depth subtracted from currentBlock before it's used as
+  // both the scan boundary and the persisted cursor. The chain head isn't
+  // final - a reorg can orphan it, and once the cursor passes a height,
+  // that range is never re-scanned: orphaned-block logs already delivered
+  // to onLogs stay delivered (phantom data), and canonical replacement logs
+  // for those heights are never fetched (missing data). The existing
+  // (transactionHash, logIndex) idempotency dedup does not protect against
+  // this - a reorged tx is typically dropped or re-included with a
+  // different logIndex, not redelivered identically. Defaults to 0 for
+  // callers that already pass a pre-confirmed height.
+  confirmations?: bigint;
   // Called once with every log this run found, before the cursor advances
   // - must be idempotent (e.g. upsert keyed by (transactionHash,
   // logIndex)), since a crash between onLogs succeeding and the cursor
@@ -84,7 +95,20 @@ export interface ScanResult {
 // means the next invocation resumes from the last successfully-processed
 // block instead of skipping or silently losing a range.
 export async function scanFromCursor(params: ScanFromCursorParams): Promise<ScanResult> {
-  const { chainSlug, component, address, eventSignature, currentBlock, startBlock, chunkSize, onLogs } = params;
+  const {
+    chainSlug,
+    component,
+    address,
+    eventSignature,
+    currentBlock,
+    startBlock,
+    chunkSize,
+    confirmations = BigInt(0),
+    onLogs,
+  } = params;
+  // Never scan to (or persist a cursor at) the unconfirmed tip - see
+  // `confirmations` above.
+  const safeToBlock = currentBlock > confirmations ? currentBlock - confirmations : BigInt(0);
 
   await updateIndexingState(chainSlug, component, { status: "running", lastAttemptedSyncAt: new Date() });
 
@@ -92,21 +116,21 @@ export async function scanFromCursor(params: ScanFromCursorParams): Promise<Scan
     const state = await getIndexingState(chainSlug, component);
     const fromBlock = state?.lastProcessedBlock != null ? state.lastProcessedBlock + BigInt(1) : startBlock;
 
-    if (fromBlock > currentBlock) {
+    if (fromBlock > safeToBlock) {
       await updateIndexingState(chainSlug, component, { status: "idle", lastSuccessfulSyncAt: new Date() });
       return { scannedFrom: fromBlock, scannedTo: fromBlock - BigInt(1), logCount: 0 };
     }
 
-    const logs = await scanBlockRange({ chainSlug, address, eventSignature, fromBlock, toBlock: currentBlock, chunkSize });
+    const logs = await scanBlockRange({ chainSlug, address, eventSignature, fromBlock, toBlock: safeToBlock, chunkSize });
     await onLogs(logs);
 
     await updateIndexingState(chainSlug, component, {
       status: "idle",
-      lastProcessedBlock: currentBlock,
+      lastProcessedBlock: safeToBlock,
       lastSuccessfulSyncAt: new Date(),
     });
 
-    return { scannedFrom: fromBlock, scannedTo: currentBlock, logCount: logs.length };
+    return { scannedFrom: fromBlock, scannedTo: safeToBlock, logCount: logs.length };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await updateIndexingState(chainSlug, component, { status: "error", error: message });

@@ -19,7 +19,7 @@ export function ChainsTable({
   // A chain with no synced history has an unknown TVL, not a zero one - `??
   // 0` here would silently understate this total and every other chain's
   // "% of total" share, which is computed against it below.
-  const { total: totalTvl } = sumKnownValues(chains.map((c) => c.tvl));
+  const { total: totalTvl, isPartial: isTvlPartial } = sumKnownValues(chains.map((c) => c.tvl));
 
   const columns: DataTableColumn<ChainListItem>[] = [
     {
@@ -66,7 +66,11 @@ export function ChainsTable({
       headClassName: "hidden text-right lg:table-cell",
       cellClassName: "hidden text-right tabular-nums text-muted-foreground lg:table-cell",
       render: (chain) =>
-        chain.tvl != null && totalTvl != null && totalTvl > 0
+        // isTvlPartial excluded, not just a non-null total: a total missing
+        // one or more chains' TVL is still a real number, but every share
+        // computed against it would be inflated by exactly the missing
+        // chains' worth - showing a false "100.00%" is worse than "—".
+        chain.tvl != null && totalTvl != null && totalTvl > 0 && !isTvlPartial
           ? formatPercent((chain.tvl / totalTvl) * 100)
           : "—",
     },

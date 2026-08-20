@@ -224,7 +224,20 @@ export type VerifiedProtocolTvlRead =
   // getEthValue(1 rETH) and checking it exactly matches getExchangeRate()
   // - not assumed from how the rebasing/exchange-rate distinction usually
   // works for this class of token.
-  | { kind: "supply-times-rate"; supplyFunctionSignature: string; rateFunctionSignature: string };
+  | {
+      kind: "supply-times-rate";
+      supplyFunctionSignature: string;
+      rateFunctionSignature: string;
+      // Fixed-point precision of each read's own return value - NOT
+      // assumed equal to each other or to the entry's `decimals` (the
+      // resolved unit's decimals, e.g. ETH's 18). They coincide for an
+      // 18-decimals-everywhere token like rETH, but aren't guaranteed to
+      // in general; verify-protocol-tvl.ts's descaling math needs all
+      // three specified independently to stay correct if that ever
+      // changes.
+      supplyDecimals: number;
+      rateDecimals: number;
+    };
 
 export interface VerifiedProtocolTvl {
   key: string;

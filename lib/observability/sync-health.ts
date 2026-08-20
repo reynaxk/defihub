@@ -2,9 +2,21 @@ import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { syncRuns } from "@/lib/database/schema";
 
+// A run older than this without a terminal status is a crashed worker, not
+// one still in flight - platform function timeouts are far below this
+// bound, and withSyncRun always finishes its row promptly on both success
+// and failure, so a "running" row this old means the process died before
+// that finally-equivalent path ran (a hard timeout or an OOM kill).
+const MAX_RUN_AGE_MS = 30 * 60 * 1000;
+
 export interface SyncHealthSummary {
   worker: string;
   currentlyRunning: boolean;
+  // Set when the most recent run is a "running" row older than
+  // MAX_RUN_AGE_MS - the exact signature of a crashed worker, which
+  // currentlyRunning alone would otherwise misreport as healthy activity
+  // forever.
+  stalledSince: Date | null;
   lastSuccess: {
     startedAt: Date;
     finishedAt: Date | null;
@@ -60,10 +72,15 @@ async function getWorkerStatus(worker: string): Promise<SyncHealthSummary> {
 
   const lastSuccess = lastSuccessRow[0];
   const lastFailure = lastFailureRow[0];
+  const recent = mostRecent[0];
+  const isRunningRow = recent?.status === "running";
+  const runAgeMs = recent ? Date.now() - recent.startedAt.getTime() : 0;
+  const isStalled = isRunningRow && runAgeMs > MAX_RUN_AGE_MS;
 
   return {
     worker,
-    currentlyRunning: mostRecent[0]?.status === "running",
+    currentlyRunning: isRunningRow && !isStalled,
+    stalledSince: isStalled ? recent.startedAt : null,
     lastSuccess: lastSuccess
       ? {
           startedAt: lastSuccess.startedAt,

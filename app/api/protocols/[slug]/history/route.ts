@@ -27,6 +27,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
   const protocolId = await getProtocolIdBySlug(slug);
   if (!protocolId) return NextResponse.json({ error: "Protocol not found" }, { status: 404 });
 
-  const history = await getProtocolHistory(protocolId, sinceForRange(range));
-  return NextResponse.json({ history });
+  const since = sinceForRange(range);
+  const history = await getProtocolHistory(protocolId, since);
+  return NextResponse.json({ history, since: since ? since.toISOString() : null });
 }

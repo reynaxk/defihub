@@ -38,19 +38,67 @@ const SENSITIVE_KEY_PATTERN =
 
 function serializeError(err: unknown): unknown {
   if (err instanceof Error) {
-    return { name: err.name, message: err.message };
+    return {
+      name: err.name,
+      message: err.message,
+      // The resilient RPC client wraps provider errors - the wrapped cause
+      // usually holds the actual reason, and dropping it here would hide
+      // it from every log line that logs a wrapping error.
+      ...(err.cause !== undefined ? { cause: serializeError(err.cause) } : {}),
+    };
   }
   return err;
 }
 
-function redact(fields: Record<string, unknown>): Record<string, unknown> {
+// Managed RPC endpoints and database connection strings carry credentials
+// in the URL itself (an Alchemy/Infura-style key in the path, a Postgres
+// password in the userinfo section), so a field-name check alone misses
+// them - this app's RPC failover logging is exactly the call site that
+// would otherwise leak one. Best-effort: values that don't parse as a URL
+// are returned unchanged.
+function redactUrlCredentials(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.password) url.password = "[redacted]";
+    if (url.username) url.username = "[redacted]";
+    // Provider API keys usually sit in the last path segment.
+    url.pathname = url.pathname.replace(/\/[^/]{16,}$/, "/[redacted]");
+    url.search = "";
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
+// Bounded so a deeply nested or accidentally self-referencing object can't
+// cause unbounded recursion - four levels comfortably covers this app's
+// actual log shapes (e.g. a wrapped RPC error's cause chain) without
+// walking an arbitrarily deep structure.
+const MAX_REDACT_DEPTH = 4;
+
+function redactValue(value: unknown, depth: number): unknown {
+  if (typeof value === "string" && /^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
+    return redactUrlCredentials(value);
+  }
+  // By value type, not by the field name "error" - any field can hold an
+  // Error (cause, lastError, rpcError, ...), and JSON.stringify(new
+  // Error(...)) otherwise serializes to "{}" since name/message/stack
+  // aren't enumerable.
+  if (value instanceof Error) return serializeError(value);
+  if (depth > 0 && value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return redact(value as Record<string, unknown>, depth - 1);
+  }
+  return value;
+}
+
+function redact(fields: Record<string, unknown>, depth = MAX_REDACT_DEPTH): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(fields)) {
     if (SENSITIVE_KEY_PATTERN.test(key)) {
       out[key] = "[redacted]";
       continue;
     }
-    out[key] = key === "error" ? serializeError(value) : value;
+    out[key] = redactValue(value, depth);
   }
   return out;
 }
@@ -67,13 +115,36 @@ export function setErrorHook(fn: ((entry: Record<string, unknown>) => void) | nu
 
 const isProduction = process.env.NODE_ENV === "production";
 
+// JSON.stringify throws on a bigint field (block numbers, balances, and
+// supplies are passed as bigint throughout this codebase) and on a
+// circular reference - either would turn a log statement into an uncaught
+// exception, which in a worker's catch block replaces a recoverable error
+// with an opaque logger crash. A logger must never be able to throw.
+function safeStringify(value: unknown): string {
+  const seen = new WeakSet<object>();
+  try {
+    return (
+      JSON.stringify(value, (_key, v) => {
+        if (typeof v === "bigint") return v.toString();
+        if (typeof v === "object" && v !== null) {
+          if (seen.has(v)) return "[circular]";
+          seen.add(v);
+        }
+        return v;
+      }) ?? ""
+    );
+  } catch {
+    return "[unserializable log fields]";
+  }
+}
+
 function emit(level: LogLevel, message: string, fields: LogFields): void {
   const { component, ...rest } = fields;
   const safeFields = redact(rest);
   const entry = { timestamp: new Date().toISOString(), level, component, message, ...safeFields };
 
   const line = isProduction
-    ? JSON.stringify(entry)
+    ? safeStringify(entry)
     : formatForDevelopment(level, component, message, safeFields);
 
   const write = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
@@ -95,7 +166,7 @@ function formatForDevelopment(
   message: string,
   fields: Record<string, unknown>,
 ): string {
-  const extra = Object.keys(fields).length > 0 ? ` ${JSON.stringify(fields)}` : "";
+  const extra = Object.keys(fields).length > 0 ? ` ${safeStringify(fields)}` : "";
   return `[${level.toUpperCase()}] [${component}] ${message}${extra}`;
 }
 

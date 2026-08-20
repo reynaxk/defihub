@@ -77,7 +77,11 @@ async function finish(
           recordsProcessed: stats?.recordsProcessed,
           recordsCreated: stats?.recordsCreated,
           recordsUpdated: stats?.recordsUpdated,
-          errorCount: stats?.errorCount ?? 0,
+          // A "partial"/"failed" outcome without an explicit count still
+          // means at least one thing went wrong - defaulting to 0 here
+          // would make an operator query like "runs with errors" (filtering
+          // on error_count > 0) silently miss those runs.
+          errorCount: stats?.errorCount ?? (outcome === "success" ? 0 : 1),
           errorSummary: stats?.errorSummary,
           metadata: stats?.metadata,
         })

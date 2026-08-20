@@ -121,6 +121,60 @@ describe("scanFromCursor", () => {
     expect(mockGetLogs).not.toHaveBeenCalled();
   });
 
+  it("scans only up to currentBlock minus confirmations, and persists that as the cursor", async () => {
+    mockGetIndexingState.mockResolvedValue(null);
+    mockGetLogs.mockResolvedValue([]);
+    const onLogs = vi.fn().mockResolvedValue(undefined);
+
+    const result = await scanFromCursor({
+      chainSlug: "ethereum",
+      component: "test-component",
+      address: "0xpool",
+      eventSignature: SWAP_EVENT,
+      currentBlock: BigInt(1000),
+      startBlock: BigInt(0),
+      confirmations: BigInt(12),
+      onLogs,
+    });
+
+    expect(result.scannedTo).toBe(BigInt(988));
+    expect(mockGetLogs).toHaveBeenCalledWith(
+      expect.objectContaining({ fromBlock: BigInt(0), toBlock: BigInt(988) }),
+    );
+    expect(mockUpdateIndexingState).toHaveBeenLastCalledWith(
+      "ethereum",
+      "test-component",
+      expect.objectContaining({ status: "idle", lastProcessedBlock: BigInt(988) }),
+    );
+  });
+
+  it("does not invert the range or advance the cursor when the confirmed head is behind the persisted cursor", async () => {
+    mockGetIndexingState.mockResolvedValue({ lastProcessedBlock: BigInt(500) });
+    const onLogs = vi.fn();
+
+    const result = await scanFromCursor({
+      chainSlug: "ethereum",
+      component: "test-component",
+      address: "0xpool",
+      eventSignature: SWAP_EVENT,
+      // A reorg (or a stale head read) puts the confirmed height behind
+      // the cursor already persisted from a prior run.
+      currentBlock: BigInt(505),
+      startBlock: BigInt(0),
+      confirmations: BigInt(12),
+      onLogs,
+    });
+
+    expect(result.logCount).toBe(0);
+    expect(onLogs).not.toHaveBeenCalled();
+    expect(mockGetLogs).not.toHaveBeenCalled();
+    expect(mockUpdateIndexingState).not.toHaveBeenCalledWith(
+      "ethereum",
+      "test-component",
+      expect.objectContaining({ lastProcessedBlock: expect.anything() }),
+    );
+  });
+
   it("marks the state as error and does not advance the cursor when onLogs throws", async () => {
     mockGetIndexingState.mockResolvedValue(null);
     mockGetLogs.mockResolvedValue([{ transactionHash: "0xabc", logIndex: 0 }]);
@@ -140,5 +194,11 @@ describe("scanFromCursor", () => {
 
     const lastCall = mockUpdateIndexingState.mock.calls.at(-1);
     expect(lastCall?.[2]).toMatchObject({ status: "error", error: "db write failed" });
+    // Not just the last call - a regression that persisted
+    // lastProcessedBlock in an earlier call before the final error-status
+    // call would otherwise still pass.
+    for (const call of mockUpdateIndexingState.mock.calls) {
+      expect(call[2]).not.toHaveProperty("lastProcessedBlock");
+    }
   });
 });

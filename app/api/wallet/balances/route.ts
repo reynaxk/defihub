@@ -69,6 +69,13 @@ async function readChainBalances(
     getNativeTokenPrice(chain.slug),
   ]);
 
+  // Tracks whether any nonzero token balance was dropped for lacking a
+  // known decimals value - that balance had real, unknown USD value, so
+  // the response's isPartial (below) must reflect it. Without this, a
+  // dropped nonzero holding made the response silently claim completeness
+  // it didn't have: aggregateUsdValues only ever sees the balances that
+  // survived, never the ones dropped before reaching it.
+  let droppedForUnknownDecimals = false;
   const tokenBalances: TokenBalance[] = trackedTokens
     .map((token, i) => {
       const balanceResult = multicallResults[i];
@@ -90,7 +97,10 @@ async function readChainBalances(
         decimalsResult && decimalsResult.status === "success"
           ? (decimalsResult.result as number)
           : token.decimals;
-      if (decimals == null) return null;
+      if (decimals == null) {
+        droppedForUnknownDecimals = true;
+        return null;
+      }
       const balanceStr = formatUnits(balance, decimals);
       return {
         symbol: token.symbol,
@@ -109,10 +119,11 @@ async function readChainBalances(
   // coverage, so it's excluded from the isPartial check the same way
   // zero-balance tokens already are (filtered out above before this point).
   const hasNativeBalance = Number(nativeBalanceStr) > 0;
-  const { total: chainTotalUsd, isPartial } = aggregateUsdValues([
+  const { total: chainTotalUsd, isPartial: isPricingPartial } = aggregateUsdValues([
     ...(hasNativeBalance ? [nativeValueUsd] : []),
     ...tokenBalances.map((t) => t.valueUsd),
   ]);
+  const isPartial = isPricingPartial || droppedForUnknownDecimals;
 
   return {
     chainSlug: chain.slug,

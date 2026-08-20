@@ -73,6 +73,56 @@ describe("logger", () => {
     expect(line).toContain("Error");
   });
 
+  it("serializes an Error stored under a field other than 'error'", () => {
+    logger.error("failed", { component: "test", lastError: new Error("wrapped boom") });
+
+    const line = errorSpy.mock.calls[0][0] as string;
+    expect(line).toContain("wrapped boom");
+  });
+
+  it("includes an Error's cause when serializing it", () => {
+    logger.error("failed", { component: "test", error: new Error("outer", { cause: new Error("inner") }) });
+
+    const line = errorSpy.mock.calls[0][0] as string;
+    expect(line).toContain("outer");
+    expect(line).toContain("inner");
+  });
+
+  it("redacts a sensitive field nested one level down", () => {
+    logger.info("config loaded", { component: "test", config: { apiKey: "sk-live-1", chain: "ethereum" } });
+
+    const line = logSpy.mock.calls[0][0] as string;
+    expect(line).not.toContain("sk-live-1");
+    expect(line).toContain("ethereum");
+  });
+
+  it("redacts credentials embedded in a URL-shaped value regardless of field name", () => {
+    logger.warn("provider failed", {
+      component: "test",
+      rpcUrl: "https://eth-mainnet.example.com/v2/super-secret-api-key-12345",
+    });
+
+    const line = warnSpy.mock.calls[0][0] as string;
+    expect(line).not.toContain("super-secret-api-key-12345");
+    expect(line).toContain("eth-mainnet.example.com");
+  });
+
+  it("does not throw when a field is a bigint, and still shows its value", () => {
+    expect(() =>
+      logger.info("scanned", { component: "test", blockNumber: BigInt(123456) }),
+    ).not.toThrow();
+
+    const line = logSpy.mock.calls[0][0] as string;
+    expect(line).toContain("123456");
+  });
+
+  it("does not throw when fields contain a circular reference", () => {
+    const circular: Record<string, unknown> = { component: "test" };
+    circular.self = circular;
+
+    expect(() => logger.info("circular", circular as never)).not.toThrow();
+  });
+
   it("calls the error hook only for error-level logs, with the same redacted entry", () => {
     const hook = vi.fn();
     setErrorHook(hook);

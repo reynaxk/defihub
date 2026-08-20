@@ -4,6 +4,7 @@ import { db } from "@/lib/database/client";
 import { onchainVerifications, protocols, chains } from "@/lib/database/schema";
 import { priceProvider } from "@/lib/providers";
 import { VIEM_CHAIN_BY_SLUG } from "@/lib/chains/rpc-client";
+import { confirmationsFor } from "@/lib/chains/confirmations";
 import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { VERIFIED_POOLS, type VerifiedPool } from "./config";
 
@@ -97,6 +98,11 @@ async function verifyPoolsOnChain(
   // persisting it. Pinning both to one explicit height keeps them
   // consistent, at the cost of one extra sequential round trip.
   //
+  // Pinned to a confirmation-adjusted height, not the raw head - the head
+  // isn't final, and a reorg would orphan it, leaving the persisted
+  // blockNumber referencing a height whose state never became canonical
+  // (so the figure couldn't be reproduced by querying it again).
+  //
   // Destructured inline (rather than pre-declared with an explicit type)
   // so viem's multicall return type is inferred from this exact call's
   // `contracts` argument - annotating the variable ahead of time via
@@ -109,7 +115,9 @@ async function verifyPoolsOnChain(
   // read, never a getBlockNumber from one provider paired with a multicall
   // retried against another.
   const chainRead = await withResilientClient(chainSlug, async (client) => {
-    const blockNumber = await client.getBlockNumber();
+    const head = await client.getBlockNumber();
+    const confirmations = confirmationsFor(chainSlug);
+    const blockNumber = head > confirmations ? head - confirmations : BigInt(0);
     const multicallResults = await client.multicall({ contracts: calls, blockNumber });
     return [multicallResults, blockNumber] as const;
   }).catch((err) => {

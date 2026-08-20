@@ -148,7 +148,15 @@ export const tokens = pgTable(
     address: varchar("address", { length: 128 }).notNull(),
     symbol: varchar("symbol", { length: 32 }).notNull(),
     name: text("name"),
-    decimals: integer("decimals").notNull().default(18),
+    // Nullable, no default - a token's decimals are either confirmed via an
+    // on-chain decimals() read (workers/tokens/sync.ts) or genuinely
+    // unknown. A NOT NULL DEFAULT 18 here previously meant every row silently
+    // claimed 18 decimals whether or not that was ever verified (CoinGecko's
+    // bulk markets endpoint, the only writer at the time, doesn't return
+    // per-token decimals at all) - wrong for most 6/8-decimal tokens (e.g.
+    // USDT/USDC). Consumers must treat null as "don't trust this for
+    // raw-unit math," never substitute an assumed value.
+    decimals: integer("decimals"),
     logoUrl: text("logo_url"),
     // Identifier used to query the CoinGecko price provider.
     coingeckoId: varchar("coingecko_id", { length: 128 }),

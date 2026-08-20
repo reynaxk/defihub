@@ -371,7 +371,10 @@ export async function getTokenChainPresence(
 export interface BalanceCheckToken {
   address: string;
   symbol: string;
-  decimals: number;
+  // Null when no confirmed decimals value exists yet (see schema.ts) -
+  // callers must not assume a default; the wallet-balances route falls back
+  // to a live on-chain read and drops the balance entirely if both fail.
+  decimals: number | null;
   logoUrl: string | null;
   priceUsd: number | null;
 }

@@ -80,12 +80,16 @@ async function readChainBalances(
       const balance = balanceResult.result as bigint;
       if (balance === BigInt(0)) return null;
       // Fall back to the DB value only if the on-chain read itself failed
-      // (e.g. a non-standard token missing decimals()) - better than
-      // dropping the balance entirely.
+      // (e.g. a non-standard token missing decimals()) - the DB value is
+      // null unless a prior sync run already confirmed it (see schema.ts),
+      // so this can still come up empty. Never assume a default (e.g. 18)
+      // in that case - drop the balance rather than risk showing a wildly
+      // wrong amount computed with the wrong number of decimals.
       const decimals =
         decimalsResult && decimalsResult.status === "success"
           ? (decimalsResult.result as number)
           : token.decimals;
+      if (decimals == null) return null;
       const balanceStr = formatUnits(balance, decimals);
       return {
         symbol: token.symbol,

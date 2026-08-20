@@ -6,6 +6,7 @@ import { tokenDiscoveryProvider } from "../../lib/providers";
 import { ProviderUnavailableError } from "../../lib/providers/types";
 import { COINGECKO_PLATFORM_TO_CHAIN_SLUG } from "../../lib/config/chains";
 import { chunk } from "../../lib/utils/chunk";
+import { fetchOnchainDecimals } from "../../lib/chains/token-decimals";
 
 const TOP_N = 250;
 const BATCH_SIZE = 500;
@@ -27,6 +28,7 @@ interface TokenDeployment {
 export async function syncTokens() {
   const chainRows = await db.select().from(chains);
   const chainIdBySlug = new Map(chainRows.map((c) => [c.slug, c.id]));
+  const chainSlugById = new Map(chainRows.map((c) => [c.id, c.slug]));
 
   let marketTokens;
   try {
@@ -71,7 +73,37 @@ export async function syncTokens() {
     }
   }
 
-  // 1. Bulk upsert tokens. RETURNING gives back one row per input tuple
+  // 1. Resolve real decimals via one multicall per chain, batching every
+  // deployment on that chain into a single RPC round trip. A chain with no
+  // viem/RPC config (non-EVM) or a chain whose RPC call fails outright
+  // simply contributes no entries here - those tokens' decimals stay
+  // unknown (null) rather than falling back to a guessed value. Per-address
+  // read failures within a successful multicall are handled the same way
+  // inside fetchOnchainDecimals itself.
+  const addressesByChainId = new Map<string, Set<string>>();
+  for (const d of deployments) {
+    const set = addressesByChainId.get(d.chainId) ?? new Set<string>();
+    set.add(d.address);
+    addressesByChainId.set(d.chainId, set);
+  }
+
+  const decimalsByKey = new Map<string, number>();
+  await Promise.all(
+    [...addressesByChainId.entries()].map(async ([chainId, addressSet]) => {
+      const slug = chainSlugById.get(chainId);
+      if (!slug) return;
+      try {
+        const resolved = await fetchOnchainDecimals(slug, [...addressSet]);
+        for (const [address, decimals] of resolved) {
+          decimalsByKey.set(`${chainId}|${address}`, decimals);
+        }
+      } catch (err) {
+        console.warn(`[tokens] decimals read failed for chain "${slug}", leaving unknown:`, err);
+      }
+    }),
+  );
+
+  // 2. Bulk upsert tokens. RETURNING gives back one row per input tuple
   // (inserted or updated), which is enough to resolve each deployment's row
   // id without a second round of SELECTs - keyed by the exact chainId+address
   // just written rather than relying on any positional correspondence to
@@ -88,6 +120,7 @@ export async function syncTokens() {
           name: d.name,
           logoUrl: d.logoUrl,
           coingeckoId: d.coingeckoId,
+          decimals: decimalsByKey.get(`${d.chainId}|${d.address}`) ?? null,
         })),
       )
       .onConflictDoUpdate({
@@ -101,6 +134,11 @@ export async function syncTokens() {
           name: sql`excluded.name`,
           logoUrl: sql`excluded.logo_url`,
           coingeckoId: sql`excluded.coingecko_id`,
+          // Prefer this run's freshly-read value, but never regress an
+          // already-confirmed decimals value to null just because this
+          // run's RPC call happened to fail - COALESCE keeps whatever's
+          // already stored when the new value is null.
+          decimals: sql`coalesce(excluded.decimals, ${tokens.decimals})`,
         },
       })
       .returning({ id: tokens.id, chainId: tokens.chainId, address: tokens.address });
@@ -110,7 +148,7 @@ export async function syncTokens() {
     }
   }
 
-  // 2. Bulk insert prices for every deployment that has one.
+  // 3. Bulk insert prices for every deployment that has one.
   const priceRows = deployments
     .filter((d): d is TokenDeployment & { priceUsd: number } => d.priceUsd != null)
     .map((d) => {

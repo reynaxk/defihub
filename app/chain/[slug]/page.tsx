@@ -125,7 +125,11 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
 
       <Card id="tvl" className="mt-8 scroll-mt-28 p-4">
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
-        <RangedAreaChart data={history.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))} />
+        <RangedAreaChart
+          data={history.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))}
+          fetchEndpoint={`/api/chains/${chain.slug}/history`}
+          valueField="tvl"
+        />
       </Card>
 
       {categoryBreakdown.length > 0 && (

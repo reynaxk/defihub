@@ -47,6 +47,7 @@ export default async function TokenDetailPage({
 
   const priceHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.priceUsd }));
   const marketCapHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.marketCap }));
+  const historyEndpoint = `/api/tokens/${token.address}/history${chainSlug ? `?chain=${chainSlug}` : ""}`;
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -127,13 +128,23 @@ export default async function TokenDetailPage({
 
       <Card className="mt-8 p-4">
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">Price history</h2>
-        <RangedAreaChart data={priceHistory} valueKind="tokenPrice" />
+        <RangedAreaChart
+          data={priceHistory}
+          valueKind="tokenPrice"
+          fetchEndpoint={historyEndpoint}
+          valueField="priceUsd"
+        />
       </Card>
 
       {marketCapHistory.some((h) => h.value != null) && (
         <Card className="mt-8 p-4">
           <h2 className="mb-2 text-sm font-medium text-muted-foreground">Market cap history</h2>
-          <RangedAreaChart data={marketCapHistory} valueKind="usd" />
+          <RangedAreaChart
+            data={marketCapHistory}
+            valueKind="usd"
+            fetchEndpoint={historyEndpoint}
+            valueField="marketCap"
+          />
         </Card>
       )}
     </div>

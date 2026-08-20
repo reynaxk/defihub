@@ -1,4 +1,4 @@
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chainMetrics, chains, protocolMetrics, protocols } from "@/lib/database/schema";
 import { computeTvlChanges } from "./tvl-change";
@@ -82,15 +82,51 @@ export async function getGlobalTvlHistory(): Promise<{ timestamp: Date; tvl: num
   return rows.map((r) => ({ timestamp: new Date(r.day), tvl: Number(r.tvl) }));
 }
 
+// A single indexed id lookup, for callers (the history API route) that
+// only need the id to run a bounded range query - avoids pulling a whole
+// history window via getChainBySlug just to discover it.
+export async function getChainIdBySlug(slug: string): Promise<string | null> {
+  const [row] = await db.select({ id: chains.id }).from(chains).where(eq(chains.slug, slug));
+  return row?.id ?? null;
+}
+
+export interface ChainHistoryPoint {
+  timestamp: Date;
+  tvl: number | null;
+}
+
+// Pushes the requested range down into the query instead of fetching every
+// row ever synced and filtering client-side - `since: null` means no lower
+// bound (the chart's "all" range). Shared by getChainBySlug (bounded below)
+// and the range-switching history API route
+// (app/api/chains/[slug]/history).
+export async function getChainHistory(chainId: string, since: Date | null): Promise<ChainHistoryPoint[]> {
+  const conditions = [eq(chainMetrics.chainId, chainId)];
+  if (since) conditions.push(gte(chainMetrics.timestamp, since));
+
+  const rows = await db
+    .select({ timestamp: chainMetrics.timestamp, tvl: chainMetrics.tvl })
+    .from(chainMetrics)
+    .where(and(...conditions))
+    .orderBy(chainMetrics.timestamp);
+
+  return rows.map((h) => ({ timestamp: h.timestamp, tvl: h.tvl != null ? Number(h.tvl) : null }));
+}
+
+// A few days more than RangedAreaChart's own 30-day default range (see the
+// identical constant in queries/protocols.ts) - this history also feeds
+// computeTvlChanges below, whose 30d window needs a real data point at
+// least ~21 days back (its own 0.7 tolerance) to resolve. The extra margin
+// keeps that safely inside the fetched window rather than exactly at its
+// edge.
+const DEFAULT_HISTORY_DAYS = 35;
+
 export async function getChainBySlug(slug: string) {
   const [chain] = await db.select().from(chains).where(eq(chains.slug, slug));
   if (!chain) return null;
 
-  const history = await db
-    .select({ timestamp: chainMetrics.timestamp, tvl: chainMetrics.tvl })
-    .from(chainMetrics)
-    .where(eq(chainMetrics.chainId, chain.id))
-    .orderBy(chainMetrics.timestamp);
+  const since = new Date(Date.now() - DEFAULT_HISTORY_DAYS * 24 * 60 * 60 * 1000);
+  const history = await getChainHistory(chain.id, since);
 
   const latestTs = await db
     .select({ ts: sql<Date>`max(${protocolMetrics.timestamp})`.as("ts") })
@@ -123,14 +159,9 @@ export async function getChainBySlug(slug: string) {
           .limit(50)
       : [];
 
-  const normalizedHistory = history.map((h) => ({
-    timestamp: h.timestamp,
-    tvl: h.tvl != null ? Number(h.tvl) : null,
-  }));
-
   return {
     chain,
-    history: normalizedHistory,
+    history,
     topProtocols: topProtocols.map((p) => ({
       ...p,
       tvl: p.tvl != null ? Number(p.tvl) : null,
@@ -140,8 +171,8 @@ export async function getChainBySlug(slug: string) {
       tvlChange1d: null,
       tvlChange7d: null,
     })),
-    latestTvl: normalizedHistory.length > 0 ? normalizedHistory[normalizedHistory.length - 1].tvl : null,
-    changes: computeTvlChanges(normalizedHistory),
+    latestTvl: history.length > 0 ? history[history.length - 1].tvl : null,
+    changes: computeTvlChanges(history),
   };
 }
 

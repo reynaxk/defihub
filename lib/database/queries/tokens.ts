@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, tokenPrices, tokens } from "@/lib/database/schema";
 import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
@@ -294,6 +294,59 @@ export interface TokenDetail {
   latest: TokenPricePoint | null;
 }
 
+// A single indexed id lookup, for callers (the history API route) that
+// only need the id to run a bounded range query - avoids pulling a whole
+// history window via getTokenByAddress just to discover it. Mirrors that
+// function's chain-disambiguation logic (see its own comment).
+export async function getTokenIdByAddress(address: string, chainSlug?: string): Promise<string | null> {
+  const conditions = [eq(tokens.address, address)];
+  if (chainSlug) conditions.push(eq(chains.slug, chainSlug));
+
+  const [row] = await db
+    .select({ id: tokens.id })
+    .from(tokens)
+    .innerJoin(chains, eq(chains.id, tokens.chainId))
+    .where(and(...conditions))
+    .orderBy(chains.slug)
+    .limit(1);
+
+  return row?.id ?? null;
+}
+
+// Pushes the requested range down into the query instead of fetching every
+// price snapshot ever synced and filtering client-side - `since: null`
+// means no lower bound (the chart's "all" range). Shared by
+// getTokenByAddress (bounded to the chart's own default range below) and
+// the range-switching history API route (app/api/tokens/[address]/history).
+export async function getTokenHistory(tokenId: string, since: Date | null): Promise<TokenPricePoint[]> {
+  const conditions = [eq(tokenPrices.tokenId, tokenId)];
+  if (since) conditions.push(gte(tokenPrices.timestamp, since));
+
+  const rows = await db
+    .select({
+      timestamp: tokenPrices.timestamp,
+      priceUsd: tokenPrices.priceUsd,
+      marketCap: tokenPrices.marketCap,
+      volume24h: tokenPrices.volume24h,
+      priceChange24h: tokenPrices.priceChange24h,
+    })
+    .from(tokenPrices)
+    .where(and(...conditions))
+    .orderBy(tokenPrices.timestamp);
+
+  return rows.map((h) => ({
+    timestamp: h.timestamp,
+    priceUsd: h.priceUsd != null ? Number(h.priceUsd) : null,
+    marketCap: h.marketCap != null ? Number(h.marketCap) : null,
+    volume24h: h.volume24h != null ? Number(h.volume24h) : null,
+    priceChange24h: h.priceChange24h != null ? Number(h.priceChange24h) : null,
+  }));
+}
+
+// Matches RangedAreaChart's own default range - see the identical constant
+// and reasoning in queries/protocols.ts.
+const DEFAULT_HISTORY_DAYS = 30;
+
 // A contract address is only unique per-chain (not globally) - two chains
 // can share the same deterministically-deployed address for a bridged
 // token - so an optional chainSlug disambiguates when the address alone
@@ -318,25 +371,8 @@ export async function getTokenByAddress(address: string, chainSlug?: string): Pr
 
   if (!row) return null;
 
-  const history = await db
-    .select({
-      timestamp: tokenPrices.timestamp,
-      priceUsd: tokenPrices.priceUsd,
-      marketCap: tokenPrices.marketCap,
-      volume24h: tokenPrices.volume24h,
-      priceChange24h: tokenPrices.priceChange24h,
-    })
-    .from(tokenPrices)
-    .where(eq(tokenPrices.tokenId, row.token.id))
-    .orderBy(tokenPrices.timestamp);
-
-  const normalizedHistory: TokenPricePoint[] = history.map((h) => ({
-    timestamp: h.timestamp,
-    priceUsd: h.priceUsd != null ? Number(h.priceUsd) : null,
-    marketCap: h.marketCap != null ? Number(h.marketCap) : null,
-    volume24h: h.volume24h != null ? Number(h.volume24h) : null,
-    priceChange24h: h.priceChange24h != null ? Number(h.priceChange24h) : null,
-  }));
+  const since = new Date(Date.now() - DEFAULT_HISTORY_DAYS * 24 * 60 * 60 * 1000);
+  const normalizedHistory = await getTokenHistory(row.token.id, since);
 
   return {
     token: row.token,

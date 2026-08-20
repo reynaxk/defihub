@@ -10,6 +10,17 @@ export type WatchTarget =
   | { tokenId: string }
   | { yieldPoolId: string };
 
+// A stable string identity for a target, independent of initialWatching's
+// value - two different entities can coincidentally share the same
+// initialWatching (e.g. both unwatched), which a value-only comparison
+// can't tell apart from "still the same entity".
+export function targetKey(target: WatchTarget): string {
+  if ("protocolId" in target) return `protocol:${target.protocolId}`;
+  if ("chainId" in target) return `chain:${target.chainId}`;
+  if ("tokenId" in target) return `token:${target.tokenId}`;
+  return `pool:${target.yieldPoolId}`;
+}
+
 // Shared toggle/resync/toast logic behind WatchIconButton (compact, for
 // table rows) and WatchlistButton (labeled, for detail-page headers) -
 // previously two near-identical copies of this same state machine.
@@ -25,25 +36,32 @@ export function useWatchToggle({
   const router = useRouter();
   const [watching, setWatching] = useState(initialWatching);
   const [isPending, startTransition] = useTransition();
-  const lastInitialWatching = useRef(initialWatching);
+  const key = targetKey(target);
+  const lastSeen = useRef({ key, initialWatching });
 
-  // Resyncs local state when initialWatching changes for a reason other
-  // than this component's own toggle below - e.g. a client-side <Link>
-  // navigation between entities (WatchlistButton is reconciled as the same
-  // component instance across that, not remounted, since nothing keys it
-  // to the specific entity), or the account's watch state changing
-  // elsewhere and this list re-fetching after a filter change
-  // (WatchIconButton, keyed by the entity's stable id but not remounted
-  // just because the surrounding table re-renders). The ref guard makes
-  // this a no-op right after this component's own successful toggle,
+  // Resyncs local state whenever either the target entity itself changes
+  // (e.g. a client-side <Link> navigation between entities - WatchlistButton
+  // is reconciled as the same component instance across that, not
+  // remounted, since nothing keys it to the specific entity) or, for the
+  // same entity, initialWatching's value changes (the account's watch state
+  // changing elsewhere and this list re-fetching after a filter change -
+  // WatchIconButton, keyed by the entity's stable id but not remounted just
+  // because the surrounding table re-renders).
+  //
+  // Comparing the target's key here, not just initialWatching's value, is
+  // required: two different entities can coincidentally share the same
+  // initialWatching (e.g. both unwatched). A value-only comparison would
+  // treat that as "nothing changed" and leave stale local state - from a
+  // toggle on the PREVIOUS entity - applied to the new one. The ref guard
+  // makes this a no-op right after this component's own successful toggle,
   // since local state already matches by the time any later prop change
   // would arrive.
   useEffect(() => {
-    if (lastInitialWatching.current !== initialWatching) {
-      lastInitialWatching.current = initialWatching;
+    if (lastSeen.current.key !== key || lastSeen.current.initialWatching !== initialWatching) {
+      lastSeen.current = { key, initialWatching };
       setWatching(initialWatching);
     }
-  }, [initialWatching]);
+  }, [key, initialWatching]);
 
   function toggle(e?: React.SyntheticEvent) {
     // Guards needed when this is nested inside a <Link> (table rows) -

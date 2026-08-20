@@ -30,6 +30,7 @@ export function useEntitySearch() {
   const [query, setQuery] = useState("");
   const [rawResults, setRawResults] = useState<SearchResult[]>([]);
   const [rawLoading, setRawLoading] = useState(false);
+  const [searchFailed, setSearchFailed] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -51,16 +52,32 @@ export function useEntitySearch() {
     const controller = new AbortController();
     debounceRef.current = setTimeout(async () => {
       setRawLoading(true);
+      setSearchFailed(false);
       try {
         const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
-        if (res.ok) {
-          const data = await res.json();
-          setRawResults(data.results ?? []);
-          setHighlightedIndex(-1);
+        if (!res.ok) {
+          // A real failure (rate limit, 500, etc.) reads very differently
+          // from "no matches" - conflating the two would tell the user
+          // their search came up empty when the request never actually
+          // completed. Whatever the previous successful query's results
+          // were stays on screen rather than being cleared.
+          setSearchFailed(true);
+          return;
         }
-      } catch {
-        // Aborted by a newer query, or a real network failure - either way
-        // there's nothing to show for this specific request.
+        const data = await res.json();
+        setRawResults(data.results ?? []);
+        setHighlightedIndex(-1);
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          // Superseded by a newer query - that request's own run of this
+          // effect owns updating state from here. Explicitly a no-op: the
+          // previous (still valid) results and highlight stay exactly as
+          // they were, not cleared just because this stale request didn't
+          // finish.
+          return;
+        }
+        // A genuine network failure (offline, DNS, CORS, etc.), not abort.
+        setSearchFailed(true);
       } finally {
         setRawLoading(false);
       }
@@ -73,13 +90,19 @@ export function useEntitySearch() {
 
   const results = queryLongEnough ? rawResults : [];
   const loading = queryLongEnough && rawLoading;
+  const failed = queryLongEnough && searchFailed;
   const groups = groupResults(results);
   // Keyboard nav and aria-activedescendant index into rendering order
   // (grouped by kind), not the raw API response order - those can differ,
   // and a mismatch there would highlight one item while Enter selects
-  // another.
+  // another. Keyed by object identity (the same SearchResult reference
+  // appears in both `flatResults` and its group's `items`), not a
+  // `kind-href` string: two results could in principle collide on that
+  // composite (e.g. a data quality issue upstream returning the same
+  // entity twice), which would corrupt this lookup and duplicate React
+  // keys. Identity can't collide - every entry is a distinct object.
   const flatResults = groups.flatMap((g) => g.items);
-  const flatIndexByKey = new Map(flatResults.map((item, i) => [`${item.kind}-${item.href}`, i]));
+  const flatIndexByItem = new Map(flatResults.map((item, i) => [item, i]));
 
   function reset() {
     setQuery("");
@@ -115,9 +138,10 @@ export function useEntitySearch() {
     setQuery,
     queryLongEnough,
     loading,
+    failed,
     groups,
     flatResults,
-    flatIndexByKey,
+    flatIndexByItem,
     highlightedIndex,
     setHighlightedIndex,
     selectResult,

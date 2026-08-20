@@ -22,16 +22,33 @@ export function SectionNav({ sections }: { sections: SectionNavItem[] }) {
       .filter((el): el is HTMLElement => el !== null);
     if (elements.length === 0) return;
 
+    // A given callback's `entries` only contains targets whose intersection
+    // state *changed* since the last callback, not every currently-
+    // intersecting target - so picking straight from `entries` can miss a
+    // section that's still intersecting from an earlier callback, or (when
+    // several targets change in one batch) pick one that isn't actually
+    // the topmost. Maintaining the full current set across callbacks and
+    // re-deriving "closest to top" from it every time - by walking
+    // `sections` in its given (document/visual) order and taking the first
+    // id present in the set - is robust to both.
+    const intersectingIds = new Set<string>();
+
+    function updateActiveFromIntersecting() {
+      const topmost = sections.find((s) => intersectingIds.has(s.id));
+      if (topmost) setActiveId(topmost.id);
+    }
+
     // rootMargin biases toward the upper portion of the viewport (below
     // the sticky navbar + this nav itself) so a section is marked active
     // once it reaches that band, not only once it's the sole thing
     // visible.
     const observer = new IntersectionObserver(
       (entries) => {
-        const intersecting = entries.filter((e) => e.isIntersecting);
-        if (intersecting.length > 0) {
-          setActiveId(intersecting[0].target.id);
+        for (const entry of entries) {
+          if (entry.isIntersecting) intersectingIds.add(entry.target.id);
+          else intersectingIds.delete(entry.target.id);
         }
+        updateActiveFromIntersecting();
       },
       { rootMargin: "-112px 0px -70% 0px" },
     );
@@ -52,6 +69,23 @@ export function SectionNav({ sections }: { sections: SectionNavItem[] }) {
       observer.disconnect();
       window.removeEventListener("scroll", onScroll);
     };
+  }, [sections]);
+
+  // Keeps the highlighted pill in sync with browser Back/Forward: this
+  // component updates the URL itself via history.pushState (see
+  // scrollToSection below), which doesn't fire a hashchange event and
+  // isn't guaranteed to re-trigger the IntersectionObserver in every
+  // browser's scroll-restoration timing - reading the hash directly off a
+  // popstate event is the authoritative signal independent of that.
+  useEffect(() => {
+    function onPopState() {
+      const hash = window.location.hash.slice(1);
+      if (hash && sections.some((s) => s.id === hash)) {
+        setActiveId(hash);
+      }
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
   }, [sections]);
 
   function scrollToSection(id: string) {

@@ -5,37 +5,12 @@ import { checkRateLimit } from "@/lib/security/rate-limit";
 import { getNativeTokenPrice, getTokensForBalanceCheck } from "@/lib/database/queries/tokens";
 import { EVM_CHAINS, VIEM_CHAIN_BY_SLUG, rpcUrlFor } from "@/lib/chains/rpc-client";
 import { aggregateUsdValues, computeValueUsd } from "@/lib/wallet/valuation";
+import type { ChainBalanceResult, ChainResult, TokenBalance, WalletBalancesResponse } from "@/lib/wallet/types";
 
 // Each request fans out to 7 chains' RPC endpoints (1 native balance + 1
 // multicall each) - modest per-user cap since this is real external RPC
 // load, not a free local computation.
 const BALANCE_CHECK_LIMIT = { limit: 20, windowMs: 60 * 1000 };
-
-interface TokenBalance {
-  symbol: string;
-  address: string;
-  logoUrl: string | null;
-  balance: string;
-  priceUsd: number | null;
-  valueUsd: number | null;
-}
-
-interface ChainBalanceResult {
-  chainSlug: string;
-  chainName: string;
-  nativeToken: string;
-  nativeBalance: string;
-  nativePriceUsd: number | null;
-  nativeValueUsd: number | null;
-  tokenBalances: TokenBalance[];
-  // null (not 0) when there's a real balance but no tracked price covers any
-  // of it - a $0 total would read as "worth nothing" instead of "unknown".
-  chainTotalUsd: number | null;
-  // True when this chain holds at least one asset (native or token) with no
-  // tracked price - chainTotalUsd still sums whatever IS priced, this flag
-  // is what tells the UI that number is not the whole picture.
-  isPartial: boolean;
-}
 
 async function readChainBalances(
   chain: (typeof EVM_CHAINS)[number],
@@ -147,12 +122,6 @@ async function readChainBalances(
   };
 }
 
-interface ChainBalanceError {
-  chainSlug: string;
-  chainName: string;
-  error: string;
-}
-
 export async function GET(request: Request) {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -182,7 +151,7 @@ export async function GET(request: Request) {
   // previously hid a real config bug (missing multicall3 contract address)
   // behind "couldn't reach this chain" for every chain, making it far
   // harder to diagnose than it needed to be.
-  const chains: (ChainBalanceResult | ChainBalanceError)[] = settled.map((result, i) => {
+  const chains: ChainResult[] = settled.map((result, i) => {
     if (result.status === "fulfilled") return result.value;
     console.error(`[wallet-balances] ${EVM_CHAINS[i].slug} failed:`, result.reason);
     return { chainSlug: EVM_CHAINS[i].slug, chainName: EVM_CHAINS[i].name, error: "Couldn't reach this chain" };
@@ -198,5 +167,6 @@ export async function GET(request: Request) {
   // that on its own.
   const isPartial = anyChainFullyUnpriced || okChains.some((c) => c.isPartial);
 
-  return NextResponse.json({ address, chains, totalUsd, isPartial });
+  const response: WalletBalancesResponse = { address, chains, totalUsd, isPartial };
+  return NextResponse.json(response);
 }

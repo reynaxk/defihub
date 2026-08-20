@@ -8,43 +8,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { AnimatedNumber } from "@/components/stats/animated-number";
 import { ConnectWalletButton } from "@/components/wallet/connect-wallet-button";
 import { formatUsd } from "@/lib/format";
-
-interface TokenBalance {
-  symbol: string;
-  address: string;
-  logoUrl: string | null;
-  balance: string;
-  priceUsd: number | null;
-  valueUsd: number | null;
-}
-
-interface ChainBalanceResult {
-  chainSlug: string;
-  chainName: string;
-  nativeToken: string;
-  nativeBalance: string;
-  nativePriceUsd: number | null;
-  nativeValueUsd: number | null;
-  tokenBalances: TokenBalance[];
-  chainTotalUsd: number | null;
-  isPartial: boolean;
-}
-
-interface ChainBalanceError {
-  chainSlug: string;
-  chainName: string;
-  error: string;
-}
-
-type ChainResult = ChainBalanceResult | ChainBalanceError;
+import type { ChainBalanceError, ChainResult, WalletBalancesResponse } from "@/lib/wallet/types";
 
 function isError(chain: ChainResult): chain is ChainBalanceError {
   return "error" in chain;
 }
 
-async function fetchBalances(
-  address: string,
-): Promise<{ address: string; chains: ChainResult[]; totalUsd: number | null; isPartial: boolean }> {
+async function fetchBalances(address: string): Promise<WalletBalancesResponse> {
   const res = await fetch(`/api/wallet/balances?address=${address}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -69,10 +39,19 @@ function ChainCard({ chain }: { chain: ChainResult }) {
     <Card className="p-4">
       <div className="flex items-center justify-between">
         <p className="font-medium">{chain.chainName}</p>
-        {chain.chainTotalUsd != null && (
+        {hasAnyBalance && (
           <p className="tabular-nums text-sm font-medium text-muted-foreground">
-            {formatUsd(chain.chainTotalUsd)}
-            {chain.isPartial && <span className="ml-1 font-normal">(partial)</span>}
+            {chain.chainTotalUsd != null ? (
+              <>
+                {formatUsd(chain.chainTotalUsd)}
+                {chain.isPartial && <span className="ml-1 font-normal">(partial)</span>}
+              </>
+            ) : (
+              // A real balance exists here but nothing on this chain has a
+              // tracked price - say so explicitly rather than just leaving
+              // this space blank, which reads as a bug rather than "unknown".
+              <span className="font-normal">Unavailable</span>
+            )}
           </p>
         )}
       </div>
@@ -157,17 +136,29 @@ export function WalletDashboard() {
 
       {data && (
         <>
-          {data.totalUsd != null && (
+          {data.chains.some(
+            (chain) => !isError(chain) && (Number(chain.nativeBalance) > 0 || chain.tokenBalances.length > 0),
+          ) && (
             <Card className="mt-4 p-4">
               <p className="text-sm text-muted-foreground">
                 Total value{data.isPartial && " (partial)"}
               </p>
-              <p className="mt-1 text-3xl font-semibold tracking-tight tabular-nums">
-                <AnimatedNumber value={data.totalUsd} format="usd" />
-              </p>
+              {data.totalUsd != null ? (
+                <p className="mt-1 text-3xl font-semibold tracking-tight tabular-nums">
+                  <AnimatedNumber value={data.totalUsd} format="usd" />
+                </p>
+              ) : (
+                // Real holdings exist somewhere in this wallet, but nothing
+                // priced covers any of them - say so explicitly instead of
+                // hiding the card, which would look like the feature is
+                // broken rather than "we don't have price data yet".
+                <p className="mt-1 text-3xl font-semibold tracking-tight text-muted-foreground">Unavailable</p>
+              )}
               <p className="mt-1 text-xs text-muted-foreground">
-                {data.isPartial &&
-                  "Some held assets have no tracked price yet, so this total doesn't cover everything. "}
+                {data.totalUsd == null
+                  ? "None of your held assets have a tracked price yet. "
+                  : data.isPartial &&
+                    "Some held assets have no tracked price yet, so this total doesn't cover everything. "}
                 24h change: not yet available — DeFiHub doesn&apos;t track historical wallet snapshots.
               </p>
             </Card>

@@ -18,8 +18,9 @@ export function SearchBox({ className }: { className?: string }) {
     setQuery,
     queryLongEnough,
     loading,
+    failed,
     groups,
-    flatIndexByKey,
+    flatIndexByItem,
     highlightedIndex,
     handleKeyDown,
     reset,
@@ -97,7 +98,12 @@ export function SearchBox({ className }: { className?: string }) {
               Searching…
             </div>
           )}
-          {!loading && groups.length === 0 && (
+          {!loading && failed && (
+            <div role="status" className="px-3 py-4 text-center text-sm text-destructive">
+              Search failed. Try again.
+            </div>
+          )}
+          {!loading && !failed && groups.length === 0 && (
             <div role="status" className="px-3 py-4 text-center text-sm text-muted-foreground">
               No matches for &ldquo;{query}&rdquo;
             </div>
@@ -122,10 +128,10 @@ export function SearchBox({ className }: { className?: string }) {
                     {KIND_LABELS[group.kind]}
                   </div>
                   {group.items.map((item) => {
-                    const flatIndex = flatIndexByKey.get(`${item.kind}-${item.href}`);
+                    const flatIndex = flatIndexByItem.get(item);
                     return (
                       <Link
-                        key={`${item.kind}-${item.href}`}
+                        key={`${item.kind}-${item.href}-${flatIndex}`}
                         id={`${listboxId}-option-${flatIndex}`}
                         role="option"
                         aria-selected={highlightedIndex === flatIndex}

@@ -158,15 +158,22 @@ export default async function DashboardPage() {
           <div className="mt-3 flex flex-col gap-2">
             {recentlyTriggered.map((alert) => (
               <Card key={alert.id} className="p-3 text-sm">
-                <span className="font-medium">{ALERT_TYPE_LABELS[alert.type] ?? alert.type}</span> for{" "}
-                <span className="font-medium">{alert.target}</span>{" "}
-                {CONDITION_LABELS[alert.condition] ?? alert.condition}{" "}
-                {Number(alert.threshold).toLocaleString("en-US")}
-                {alert.condition.startsWith("percent_change") ? "%" : ""}
-                <span className="text-muted-foreground">
-                  {" "}
-                  — {formatDistanceToNow(alert.lastTriggeredAt!, { addSuffix: true })}
-                </span>
+                {/* Card's root is flex flex-col, so every direct child - including
+                    bare text nodes between spans - becomes its own stacked flex
+                    item instead of flowing as one sentence. Wrapping the whole
+                    thing in a single <p> keeps it as one flex child, with normal
+                    inline flow inside. */}
+                <p>
+                  <span className="font-medium">{ALERT_TYPE_LABELS[alert.type] ?? alert.type}</span> for{" "}
+                  <span className="font-medium">{alert.target}</span>{" "}
+                  {CONDITION_LABELS[alert.condition] ?? alert.condition}{" "}
+                  {Number(alert.threshold).toLocaleString("en-US")}
+                  {alert.condition.startsWith("percent_change") ? "%" : ""}
+                  <span className="text-muted-foreground">
+                    {" "}
+                    — {formatDistanceToNow(alert.lastTriggeredAt!, { addSuffix: true })}
+                  </span>
+                </p>
               </Card>
             ))}
           </div>

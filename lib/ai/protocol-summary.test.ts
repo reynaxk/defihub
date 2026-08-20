@@ -21,7 +21,7 @@ async function seedSummary(tvlAtGeneration: number | null) {
 
   await db.insert(protocolAiSummaries).values({
     protocolId: protocol.id,
-    content: "A test summary.",
+    content: JSON.stringify({ overview: "A test summary.", insights: [], risks: [], opportunities: [] }),
     model: "test-model",
     tvlAtGeneration: tvlAtGeneration != null ? tvlAtGeneration.toFixed(2) : null,
   });
@@ -55,7 +55,7 @@ describe("getCachedProtocolSummary", () => {
 
     const result = await getCachedProtocolSummary(id, 1_000_000);
     expect(result).not.toBeNull();
-    expect(result?.content).toBe("A test summary.");
+    expect(result?.sections.overview).toBe("A test summary.");
   });
 
   it("stays fresh when the TVL baseline was zero and current TVL is still zero", async () => {

@@ -1,42 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth/config";
-
-const PROTECTED_PREFIXES = ["/dashboard", "/alerts", "/settings", "/wallet"];
-
-function buildCsp(nonce: string): string {
-  const isDev = process.env.NODE_ENV === "development";
-  // style-src stays permissive: Base UI (this app's component primitives)
-  // positions popovers/dropdowns/selects via inline `style` attributes set
-  // from JS, which a nonce can't cover (nonces only apply to <style>
-  // tags/elements present in markup, not runtime style mutations) - the
-  // realistic alternative to 'unsafe-inline' here is breaking every
-  // floating-UI component, not a meaningfully more secure app.
-  //
-  // script-src deliberately omits 'strict-dynamic': verified via a real
-  // dark-mode QA pass that Turbopack's dynamically-injected chunk scripts
-  // don't propagate the nonce in a way strict-dynamic's trust model
-  // accepts, so legitimate same-origin chunks (e.g. the table component)
-  // were being blocked outright. 'self' + the nonce (no strict-dynamic)
-  // still blocks third-party and injected inline scripts - the actual XSS
-  // defense goal - without breaking the app's own bundle.
-  return [
-    "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}'${isDev ? " 'unsafe-eval'" : ""}`,
-    "style-src 'self' 'unsafe-inline'",
-    // icons.llamao.fi serves protocol/chain logos (DefiLlama); coin-images.
-    // coingecko.com serves token logos (CoinGecko); lh3.googleusercontent.com
-    // serves Google account profile pictures (session.user.image, when
-    // signed in via Google) - all real, live image sources this app
-    // renders, not a speculative allowance.
-    "img-src 'self' data: https://icons.llamao.fi https://coin-images.coingecko.com https://lh3.googleusercontent.com",
-    "font-src 'self' data:",
-    "connect-src 'self'",
-    "object-src 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-    "frame-ancestors 'none'",
-  ].join("; ");
-}
+import { PROTECTED_PREFIXES, buildCsp } from "@/lib/security/csp";
 
 export const proxy = auth((req) => {
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
@@ -61,9 +25,32 @@ export const proxy = auth((req) => {
 });
 
 export const config = {
+  // Previously excluded all of /api/* - the X-Ray audit flagged this as a
+  // structural gap: JSON API responses never got the CSP/security headers
+  // every page response does, relying entirely on each route's own auth()
+  // check for protection with zero shared defense-in-depth. Widening this
+  // to cover /api/* doesn't add any new *behavior* to those routes -
+  // PROTECTED_PREFIXES above only matches page paths (/dashboard, /alerts,
+  // /settings, /wallet - never anything starting with /api), so no
+  // redirect-to-login logic newly applies to API responses. It just means
+  // the same CSP header (harmless/inert for JSON consumers - CSP is a
+  // browser-rendering concept) and other security headers now land on
+  // every response, not only HTML ones. Each route's own CORS headers
+  // (lib/api/response.ts, for the public /api/v1/* + /api/export/* API)
+  // are set by the route handler itself and are unaffected - middleware
+  // and route-handler response headers merge, they don't replace each
+  // other. Verified live: public API CORS headers, wallet-balances auth,
+  // and the credentials sign-in flow all still work unchanged.
+  //
+  // `source` must be a literal string here, not a reference to an imported
+  // constant - Next.js statically parses this exported `config` object at
+  // build time without executing the module, and rejects anything it can't
+  // read as a literal. lib/security/csp.ts's MATCHER_SOURCE holds the same
+  // string for csp.test.ts to build a real RegExp from; keep the two in
+  // sync by hand if this ever changes.
   matcher: [
     {
-      source: "/((?!api|_next/static|_next/image|favicon.ico).*)",
+      source: "/((?!_next/static|_next/image|favicon.ico).*)",
       missing: [
         { type: "header", key: "next-router-prefetch" },
         { type: "header", key: "purpose", value: "prefetch" },

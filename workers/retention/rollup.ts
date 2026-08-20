@@ -2,6 +2,8 @@ import "dotenv/config";
 import { count, sql } from "drizzle-orm";
 import { closeDb, db } from "../../lib/database/client";
 import { chainMetrics, protocolMetrics, tokenPrices } from "../../lib/database/schema";
+import { logger } from "../../lib/observability/logger";
+import { withSyncRun } from "../../lib/observability/sync-run";
 
 // Retention policy for the three append-only time-series tables
 // (chain_metrics, protocol_metrics, token_prices), which otherwise grow
@@ -40,6 +42,18 @@ async function rowCount(table: typeof chainMetrics | typeof protocolMetrics | ty
 }
 
 export async function rollupMetrics(): Promise<RollupStats> {
+  return withSyncRun("rollup-metrics", async () => {
+    const stats = await runRollup();
+    const totalRemoved =
+      stats.chainMetrics.before -
+      stats.chainMetrics.after +
+      (stats.protocolMetrics.before - stats.protocolMetrics.after) +
+      (stats.tokenPrices.before - stats.tokenPrices.after);
+    return { result: stats, stats: { recordsProcessed: totalRemoved, metadata: { ...stats } } };
+  });
+}
+
+async function runRollup(): Promise<RollupStats> {
   const before = {
     chainMetrics: await rowCount(chainMetrics),
     protocolMetrics: await rowCount(protocolMetrics),
@@ -103,11 +117,7 @@ export async function rollupMetrics(): Promise<RollupStats> {
     tokenPrices: { before: before.tokenPrices, after: after.tokenPrices },
   };
 
-  console.log(
-    `[retention] chain_metrics ${stats.chainMetrics.before} -> ${stats.chainMetrics.after}, ` +
-      `protocol_metrics ${stats.protocolMetrics.before} -> ${stats.protocolMetrics.after}, ` +
-      `token_prices ${stats.tokenPrices.before} -> ${stats.tokenPrices.after}`,
-  );
+  logger.info("rollup complete", { component: "retention", metadata: stats });
 
   return stats;
 }
@@ -116,7 +126,7 @@ if (require.main === module) {
   rollupMetrics()
     .then(() => closeDb())
     .catch(async (err) => {
-      console.error("[retention] rollup failed:", err);
+      logger.error("rollup failed", { component: "retention", error: err });
       await closeDb();
       process.exitCode = 1;
     });

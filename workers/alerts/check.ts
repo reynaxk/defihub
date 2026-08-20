@@ -15,6 +15,8 @@ import {
 import { evaluateCondition } from "../../lib/alerts/evaluate";
 import { sendEmail } from "../../lib/notifications/email";
 import { escapeHtml } from "../../lib/utils/html";
+import { logger } from "../../lib/observability/logger";
+import { withSyncRun } from "../../lib/observability/sync-run";
 
 interface CurrentAndPrevious {
   current: number;
@@ -172,88 +174,92 @@ function alertEmailHtml(params: {
 </html>`;
 }
 
-export async function checkAlerts() {
-  const enabledAlerts = await db
-    .select({ alert: alerts, userEmail: users.email })
-    .from(alerts)
-    .innerJoin(users, eq(alerts.userId, users.id))
-    .where(eq(alerts.enabled, true));
+export async function checkAlerts(): Promise<void> {
+  await withSyncRun("alerts", async () => {
+    const enabledAlerts = await db
+      .select({ alert: alerts, userEmail: users.email })
+      .from(alerts)
+      .innerJoin(users, eq(alerts.userId, users.id))
+      .where(eq(alerts.enabled, true));
 
-  console.log(`[alerts] checking ${enabledAlerts.length} enabled alerts`);
-  let triggered = 0;
+    logger.info("checking enabled alerts", { component: "alerts", recordsProcessed: enabledAlerts.length });
+    let triggered = 0;
 
-  for (const { alert, userEmail } of enabledAlerts) {
-    let reading: CurrentAndPrevious | null = null;
-    switch (alert.type) {
-      case "protocol_tvl":
-        reading = await readProtocolTvl(alert.target);
-        break;
-      case "chain_tvl":
-        reading = await readChainTvl(alert.target);
-        break;
-      case "token_price":
-        reading = await readTokenPrice(alert.target);
-        break;
-      case "pool_apy":
-        reading = await readPoolApy(alert.target);
-        break;
-    }
-
-    await db.update(alerts).set({ lastCheckedAt: new Date() }).where(eq(alerts.id, alert.id));
-
-    if (!reading) continue;
-
-    const fires = evaluateCondition(
-      alert.condition,
-      reading.current,
-      Number(alert.threshold),
-      reading.previous,
-    );
-
-    // Only email on a false->true transition, not every 10-minute tick the
-    // condition still holds - an "above $X" alert typically stays above $X
-    // for hours/days once crossed, so without this check every enabled
-    // alert would re-send an email every single run for as long as its
-    // condition remains true. isFiring tracks the condition's state as of
-    // the last check (updated below regardless of outcome) independently of
-    // lastTriggeredAt, which stays "the last time we actually emailed".
-    if (fires && !alert.isFiring) {
-      const sent = await sendEmail({
-        to: userEmail,
-        subject: `DeFiHub alert: ${reading.displayName}`,
-        html: alertEmailHtml({
-          displayName: reading.displayName,
-          current: reading.current,
-          threshold: Number(alert.threshold),
-          condition: alert.condition,
-          appUrl: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
-        }),
-      });
-      // isFiring only flips to true once the email actually sent - if
-      // Resend failed, this alert is left exactly as it was so the next
-      // run's `fires && !alert.isFiring` check is still true and retries
-      // it, instead of a failed send silently being treated the same as a
-      // delivered one and never being retried.
-      if (sent) {
-        await db
-          .update(alerts)
-          .set({ isFiring: true, lastTriggeredAt: new Date() })
-          .where(eq(alerts.id, alert.id));
-        triggered++;
+    for (const { alert, userEmail } of enabledAlerts) {
+      let reading: CurrentAndPrevious | null = null;
+      switch (alert.type) {
+        case "protocol_tvl":
+          reading = await readProtocolTvl(alert.target);
+          break;
+        case "chain_tvl":
+          reading = await readChainTvl(alert.target);
+          break;
+        case "token_price":
+          reading = await readTokenPrice(alert.target);
+          break;
+        case "pool_apy":
+          reading = await readPoolApy(alert.target);
+          break;
       }
-    } else if (fires !== alert.isFiring) {
-      await db.update(alerts).set({ isFiring: fires }).where(eq(alerts.id, alert.id));
-    }
-  }
 
-  console.log(`[alerts] ${triggered} alert(s) triggered`);
+      await db.update(alerts).set({ lastCheckedAt: new Date() }).where(eq(alerts.id, alert.id));
+
+      if (!reading) continue;
+
+      const fires = evaluateCondition(
+        alert.condition,
+        reading.current,
+        Number(alert.threshold),
+        reading.previous,
+      );
+
+      // Only email on a false->true transition, not every 10-minute tick the
+      // condition still holds - an "above $X" alert typically stays above $X
+      // for hours/days once crossed, so without this check every enabled
+      // alert would re-send an email every single run for as long as its
+      // condition remains true. isFiring tracks the condition's state as of
+      // the last check (updated below regardless of outcome) independently of
+      // lastTriggeredAt, which stays "the last time we actually emailed".
+      if (fires && !alert.isFiring) {
+        const sent = await sendEmail({
+          to: userEmail,
+          subject: `DeFiHub alert: ${reading.displayName}`,
+          html: alertEmailHtml({
+            displayName: reading.displayName,
+            current: reading.current,
+            threshold: Number(alert.threshold),
+            condition: alert.condition,
+            appUrl: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
+          }),
+        });
+        // isFiring only flips to true once the email actually sent - if
+        // Resend failed, this alert is left exactly as it was so the next
+        // run's `fires && !alert.isFiring` check is still true and retries
+        // it, instead of a failed send silently being treated the same as a
+        // delivered one and never being retried.
+        if (sent) {
+          await db
+            .update(alerts)
+            .set({ isFiring: true, lastTriggeredAt: new Date() })
+            .where(eq(alerts.id, alert.id));
+          triggered++;
+        }
+      } else if (fires !== alert.isFiring) {
+        await db.update(alerts).set({ isFiring: fires }).where(eq(alerts.id, alert.id));
+      }
+    }
+
+    logger.info("check complete", { component: "alerts", recordsProcessed: enabledAlerts.length, triggered });
+
+    return { result: undefined, stats: { recordsProcessed: enabledAlerts.length, metadata: { triggered } } };
+  });
 }
 
 if (require.main === module) {
   checkAlerts()
     .then(() => closeDb())
     .catch(async (err) => {
-      console.error("[alerts] check failed:", err);
+      logger.error("check failed", { component: "alerts", error: err });
       await closeDb();
       process.exitCode = 1;
     });

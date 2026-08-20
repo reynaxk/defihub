@@ -7,6 +7,19 @@ import { confirmationsFor } from "@/lib/chains/confirmations";
 import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { VERIFIED_PROTOCOL_TVLS, type VerifiedProtocolTvl } from "./config";
 
+// Rescales a raw fixed-point amount by 10^exponent in either direction.
+// BigInt's own `**` throws a RangeError for a negative exponent (it can't
+// represent a fractional result) - a naive `/ BigInt(10) ** BigInt(exponent)`
+// would crash for any supply-times-rate entry where supplyDecimals +
+// rateDecimals is smaller than the target `decimals` (e.g. a lower-decimals
+// supply/rate pair resolving to a higher-decimals asset), rather than
+// producing the correct value.
+export function rescaleByPow10(amount: bigint, exponent: number): bigint {
+  if (exponent === 0) return amount;
+  if (exponent > 0) return amount / BigInt(10) ** BigInt(exponent);
+  return amount * BigInt(10) ** BigInt(-exponent);
+}
+
 async function readOne(
   entry: VerifiedProtocolTvl,
   priceById: Map<string, number>,
@@ -72,16 +85,21 @@ async function readOne(
       ]);
       // supply is fixed-point at supplyDecimals places, rate at
       // rateDecimals places (e.g. both 1e18) - their product is fixed-point
-      // at (supplyDecimals + rateDecimals) places, which needs descaling
-      // down to `decimals` places (the resolved unit's own decimals, e.g.
-      // ETH's 18) before it's in the same fixed-point units as a "direct"
-      // read. These are three independently-specified quantities that only
-      // coincide by convention for an 18-decimal-everywhere case like ETH -
-      // conflating them into a single divisor would silently produce a
-      // wildly wrong figure for any entry where they don't all match (e.g.
-      // an 18-decimal supply/rate pair resolving to a 6-decimal asset).
-      const rawAmount =
-        (supply * rate) / BigInt(10) ** BigInt(entry.read.supplyDecimals + entry.read.rateDecimals - entry.decimals);
+      // at (supplyDecimals + rateDecimals) places, which needs rescaling to
+      // `decimals` places (the resolved unit's own decimals, e.g. ETH's 18)
+      // before it's in the same fixed-point units as a "direct" read. These
+      // are three independently-specified quantities that only coincide by
+      // convention for an 18-decimal-everywhere case like ETH - conflating
+      // them into a single divisor would silently produce a wildly wrong
+      // figure for any entry where they don't all match (e.g. an
+      // 18-decimal supply/rate pair resolving to a 6-decimal asset). The
+      // scale delta can be negative (a lower-precision supply/rate pair
+      // resolving to a higher-decimals asset) - rescaleByPow10 handles
+      // that direction too, rather than assuming it's always a division.
+      const rawAmount = rescaleByPow10(
+        supply * rate,
+        entry.read.supplyDecimals + entry.read.rateDecimals - entry.decimals,
+      );
       return [rawAmount, blockNumber] as const;
     });
 

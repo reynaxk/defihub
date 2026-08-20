@@ -128,6 +128,26 @@ describe("withResilientClient", () => {
     expect(primaryBalance).toHaveBeenCalledTimes(3);
   });
 
+  it("treats an HTTP 408 as a timeout failure and retries it before failing over", async () => {
+    const primaryBalance = vi
+      .fn()
+      .mockRejectedValue(new HttpRequestError({ url: "https://primary.invalid", status: 408 }));
+    const secondaryBalance = vi.fn().mockResolvedValue(BigInt(1));
+    createPublicClientMock
+      .mockReturnValueOnce(fakeClient(primaryBalance))
+      .mockReturnValueOnce(fakeClient(secondaryBalance));
+
+    const resultPromise = withResilientClient("testchain", (client) => client.getBalance({} as never));
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result).toBe(BigInt(1));
+    // Retried on the primary provider up to the bound (3 total attempts)
+    // before failing over to the secondary.
+    expect(primaryBalance).toHaveBeenCalledTimes(3);
+    expect(secondaryBalance).toHaveBeenCalledTimes(1);
+  });
+
   it("treats viem's own rate-limit RPC error the same way", async () => {
     const cause = new Error("limit exceeded");
     const primaryBalance = vi.fn().mockRejectedValue(new LimitExceededRpcError(cause));

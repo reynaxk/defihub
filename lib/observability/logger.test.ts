@@ -96,6 +96,29 @@ describe("logger", () => {
     expect(line).toContain("ethereum");
   });
 
+  it("redacts a sensitive field inside objects nested in an array", () => {
+    logger.info("batch complete", {
+      component: "test",
+      attempts: [
+        { provider: "primary", apiKey: "sk-live-1" },
+        { provider: "secondary", apiKey: "sk-live-2" },
+      ],
+    });
+
+    const line = logSpy.mock.calls[0][0] as string;
+    expect(line).not.toContain("sk-live-1");
+    expect(line).not.toContain("sk-live-2");
+    expect(line).toContain("primary");
+    expect(line).toContain("secondary");
+  });
+
+  it("does not throw on a self-referencing array", () => {
+    const circular: unknown[] = [];
+    circular.push(circular);
+
+    expect(() => logger.info("circular array", { component: "test", items: circular })).not.toThrow();
+  });
+
   it("redacts credentials embedded in a URL-shaped value regardless of field name", () => {
     logger.warn("provider failed", {
       component: "test",

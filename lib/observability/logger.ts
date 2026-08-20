@@ -85,10 +85,15 @@ function redactValue(value: unknown, depth: number): unknown {
   // Error(...)) otherwise serializes to "{}" since name/message/stack
   // aren't enumerable.
   if (value instanceof Error) return serializeError(value);
-  if (depth > 0 && value !== null && typeof value === "object" && !Array.isArray(value)) {
-    return redact(value as Record<string, unknown>, depth - 1);
-  }
-  return value;
+  if (depth <= 0 || value === null || typeof value !== "object") return value;
+  // Arrays need their own branch, not the plain-object one below - an
+  // array of objects (e.g. a logged list of per-provider attempts) was
+  // previously returned unchanged, entirely skipping redaction for
+  // whatever sensitive fields or URLs its elements held. Depth is still
+  // shared with the object recursion below, so a cyclic array (`a.push(a)`)
+  // is bounded the same way a cyclic object is.
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, depth - 1));
+  return redact(value as Record<string, unknown>, depth - 1);
 }
 
 function redact(fields: Record<string, unknown>, depth = MAX_REDACT_DEPTH): Record<string, unknown> {

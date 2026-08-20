@@ -19,13 +19,19 @@ function classifyOne(err: unknown): RpcFailureKind | null {
 
   if (err instanceof HttpRequestError) {
     if (err.status === 429) return "rate-limit";
+    // 408 Request Timeout means the server gave up waiting for the
+    // request, not that it rejected it as malformed/invalid - the same
+    // request plausibly succeeds on a retry or a different provider, so
+    // this must be classified before the generic 4xx branch below (which
+    // would otherwise treat it as permanent).
+    if (err.status === 408) return "timeout";
     // No status at all means the request never got a response at all
     // (network failure, DNS, connection refused) rather than the provider
     // actively rejecting it - worth retrying, possibly against a different
     // provider.
     if (err.status == null) return "transient";
     if (err.status >= 500) return "transient";
-    return "permanent"; // 4xx other than 429 - the request itself was rejected
+    return "permanent"; // 4xx other than 429/408 - the request itself was rejected
   }
 
   // A provider that returned a well-formed JSON-RPC error object (method

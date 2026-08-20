@@ -13,7 +13,7 @@ function MoverRow({ mover }: { mover: TokenMover }) {
   return (
     <Link
       href={`/token/${mover.address}?chain=${mover.chainSlug}`}
-      className="flex items-center justify-between gap-3 rounded-md px-2 py-2 hover:bg-muted"
+      className="flex items-center justify-between gap-3 rounded-md px-2 py-2 transition-colors duration-150 hover:bg-muted"
     >
       <div className="flex items-center gap-2 overflow-hidden">
         <EntityLogo src={mover.logoUrl} name={mover.symbol} size={22} />

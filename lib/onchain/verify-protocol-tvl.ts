@@ -1,16 +1,30 @@
-import { createPublicClient, http, parseAbi } from "viem";
+import { parseAbi } from "viem";
 import { db } from "@/lib/database/client";
 import { onchainVerifications, protocols, chains } from "@/lib/database/schema";
 import { priceProvider } from "@/lib/providers";
-import { VIEM_CHAIN_BY_SLUG, rpcUrlFor } from "@/lib/chains/rpc-client";
+import { VIEM_CHAIN_BY_SLUG } from "@/lib/chains/rpc-client";
+import { confirmationsFor } from "@/lib/chains/confirmations";
+import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { VERIFIED_PROTOCOL_TVLS, type VerifiedProtocolTvl } from "./config";
+
+// Rescales a raw fixed-point amount by 10^exponent in either direction.
+// BigInt's own `**` throws a RangeError for a negative exponent (it can't
+// represent a fractional result) - a naive `/ BigInt(10) ** BigInt(exponent)`
+// would crash for any supply-times-rate entry where supplyDecimals +
+// rateDecimals is smaller than the target `decimals` (e.g. a lower-decimals
+// supply/rate pair resolving to a higher-decimals asset), rather than
+// producing the correct value.
+export function rescaleByPow10(amount: bigint, exponent: number): bigint {
+  if (exponent === 0) return amount;
+  if (exponent > 0) return amount / BigInt(10) ** BigInt(exponent);
+  return amount * BigInt(10) ** BigInt(-exponent);
+}
 
 async function readOne(
   entry: VerifiedProtocolTvl,
   priceById: Map<string, number>,
 ): Promise<{ key: string; ok: boolean; error?: string; tvlUsd?: number; blockNumber?: bigint }> {
-  const viemChain = VIEM_CHAIN_BY_SLUG.get(entry.chainSlug);
-  if (!viemChain) {
+  if (!VIEM_CHAIN_BY_SLUG.has(entry.chainSlug)) {
     return { key: entry.key, ok: false, error: `no RPC configured for chain "${entry.chainSlug}"` };
   }
 
@@ -19,7 +33,6 @@ async function readOne(
     return { key: entry.key, ok: false, error: `missing USD price for ${entry.coingeckoId}` };
   }
 
-  const client = createPublicClient({ chain: viemChain, transport: http(rpcUrlFor(entry.chainSlug)) });
   const address = entry.contractAddress as `0x${string}`;
 
   function functionNameFrom(signature: string): string {
@@ -27,26 +40,35 @@ async function readOne(
   }
 
   try {
-    let rawAmount: bigint;
-    let blockNumber: bigint;
+    // Both branches' reads run inside one withResilientClient invocation,
+    // so a retry/failover restarts the whole sequence against the same
+    // provider - blockNumber is fetched first, then passed explicitly to
+    // every readContract call below, rather than fetched concurrently with
+    // the reads, since two independent JSON-RPC calls racing each other
+    // can land on different blocks if one is mined in between, which would
+    // make the persisted blockNumber not actually correspond to the state
+    // that produced tvlUsd. The two reads in the "supply-times-rate"
+    // branch can still run concurrently with each other, since pinning
+    // both to the same explicit height keeps them consistent regardless of
+    // when each request arrives at the RPC node.
+    //
+    // Pinned to a confirmation-adjusted height, not the raw head - see
+    // lib/onchain/verify-pool.ts for the same reasoning: the head isn't
+    // final, and persisting a reorg-orphaned height as provenance means the
+    // stored figure can't be reproduced by querying it again.
+    const [rawAmount, blockNumber] = await withResilientClient(entry.chainSlug, async (client) => {
+      const head = await client.getBlockNumber();
+      const confirmations = confirmationsFor(entry.chainSlug);
+      const blockNumber = head > confirmations ? head - confirmations : BigInt(0);
 
-    // blockNumber is fetched first, then passed explicitly to every
-    // readContract call below, rather than fetching it concurrently with
-    // the reads - two independent JSON-RPC calls racing each other can land
-    // on different blocks if one is mined in between, which would make the
-    // persisted blockNumber not actually correspond to the state that
-    // produced tvlUsd. The two reads in the "supply-times-rate" branch can
-    // still run concurrently with each other, since pinning both to the
-    // same explicit height keeps them consistent regardless of when each
-    // request arrives at the RPC node.
-    if (entry.read.kind === "direct") {
-      const abi = parseAbi([entry.read.functionSignature]);
-      const functionName = functionNameFrom(entry.read.functionSignature);
-      blockNumber = await client.getBlockNumber();
-      rawAmount = (await client.readContract({ address, abi, functionName, blockNumber })) as bigint;
-    } else {
+      if (entry.read.kind === "direct") {
+        const abi = parseAbi([entry.read.functionSignature]);
+        const functionName = functionNameFrom(entry.read.functionSignature);
+        const rawAmount = (await client.readContract({ address, abi, functionName, blockNumber })) as bigint;
+        return [rawAmount, blockNumber] as const;
+      }
+
       const abi = parseAbi([entry.read.supplyFunctionSignature, entry.read.rateFunctionSignature]);
-      blockNumber = await client.getBlockNumber();
       const [supply, rate] = await Promise.all([
         client.readContract({
           address,
@@ -61,11 +83,25 @@ async function readOne(
           blockNumber,
         }) as Promise<bigint>,
       ]);
-      // Both values are fixed-point at `decimals` places (e.g. 1e18), so the
-      // raw product needs one factor's worth of scale divided back out
-      // before it's in the same fixed-point units as a "direct" read.
-      rawAmount = (supply * rate) / BigInt(10) ** BigInt(entry.decimals);
-    }
+      // supply is fixed-point at supplyDecimals places, rate at
+      // rateDecimals places (e.g. both 1e18) - their product is fixed-point
+      // at (supplyDecimals + rateDecimals) places, which needs rescaling to
+      // `decimals` places (the resolved unit's own decimals, e.g. ETH's 18)
+      // before it's in the same fixed-point units as a "direct" read. These
+      // are three independently-specified quantities that only coincide by
+      // convention for an 18-decimal-everywhere case like ETH - conflating
+      // them into a single divisor would silently produce a wildly wrong
+      // figure for any entry where they don't all match (e.g. an
+      // 18-decimal supply/rate pair resolving to a 6-decimal asset). The
+      // scale delta can be negative (a lower-precision supply/rate pair
+      // resolving to a higher-decimals asset) - rescaleByPow10 handles
+      // that direction too, rather than assuming it's always a division.
+      const rawAmount = rescaleByPow10(
+        supply * rate,
+        entry.read.supplyDecimals + entry.read.rateDecimals - entry.decimals,
+      );
+      return [rawAmount, blockNumber] as const;
+    });
 
     const tvlUsd = (Number(rawAmount) / 10 ** entry.decimals) * price;
     return { key: entry.key, ok: true, tvlUsd, blockNumber };

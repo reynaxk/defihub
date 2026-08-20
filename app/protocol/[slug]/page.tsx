@@ -45,11 +45,15 @@ function MetricTab({
   latestValue,
   history,
   metric,
+  historyEndpoint,
+  valueField,
 }: {
   label: string;
   latestValue: number | null | undefined;
   history: { timestamp: string; value: number | null }[];
   metric: string;
+  historyEndpoint: string;
+  valueField: string;
 }) {
   return (
     <div>
@@ -62,7 +66,7 @@ function MetricTab({
       </div>
       <Card className="p-4">
         <h2 className="mb-2 text-sm font-medium text-muted-foreground">{label} history</h2>
-        <RangedAreaChart data={history} />
+        <RangedAreaChart data={history} fetchEndpoint={historyEndpoint} valueField={valueField} />
       </Card>
     </div>
   );
@@ -91,6 +95,7 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
   const feesHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.fees24h }));
   const revenueHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.revenue24h }));
   const volumeHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.volume24h }));
+  const historyEndpoint = `/api/protocols/${protocol.slug}/history`;
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -177,7 +182,7 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
         <TabsContent value="overview" className="mt-4">
           <Card className="p-4">
             <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
-            <RangedAreaChart data={tvlHistory} />
+            <RangedAreaChart data={tvlHistory} fetchEndpoint={historyEndpoint} valueField="tvl" />
           </Card>
           <OnchainVerificationCard verifications={verifications} />
           <AiSummaryCard
@@ -204,20 +209,41 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
             <StatTile label="7d" customValue={<PercentChange value={latest?.tvlChange7d} />} />
           </div>
           <Card className="p-4">
-            <RangedAreaChart data={tvlHistory} />
+            <RangedAreaChart data={tvlHistory} fetchEndpoint={historyEndpoint} valueField="tvl" />
           </Card>
         </TabsContent>
 
         <TabsContent value="fees" className="mt-4">
-          <MetricTab label="Fees" metric="fees" latestValue={latest?.fees24h} history={feesHistory} />
+          <MetricTab
+            label="Fees"
+            metric="fees"
+            latestValue={latest?.fees24h}
+            history={feesHistory}
+            historyEndpoint={historyEndpoint}
+            valueField="fees24h"
+          />
         </TabsContent>
 
         <TabsContent value="revenue" className="mt-4">
-          <MetricTab label="Revenue" metric="revenue" latestValue={latest?.revenue24h} history={revenueHistory} />
+          <MetricTab
+            label="Revenue"
+            metric="revenue"
+            latestValue={latest?.revenue24h}
+            history={revenueHistory}
+            historyEndpoint={historyEndpoint}
+            valueField="revenue24h"
+          />
         </TabsContent>
 
         <TabsContent value="volume" className="mt-4">
-          <MetricTab label="Volume" metric="volume" latestValue={latest?.volume24h} history={volumeHistory} />
+          <MetricTab
+            label="Volume"
+            metric="volume"
+            latestValue={latest?.volume24h}
+            history={volumeHistory}
+            historyEndpoint={historyEndpoint}
+            valueField="volume24h"
+          />
         </TabsContent>
 
         <TabsContent value="chains" className="mt-4">

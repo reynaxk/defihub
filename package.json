@@ -19,7 +19,8 @@
     "sync:tokens": "dotenv -e .env.local -- tsx workers/tokens/sync.ts",
     "verify:onchain": "dotenv -e .env.local -- tsx workers/onchain/verify.ts",
     "sync:all": "npm run sync:chains && npm run sync:protocols && npm run sync:yields && npm run sync:prices && npm run sync:tokens && npm run verify:onchain",
-    "check:alerts": "dotenv -e .env.local -- tsx workers/alerts/check.ts"
+    "check:alerts": "dotenv -e .env.local -- tsx workers/alerts/check.ts",
+    "rollup:metrics": "dotenv -e .env.local -- tsx workers/retention/rollup.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",

@@ -224,7 +224,20 @@ export type VerifiedProtocolTvlRead =
   // getEthValue(1 rETH) and checking it exactly matches getExchangeRate()
   // - not assumed from how the rebasing/exchange-rate distinction usually
   // works for this class of token.
-  | { kind: "supply-times-rate"; supplyFunctionSignature: string; rateFunctionSignature: string };
+  | {
+      kind: "supply-times-rate";
+      supplyFunctionSignature: string;
+      rateFunctionSignature: string;
+      // Fixed-point precision of each read's own return value - NOT
+      // assumed equal to each other or to the entry's `decimals` (the
+      // resolved unit's decimals, e.g. ETH's 18). They coincide for an
+      // 18-decimals-everywhere token like rETH, but aren't guaranteed to
+      // in general; verify-protocol-tvl.ts's descaling math needs all
+      // three specified independently to stay correct if that ever
+      // changes.
+      supplyDecimals: number;
+      rateDecimals: number;
+    };
 
 export interface VerifiedProtocolTvl {
   key: string;
@@ -289,4 +302,43 @@ export const VERIFIED_PROTOCOL_TVLS: VerifiedProtocolTvl[] = [
   // protocols, not a new exception - so this stays unshipped rather than
   // either guessing at the megapool piece or quietly serving the
   // still-~13%-low three-component figure as if it were the full total.
+  {
+    key: "aave-v3-eth-ausdc",
+    chainSlug: "ethereum",
+    protocolDefillamaSlug: "aave-v3",
+    // Deliberately scoped to exactly what this read measures - one asset's
+    // supplied liquidity in one market, not "Aave V3 TVL" (which spans many
+    // assets/chains and nets borrows/utilization, a genuinely harder
+    // multi-asset accounting problem this single read does not solve).
+    label: "USDC supplied to Aave V3 (Ethereum)",
+    // A lending-market aToken is a third architecture (alongside AMM pools
+    // and Lido's liquid-staking token above), but this specific read still
+    // fits the "direct" kind rather than needing new accounting: Aave V3's
+    // aTokens rebase 1:1 with the underlying asset supplied to that
+    // reserve (same shape as stETH above), so totalSupply() on the aToken
+    // *is* "total USDC supplied," not an exchange-rate-adjusted figure
+    // needing further interpretation.
+    //
+    // Verified live, 2026-08-20, two independent ways:
+    // (1) name()/symbol()/decimals() on this address returned "Aave
+    //     Ethereum USDC"/"aEthUSDC"/6 (6 matches USDC's own decimals(),
+    //     also confirmed live - correct, since an aToken mirrors its
+    //     underlying's decimals). UNDERLYING_ASSET_ADDRESS() returned
+    //     0xA0b8...6eB48, an exact match for this app's own already-
+    //     verified USDC address (lib/onchain/config.ts's VERIFIED_POOLS).
+    // (2) Independently, calling the real Aave V3 Pool contract itself
+    //     (0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2) via
+    //     getReserveData(USDC) returned this exact same address as its
+    //     aTokenAddress - the protocol's own live on-chain state, not just
+    //     the address-book source the candidate address first came from
+    //     (bgd-labs/aave-address-book, the same registry Aave governance
+    //     tooling itself relies on).
+    // totalSupply() returned ~2.18B USDC at the time of verification - a
+    // plausible order of magnitude for one of the largest USDC lending
+    // markets in DeFi, not a red flag like the Rocket Pool figure above.
+    contractAddress: "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c",
+    read: { kind: "direct", functionSignature: "function totalSupply() view returns (uint256)" },
+    decimals: 6,
+    coingeckoId: "usd-coin",
+  },
 ];

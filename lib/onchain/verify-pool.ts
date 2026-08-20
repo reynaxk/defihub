@@ -1,9 +1,11 @@
 import { eq } from "drizzle-orm";
-import { createPublicClient, erc20Abi, http, type Address } from "viem";
+import { erc20Abi, type Address } from "viem";
 import { db } from "@/lib/database/client";
 import { onchainVerifications, protocols, chains } from "@/lib/database/schema";
 import { priceProvider } from "@/lib/providers";
-import { VIEM_CHAIN_BY_SLUG, rpcUrlFor } from "@/lib/chains/rpc-client";
+import { VIEM_CHAIN_BY_SLUG } from "@/lib/chains/rpc-client";
+import { confirmationsFor } from "@/lib/chains/confirmations";
+import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { VERIFIED_POOLS, type VerifiedPool } from "./config";
 
 export interface OnchainVerificationResult {
@@ -69,16 +71,13 @@ async function verifyPoolsOnChain(
   pools: VerifiedPool[],
   priceById: Map<string, number>,
 ): Promise<PoolOutcome[]> {
-  const viemChain = VIEM_CHAIN_BY_SLUG.get(chainSlug);
-  if (!viemChain) {
+  if (!VIEM_CHAIN_BY_SLUG.has(chainSlug)) {
     return pools.map((p) => ({
       key: p.key,
       ok: false,
       error: `no RPC configured for chain "${chainSlug}"`,
     }));
   }
-
-  const client = createPublicClient({ chain: viemChain, transport: http(rpcUrlFor(chainSlug)) });
 
   const calls = pools.flatMap((pool) =>
     pool.tokens.map((token) => ({
@@ -99,16 +98,29 @@ async function verifyPoolsOnChain(
   // persisting it. Pinning both to one explicit height keeps them
   // consistent, at the cost of one extra sequential round trip.
   //
+  // Pinned to a confirmation-adjusted height, not the raw head - the head
+  // isn't final, and a reorg would orphan it, leaving the persisted
+  // blockNumber referencing a height whose state never became canonical
+  // (so the figure couldn't be reproduced by querying it again).
+  //
   // Destructured inline (rather than pre-declared with an explicit type)
   // so viem's multicall return type is inferred from this exact call's
   // `contracts` argument - annotating the variable ahead of time via
   // `Awaited<ReturnType<typeof client.multicall>>` resolves the generic
   // with no argument context and collapses each result to `{}`.
-  const chainRead = await (async () => {
-    const blockNumber = await client.getBlockNumber();
+  //
+  // Both calls run inside one withResilientClient invocation so a retry/
+  // failover restarts them together against the same provider - the block
+  // number and the multicall it pins must always come from the same chain
+  // read, never a getBlockNumber from one provider paired with a multicall
+  // retried against another.
+  const chainRead = await withResilientClient(chainSlug, async (client) => {
+    const head = await client.getBlockNumber();
+    const confirmations = confirmationsFor(chainSlug);
+    const blockNumber = head > confirmations ? head - confirmations : BigInt(0);
     const multicallResults = await client.multicall({ contracts: calls, blockNumber });
     return [multicallResults, blockNumber] as const;
-  })().catch((err) => {
+  }).catch((err) => {
     const message = err instanceof Error ? err.message : String(err);
     return { chainReadError: message } as const;
   });

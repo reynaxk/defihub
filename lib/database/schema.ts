@@ -148,7 +148,15 @@ export const tokens = pgTable(
     address: varchar("address", { length: 128 }).notNull(),
     symbol: varchar("symbol", { length: 32 }).notNull(),
     name: text("name"),
-    decimals: integer("decimals").notNull().default(18),
+    // Nullable, no default - a token's decimals are either confirmed via an
+    // on-chain decimals() read (workers/tokens/sync.ts) or genuinely
+    // unknown. A NOT NULL DEFAULT 18 here previously meant every row silently
+    // claimed 18 decimals whether or not that was ever verified (CoinGecko's
+    // bulk markets endpoint, the only writer at the time, doesn't return
+    // per-token decimals at all) - wrong for most 6/8-decimal tokens (e.g.
+    // USDT/USDC). Consumers must treat null as "don't trust this for
+    // raw-unit math," never substitute an assumed value.
+    decimals: integer("decimals"),
     logoUrl: text("logo_url"),
     // Identifier used to query the CoinGecko price provider.
     coingeckoId: varchar("coingecko_id", { length: 128 }),
@@ -426,6 +434,74 @@ export const rateLimitBuckets = pgTable("rate_limit_buckets", {
   count: integer("count").notNull(),
   windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
 });
+
+// ---------------------------------------------------------------------------
+// Observability - sync run tracking
+//
+// Every worker (sync/verify/rollup/alerts) writes one row here per
+// invocation via lib/observability/sync-run.ts's withSyncRun: inserted at
+// start (status "running"), updated to its final status when the worker
+// settles - always, even on throw, so a crashed worker leaves a "failed"
+// row rather than an eternally-"running" one. This is what answers "is my
+// protocol sync actually working" without reading raw Vercel logs (see
+// lib/observability/sync-health.ts). Deliberately generic across very
+// different workers' own shapes (a per-chain sync vs. a single alerts
+// sweep) - chain/block-range/provider-specific context goes in `metadata`
+// rather than dedicated columns, so this table's shape doesn't need to
+// change for every future worker.
+// ---------------------------------------------------------------------------
+
+export const syncRunStatusEnum = pgEnum("sync_run_status", ["running", "success", "partial", "failed"]);
+
+export const syncRuns = pgTable(
+  "sync_runs",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    worker: varchar("worker", { length: 64 }).notNull(),
+    status: syncRunStatusEnum("status").notNull().default("running"),
+    startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    durationMs: integer("duration_ms"),
+    recordsProcessed: integer("records_processed"),
+    recordsCreated: integer("records_created"),
+    recordsUpdated: integer("records_updated"),
+    errorCount: integer("error_count").default(0).notNull(),
+    errorSummary: text("error_summary"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+  },
+  (table) => [index("sync_runs_worker_started_idx").on(table.worker, table.startedAt)],
+);
+
+// ---------------------------------------------------------------------------
+// Indexing state foundation
+//
+// A generic, persistent cursor per (chain, component) - restart-safe (a
+// worker always reads its position fresh from here rather than holding it
+// only in memory) and concurrency-safe (a single atomic upsert per key, same
+// pattern as rate_limit_buckets/lib/security/rate-limit.ts). This is
+// deliberately just the state primitive: no block-scanning logic lives
+// here. Not wired to any worker that indexes every protocol - only the
+// small, deliberate event-ingestion example (lib/indexing/events.ts) uses
+// it today.
+// ---------------------------------------------------------------------------
+
+export const indexingStateStatusEnum = pgEnum("indexing_state_status", ["idle", "running", "error"]);
+
+export const indexingState = pgTable(
+  "indexing_state",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    chainSlug: varchar("chain_slug", { length: 64 }).notNull(),
+    component: varchar("component", { length: 128 }).notNull(),
+    lastProcessedBlock: numeric("last_processed_block", { precision: 20, scale: 0 }),
+    lastSuccessfulSyncAt: timestamp("last_successful_sync_at", { withTimezone: true }),
+    lastAttemptedSyncAt: timestamp("last_attempted_sync_at", { withTimezone: true }),
+    status: indexingStateStatusEnum("status").notNull().default("idle"),
+    error: text("error"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex("indexing_state_chain_component_unique").on(table.chainSlug, table.component)],
+);
 
 // ---------------------------------------------------------------------------
 // Relations (enables db.query.* relational API)

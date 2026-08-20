@@ -5,151 +5,169 @@ import { chains, protocolChains, protocolMetrics, protocols } from "../../lib/da
 import { defiDataProvider } from "../../lib/providers";
 import { SUPPORTED_CHAINS } from "../../lib/config/chains";
 import { chunk } from "../../lib/utils/chunk";
+import { logger } from "../../lib/observability/logger";
+import { withSyncRun } from "../../lib/observability/sync-run";
 
 const SUPPORTED_DEFILLAMA_NAMES = new Set(SUPPORTED_CHAINS.map((c) => c.defillamaSlug));
 const BATCH_SIZE = 500;
 
-export async function syncProtocols() {
-  const [allProtocols, financials, volumeBySlug] = await Promise.all([
-    defiDataProvider.getProtocols(),
-    defiDataProvider.getProtocolFees(),
-    defiDataProvider.getProtocolVolume(),
-  ]);
+export async function syncProtocols(): Promise<void> {
+  await withSyncRun("protocols", async () => {
+    const [allProtocols, financials, volumeBySlug] = await Promise.all([
+      defiDataProvider.getProtocols(),
+      defiDataProvider.getProtocolFees(),
+      defiDataProvider.getProtocolVolume(),
+    ]);
 
-  const relevant = allProtocols.filter((p) =>
-    p.chains.some((c) => SUPPORTED_DEFILLAMA_NAMES.has(c)),
-  );
-  console.log(
-    `[protocols] fetched ${allProtocols.length}, ${relevant.length} deployed on a supported chain`,
-  );
-  if (relevant.length === 0) return;
-
-  const financialsBySlug = new Map(financials.map((f) => [f.externalId, f]));
-  const chainRows = await db.select().from(chains);
-  const chainIdByDefillamaName = new Map(
-    chainRows.filter((c) => c.defillamaSlug).map((c) => [c.defillamaSlug as string, c.id]),
-  );
-
-  // 1. Bulk upsert protocols
-  for (const batch of chunk(relevant, BATCH_SIZE)) {
-    await db
-      .insert(protocols)
-      .values(
-        batch.map((p) => ({
-          name: p.name,
-          slug: p.slug,
-          description: p.description,
-          website: p.website,
-          logoUrl: p.logoUrl,
-          category: p.category,
-          defillamaSlug: p.externalId,
-        })),
-      )
-      .onConflictDoUpdate({
-        target: protocols.defillamaSlug,
-        set: {
-          name: sql`excluded.name`,
-          description: sql`excluded.description`,
-          website: sql`excluded.website`,
-          logoUrl: sql`excluded.logo_url`,
-          category: sql`excluded.category`,
-          updatedAt: sql`now()`,
-        },
-      });
-  }
-
-  // 2. Resolve slug -> id for everything we just touched
-  const protocolIdBySlug = new Map<string, string>();
-  for (const batch of chunk(
-    relevant.map((p) => p.externalId),
-    BATCH_SIZE,
-  )) {
-    const rows = await db
-      .select({ id: protocols.id, defillamaSlug: protocols.defillamaSlug })
-      .from(protocols)
-      .where(inArray(protocols.defillamaSlug, batch));
-    for (const row of rows) {
-      if (row.defillamaSlug) protocolIdBySlug.set(row.defillamaSlug, row.id);
-    }
-  }
-
-  // 3. Bulk insert protocol_chains + protocol_metrics
-  const now = new Date();
-  const chainLinkRows: { protocolId: string; chainId: string }[] = [];
-  const metricRows: {
-    protocolId: string;
-    chainId: string | null;
-    timestamp: Date;
-    tvl: string | null;
-    volume24h: string | null;
-    fees24h: string | null;
-    revenue24h: string | null;
-    tvlChange1d: string | null;
-    tvlChange7d: string | null;
-  }[] = [];
-
-  for (const p of relevant) {
-    const protocolId = protocolIdBySlug.get(p.externalId);
-    if (!protocolId) continue;
-
-    const matchedChainNames = p.chains.filter((c) => SUPPORTED_DEFILLAMA_NAMES.has(c));
-    const fin = financialsBySlug.get(p.externalId);
-    const volume = volumeBySlug.get(p.externalId) ?? null;
-
-    metricRows.push({
-      protocolId,
-      chainId: null,
-      timestamp: now,
-      tvl: p.tvl != null ? p.tvl.toString() : null,
-      volume24h: volume != null ? volume.toString() : null,
-      fees24h: fin?.fees24h != null ? fin.fees24h.toString() : null,
-      revenue24h: fin?.revenue24h != null ? fin.revenue24h.toString() : null,
-      tvlChange1d: p.tvlChange1d != null ? p.tvlChange1d.toString() : null,
-      tvlChange7d: p.tvlChange7d != null ? p.tvlChange7d.toString() : null,
+    const relevant = allProtocols.filter((p) =>
+      p.chains.some((c) => SUPPORTED_DEFILLAMA_NAMES.has(c)),
+    );
+    logger.info("fetched protocols", {
+      component: "protocols",
+      recordsProcessed: allProtocols.length,
+      relevant: relevant.length,
     });
+    if (relevant.length === 0) return { result: undefined, stats: { recordsProcessed: 0 } };
 
-    for (const chainName of matchedChainNames) {
-      const chainId = chainIdByDefillamaName.get(chainName);
-      if (!chainId) continue;
-      chainLinkRows.push({ protocolId, chainId });
+    const financialsBySlug = new Map(financials.map((f) => [f.externalId, f]));
+    const chainRows = await db.select().from(chains);
+    const chainIdByDefillamaName = new Map(
+      chainRows.filter((c) => c.defillamaSlug).map((c) => [c.defillamaSlug as string, c.id]),
+    );
 
-      const chainTvl = p.tvlByChain[chainName];
-      if (chainTvl != null) {
-        metricRows.push({
-          protocolId,
-          chainId,
-          timestamp: now,
-          tvl: chainTvl.toString(),
-          volume24h: null,
-          fees24h: null,
-          revenue24h: null,
-          tvlChange1d: null,
-          tvlChange7d: null,
+    // 1. Bulk upsert protocols
+    for (const batch of chunk(relevant, BATCH_SIZE)) {
+      await db
+        .insert(protocols)
+        .values(
+          batch.map((p) => ({
+            name: p.name,
+            slug: p.slug,
+            description: p.description,
+            website: p.website,
+            logoUrl: p.logoUrl,
+            category: p.category,
+            defillamaSlug: p.externalId,
+          })),
+        )
+        .onConflictDoUpdate({
+          target: protocols.defillamaSlug,
+          set: {
+            name: sql`excluded.name`,
+            description: sql`excluded.description`,
+            website: sql`excluded.website`,
+            logoUrl: sql`excluded.logo_url`,
+            category: sql`excluded.category`,
+            updatedAt: sql`now()`,
+          },
         });
+    }
+
+    // 2. Resolve slug -> id for everything we just touched
+    const protocolIdBySlug = new Map<string, string>();
+    for (const batch of chunk(
+      relevant.map((p) => p.externalId),
+      BATCH_SIZE,
+    )) {
+      const rows = await db
+        .select({ id: protocols.id, defillamaSlug: protocols.defillamaSlug })
+        .from(protocols)
+        .where(inArray(protocols.defillamaSlug, batch));
+      for (const row of rows) {
+        if (row.defillamaSlug) protocolIdBySlug.set(row.defillamaSlug, row.id);
       }
     }
-  }
 
-  for (const batch of chunk(chainLinkRows, BATCH_SIZE)) {
-    if (batch.length === 0) continue;
-    await db.insert(protocolChains).values(batch).onConflictDoNothing();
-  }
+    // 3. Bulk insert protocol_chains + protocol_metrics
+    const now = new Date();
+    const chainLinkRows: { protocolId: string; chainId: string }[] = [];
+    const metricRows: {
+      protocolId: string;
+      chainId: string | null;
+      timestamp: Date;
+      tvl: string | null;
+      volume24h: string | null;
+      fees24h: string | null;
+      revenue24h: string | null;
+      tvlChange1d: string | null;
+      tvlChange7d: string | null;
+    }[] = [];
 
-  for (const batch of chunk(metricRows, BATCH_SIZE)) {
-    if (batch.length === 0) continue;
-    await db.insert(protocolMetrics).values(batch).onConflictDoNothing();
-  }
+    for (const p of relevant) {
+      const protocolId = protocolIdBySlug.get(p.externalId);
+      if (!protocolId) continue;
 
-  console.log(
-    `[protocols] synced ${protocolIdBySlug.size} protocols, ${chainLinkRows.length} chain links, ${metricRows.length} metric rows`,
-  );
+      const matchedChainNames = p.chains.filter((c) => SUPPORTED_DEFILLAMA_NAMES.has(c));
+      const fin = financialsBySlug.get(p.externalId);
+      const volume = volumeBySlug.get(p.externalId) ?? null;
+
+      metricRows.push({
+        protocolId,
+        chainId: null,
+        timestamp: now,
+        tvl: p.tvl != null ? p.tvl.toString() : null,
+        volume24h: volume != null ? volume.toString() : null,
+        fees24h: fin?.fees24h != null ? fin.fees24h.toString() : null,
+        revenue24h: fin?.revenue24h != null ? fin.revenue24h.toString() : null,
+        tvlChange1d: p.tvlChange1d != null ? p.tvlChange1d.toString() : null,
+        tvlChange7d: p.tvlChange7d != null ? p.tvlChange7d.toString() : null,
+      });
+
+      for (const chainName of matchedChainNames) {
+        const chainId = chainIdByDefillamaName.get(chainName);
+        if (!chainId) continue;
+        chainLinkRows.push({ protocolId, chainId });
+
+        const chainTvl = p.tvlByChain[chainName];
+        if (chainTvl != null) {
+          metricRows.push({
+            protocolId,
+            chainId,
+            timestamp: now,
+            tvl: chainTvl.toString(),
+            volume24h: null,
+            fees24h: null,
+            revenue24h: null,
+            tvlChange1d: null,
+            tvlChange7d: null,
+          });
+        }
+      }
+    }
+
+    for (const batch of chunk(chainLinkRows, BATCH_SIZE)) {
+      if (batch.length === 0) continue;
+      await db.insert(protocolChains).values(batch).onConflictDoNothing();
+    }
+
+    for (const batch of chunk(metricRows, BATCH_SIZE)) {
+      if (batch.length === 0) continue;
+      await db.insert(protocolMetrics).values(batch).onConflictDoNothing();
+    }
+
+    logger.info("sync complete", {
+      component: "protocols",
+      recordsProcessed: protocolIdBySlug.size,
+      recordsCreated: metricRows.length,
+      chainLinks: chainLinkRows.length,
+    });
+
+    return {
+      result: undefined,
+      stats: {
+        recordsProcessed: protocolIdBySlug.size,
+        recordsCreated: metricRows.length,
+        metadata: { chainLinks: chainLinkRows.length },
+      },
+    };
+  });
 }
 
 if (require.main === module) {
   syncProtocols()
     .then(() => closeDb())
     .catch(async (err) => {
-      console.error("[protocols] sync failed:", err);
+      logger.error("sync failed", { component: "protocols", error: err });
       await closeDb();
       process.exitCode = 1;
     });

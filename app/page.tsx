@@ -16,6 +16,7 @@ import { getWatchedChainIds, getWatchedProtocolIds } from "@/lib/database/querie
 import { computeTvlChanges } from "@/lib/database/queries/tvl-change";
 import { auth } from "@/lib/auth/config";
 import { formatUsd } from "@/lib/format";
+import { sumKnownValues } from "@/lib/utils/aggregate";
 import { SUPPORTED_CHAINS } from "@/lib/config/chains";
 
 export const revalidate = 300;
@@ -52,7 +53,9 @@ export default async function HomePage() {
     getWatchedChainIds(session?.user?.id, topChains.map((c) => c.id)),
   ]);
 
-  const totalTvl = topChains.reduce((sum, c) => sum + (c.tvl ?? 0), 0);
+  // A chain with no synced history has an unknown TVL, not a zero one - `??
+  // 0` here would silently understate the platform's headline number.
+  const { total: totalTvl, isPartial: tvlPartial } = sumKnownValues(topChains.map((c) => c.tvl));
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6">
@@ -79,10 +82,10 @@ export default async function HomePage() {
 
       <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 grid grid-cols-2 gap-3 py-6 delay-150 duration-700 sm:grid-cols-3 lg:grid-cols-5">
         <StatTile
-          label="Total value locked"
+          label={`Total value locked${tvlPartial ? " (partial)" : ""}`}
           value={formatUsd(totalTvl)}
           icon={Wallet}
-          animate={{ value: totalTvl, format: "usd" }}
+          animate={totalTvl != null ? { value: totalTvl, format: "usd" } : undefined}
         />
         <StatTile label="24h TVL change" customValue={<PercentChange value={globalChanges.change24h} />} />
         <StatTile label="7d TVL change" customValue={<PercentChange value={globalChanges.change7d} />} />

@@ -4,6 +4,7 @@ import { EntityLogo } from "@/components/shared/entity-logo";
 import { PercentChange } from "@/components/shared/percent-change";
 import { WatchIconButton } from "@/components/shared/watch-icon-button";
 import { formatPercent, formatUsd } from "@/lib/format";
+import { sumKnownValues } from "@/lib/utils/aggregate";
 import type { ChainListItem } from "@/lib/database/queries/chains";
 
 export function ChainsTable({
@@ -15,7 +16,10 @@ export function ChainsTable({
   isSignedIn?: boolean;
   watchedChainIds?: Set<string>;
 }) {
-  const totalTvl = chains.reduce((sum, c) => sum + (c.tvl ?? 0), 0);
+  // A chain with no synced history has an unknown TVL, not a zero one - `??
+  // 0` here would silently understate this total and every other chain's
+  // "% of total" share, which is computed against it below.
+  const { total: totalTvl, isPartial: isTvlPartial } = sumKnownValues(chains.map((c) => c.tvl));
 
   const columns: DataTableColumn<ChainListItem>[] = [
     {
@@ -61,7 +65,14 @@ export function ChainsTable({
       header: "% of total",
       headClassName: "hidden text-right lg:table-cell",
       cellClassName: "hidden text-right tabular-nums text-muted-foreground lg:table-cell",
-      render: (chain) => (chain.tvl != null && totalTvl > 0 ? formatPercent((chain.tvl / totalTvl) * 100) : "—"),
+      render: (chain) =>
+        // isTvlPartial excluded, not just a non-null total: a total missing
+        // one or more chains' TVL is still a real number, but every share
+        // computed against it would be inflated by exactly the missing
+        // chains' worth - showing a false "100.00%" is worse than "—".
+        chain.tvl != null && totalTvl != null && totalTvl > 0 && !isTvlPartial
+          ? formatPercent((chain.tvl / totalTvl) * 100)
+          : "—",
     },
   ];
 

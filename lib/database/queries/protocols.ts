@@ -1,4 +1,4 @@
-import { and, count, desc, eq, ilike, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, ilike, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, protocolChains, protocolMetrics, protocols } from "@/lib/database/schema";
 import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
@@ -285,17 +285,35 @@ export async function getAllCategories(): Promise<string[]> {
   return rows.map((r) => r.category as string).filter(Boolean);
 }
 
-export async function getProtocolBySlug(slug: string) {
-  const [protocol] = await db.select().from(protocols).where(eq(protocols.slug, slug));
-  if (!protocol) return null;
+// A single indexed id lookup, for callers (the history API route) that
+// only need the id to run a bounded range query - avoids pulling a whole
+// history window via getProtocolBySlug just to discover it.
+export async function getProtocolIdBySlug(slug: string): Promise<string | null> {
+  const [row] = await db.select({ id: protocols.id }).from(protocols).where(eq(protocols.slug, slug));
+  return row?.id ?? null;
+}
 
-  const chainLinks = await db
-    .select({ chain: chains })
-    .from(protocolChains)
-    .innerJoin(chains, eq(chains.id, protocolChains.chainId))
-    .where(eq(protocolChains.protocolId, protocol.id));
+export interface ProtocolHistoryPoint {
+  timestamp: Date;
+  tvl: number | null;
+  volume24h: number | null;
+  fees24h: number | null;
+  revenue24h: number | null;
+  tvlChange1d: number | null;
+  tvlChange7d: number | null;
+}
 
-  const history = await db
+// Pushes the requested range down into the query instead of fetching every
+// row ever synced and filtering client-side - `since: null` means no lower
+// bound (the chart's "all" range). Shared by getProtocolBySlug (bounded to
+// the chart's own default range below) and the range-switching history API
+// route (app/api/protocols/[slug]/history), which calls this directly for
+// every range past the default.
+export async function getProtocolHistory(protocolId: string, since: Date | null): Promise<ProtocolHistoryPoint[]> {
+  const conditions = [eq(protocolMetrics.protocolId, protocolId), isNull(protocolMetrics.chainId)];
+  if (since) conditions.push(gte(protocolMetrics.timestamp, since));
+
+  const rows = await db
     .select({
       timestamp: protocolMetrics.timestamp,
       tvl: protocolMetrics.tvl,
@@ -306,10 +324,10 @@ export async function getProtocolBySlug(slug: string) {
       tvlChange7d: protocolMetrics.tvlChange7d,
     })
     .from(protocolMetrics)
-    .where(and(eq(protocolMetrics.protocolId, protocol.id), isNull(protocolMetrics.chainId)))
+    .where(and(...conditions))
     .orderBy(protocolMetrics.timestamp);
 
-  const normalizedHistory = history.map((h) => ({
+  return rows.map((h) => ({
     timestamp: h.timestamp,
     tvl: h.tvl != null ? Number(h.tvl) : null,
     volume24h: h.volume24h != null ? Number(h.volume24h) : null,
@@ -318,6 +336,29 @@ export async function getProtocolBySlug(slug: string) {
     tvlChange1d: h.tvlChange1d != null ? Number(h.tvlChange1d) : null,
     tvlChange7d: h.tvlChange7d != null ? Number(h.tvlChange7d) : null,
   }));
+}
+
+// Matches RangedAreaChart's own default range (components/charts/
+// ranged-area-chart.tsx) - the detail page only needs to server-render
+// enough history for the chart's initial view; every other range is
+// fetched on demand via the history route above. Bounding this was the
+// actual fix for the unbounded-history-payload finding - the previous
+// version fetched every row ever synced on every page load regardless of
+// which range was showing.
+const DEFAULT_HISTORY_DAYS = 30;
+
+export async function getProtocolBySlug(slug: string) {
+  const [protocol] = await db.select().from(protocols).where(eq(protocols.slug, slug));
+  if (!protocol) return null;
+
+  const chainLinks = await db
+    .select({ chain: chains })
+    .from(protocolChains)
+    .innerJoin(chains, eq(chains.id, protocolChains.chainId))
+    .where(eq(protocolChains.protocolId, protocol.id));
+
+  const since = new Date(Date.now() - DEFAULT_HISTORY_DAYS * 24 * 60 * 60 * 1000);
+  const normalizedHistory = await getProtocolHistory(protocol.id, since);
 
   return {
     protocol,

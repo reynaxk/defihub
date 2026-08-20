@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import { createPublicClient, erc20Abi, formatUnits, http, isAddress, type Address } from "viem";
+import { erc20Abi, formatUnits, isAddress, type Address } from "viem";
 import { auth } from "@/lib/auth/config";
 import { checkRateLimit } from "@/lib/security/rate-limit";
 import { getNativeTokenPrice, getTokensForBalanceCheck } from "@/lib/database/queries/tokens";
-import { EVM_CHAINS, VIEM_CHAIN_BY_SLUG, rpcUrlFor } from "@/lib/chains/rpc-client";
+import { EVM_CHAINS } from "@/lib/chains/rpc-client";
+import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { aggregateUsdValues, computeValueUsd } from "@/lib/wallet/valuation";
 import type { ChainBalanceResult, ChainResult, TokenBalance, WalletBalancesResponse } from "@/lib/wallet/types";
 
@@ -16,10 +17,6 @@ async function readChainBalances(
   chain: (typeof EVM_CHAINS)[number],
   address: Address,
 ): Promise<ChainBalanceResult> {
-  const viemChain = VIEM_CHAIN_BY_SLUG.get(chain.slug);
-  if (!viemChain) throw new Error(`No viem chain definition for ${chain.slug}`);
-
-  const client = createPublicClient({ chain: viemChain, transport: http(rpcUrlFor(chain.slug)) });
   // Some chains have a tracked "token" row that's actually just a pseudo-
   // ERC-20 representation of the native currency itself - confirmed live on
   // Polygon, where address 0x...1010 (a real, documented Polygon-specific
@@ -46,28 +43,39 @@ async function readChainBalances(
   // and it's already calling multicall on these exact contracts, so reading
   // the real value straight from each token contract is both more correct
   // and doesn't need to wait on that sync fix.
-  const [nativeBalance, multicallResults, nativePriceUsd] = await Promise.all([
-    client.getBalance({ address }),
-    trackedTokens.length === 0
-      ? []
-      : client.multicall({
-          contracts: [
-            ...trackedTokens.map((t) => ({
-              address: t.address as Address,
-              abi: erc20Abi,
-              functionName: "balanceOf",
-              args: [address],
-            })),
-            ...trackedTokens.map((t) => ({
-              address: t.address as Address,
-              abi: erc20Abi,
-              functionName: "decimals",
-            })),
-          ],
-        }),
+  const [[nativeBalance, multicallResults], nativePriceUsd] = await Promise.all([
+    withResilientClient(chain.slug, (client) =>
+      Promise.all([
+        client.getBalance({ address }),
+        trackedTokens.length === 0
+          ? Promise.resolve([])
+          : client.multicall({
+              contracts: [
+                ...trackedTokens.map((t) => ({
+                  address: t.address as Address,
+                  abi: erc20Abi,
+                  functionName: "balanceOf",
+                  args: [address],
+                })),
+                ...trackedTokens.map((t) => ({
+                  address: t.address as Address,
+                  abi: erc20Abi,
+                  functionName: "decimals",
+                })),
+              ],
+            }),
+      ]),
+    ),
     getNativeTokenPrice(chain.slug),
   ]);
 
+  // Tracks whether any nonzero token balance was dropped for lacking a
+  // known decimals value - that balance had real, unknown USD value, so
+  // the response's isPartial (below) must reflect it. Without this, a
+  // dropped nonzero holding made the response silently claim completeness
+  // it didn't have: aggregateUsdValues only ever sees the balances that
+  // survived, never the ones dropped before reaching it.
+  let droppedForUnknownDecimals = false;
   const tokenBalances: TokenBalance[] = trackedTokens
     .map((token, i) => {
       const balanceResult = multicallResults[i];
@@ -80,12 +88,19 @@ async function readChainBalances(
       const balance = balanceResult.result as bigint;
       if (balance === BigInt(0)) return null;
       // Fall back to the DB value only if the on-chain read itself failed
-      // (e.g. a non-standard token missing decimals()) - better than
-      // dropping the balance entirely.
+      // (e.g. a non-standard token missing decimals()) - the DB value is
+      // null unless a prior sync run already confirmed it (see schema.ts),
+      // so this can still come up empty. Never assume a default (e.g. 18)
+      // in that case - drop the balance rather than risk showing a wildly
+      // wrong amount computed with the wrong number of decimals.
       const decimals =
         decimalsResult && decimalsResult.status === "success"
           ? (decimalsResult.result as number)
           : token.decimals;
+      if (decimals == null) {
+        droppedForUnknownDecimals = true;
+        return null;
+      }
       const balanceStr = formatUnits(balance, decimals);
       return {
         symbol: token.symbol,
@@ -104,10 +119,11 @@ async function readChainBalances(
   // coverage, so it's excluded from the isPartial check the same way
   // zero-balance tokens already are (filtered out above before this point).
   const hasNativeBalance = Number(nativeBalanceStr) > 0;
-  const { total: chainTotalUsd, isPartial } = aggregateUsdValues([
+  const { total: chainTotalUsd, isPartial: isPricingPartial } = aggregateUsdValues([
     ...(hasNativeBalance ? [nativeValueUsd] : []),
     ...tokenBalances.map((t) => t.valueUsd),
   ]);
+  const isPartial = isPricingPartial || droppedForUnknownDecimals;
 
   return {
     chainSlug: chain.slug,

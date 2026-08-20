@@ -55,6 +55,31 @@ export function rpcUrlFor(slug: string): string {
   return url;
 }
 
+// An optional operator-configured secondary RPC per chain, used by
+// withResilientClient (rpc-resilient-client.ts) as a failover target when
+// the primary is unavailable. No secondary is ever added automatically -
+// an operator opts in per chain by setting the matching env var. Same
+// server-only visibility caveat as RPC_ENV_VARS above.
+const RPC_FALLBACK_ENV_VARS: Record<string, string | undefined> = {
+  ethereum: process.env.ETHEREUM_RPC_URL_FALLBACK,
+  arbitrum: process.env.ARBITRUM_RPC_URL_FALLBACK,
+  base: process.env.BASE_RPC_URL_FALLBACK,
+  "bnb-chain": process.env.BNB_CHAIN_RPC_URL_FALLBACK,
+  avalanche: process.env.AVALANCHE_RPC_URL_FALLBACK,
+  polygon: process.env.POLYGON_RPC_URL_FALLBACK,
+  optimism: process.env.OPTIMISM_RPC_URL_FALLBACK,
+};
+
+// Ordered candidate RPC URLs for a chain: the existing primary (operator
+// override or public default), followed by an optional configured
+// secondary, if any.
+export function rpcUrlsFor(slug: string): string[] {
+  const urls = [rpcUrlFor(slug)];
+  const fallback = RPC_FALLBACK_ENV_VARS[slug];
+  if (fallback) urls.push(fallback);
+  return urls;
+}
+
 // Solana (chainId: null in SUPPORTED_CHAINS) is filtered out here - it isn't
 // EVM-compatible and needs a completely separate wallet-adapter/RPC stack
 // (@solana/wallet-adapter-*, @solana/web3.js), not viem. Deliberately out of

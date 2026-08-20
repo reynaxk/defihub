@@ -35,6 +35,7 @@ describe("logger", () => {
       apiKey: "sk-live-12345",
       password: "hunter2",
       authorization: "Bearer abc123",
+      accessToken: "at-98765",
       chain: "ethereum",
     });
 
@@ -42,7 +43,26 @@ describe("logger", () => {
     expect(line).not.toContain("sk-live-12345");
     expect(line).not.toContain("hunter2");
     expect(line).not.toContain("abc123");
+    expect(line).not.toContain("at-98765");
     expect(line).toContain("ethereum");
+  });
+
+  it("does not redact ordinary key/token-shaped fields common in this app's own domain", () => {
+    // Regression test: the first real run against workers/onchain/verify.ts
+    // (a `key` field holding a plain identifier like "lido-eth-steth", not
+    // a secret) was incorrectly redacted before this fix - bare "key"/
+    // "token" alone must not match, only compound secret-shaped names.
+    logger.info("verified", {
+      component: "onchain",
+      key: "lido-eth-steth",
+      token: "USDC",
+      tokenId: "abc-123",
+    });
+
+    const line = logSpy.mock.calls[0][0] as string;
+    expect(line).toContain("lido-eth-steth");
+    expect(line).toContain("USDC");
+    expect(line).toContain("abc-123");
   });
 
   it("serializes an Error field to name/message instead of the raw object", () => {

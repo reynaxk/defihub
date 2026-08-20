@@ -21,11 +21,20 @@ export interface LogFields {
   [key: string]: unknown;
 }
 
-// Deliberately broad and substring-based (case-insensitive) rather than an
-// exact-key allowlist - a false-positive redaction (dropping an innocuous
-// field whose name happens to contain "key") is a far smaller cost than a
-// false negative that leaks a real secret into logs.
-const SENSITIVE_KEY_PATTERN = /password|secret|token|key|authorization|credential/i;
+// Substring-based (case-insensitive) rather than an exact-key allowlist,
+// but NOT simply "contains key/token" - this app's own domain vocabulary
+// is full of legitimate non-secret fields shaped exactly like that
+// (onchainVerifications.key, tokens/tokenId/tokenBalance everywhere in the
+// wallet and price-sync code). A bare "key"/"token" match redacted real,
+// harmless identifiers in exactly that shape the first time this ran
+// against a real worker (workers/onchain/verify.ts's `key` field) - caught
+// via live verification, not a hypothetical. "key"/"token" only count when
+// compounded with a word that actually signals a secret (apiKey,
+// privateKey, accessToken, sessionToken, etc.); password/secret/
+// authorization/credential still match standalone, since those aren't
+// legitimate field-name components anywhere in this app.
+const SENSITIVE_KEY_PATTERN =
+  /password|secret|credential|authorization|(?:api|private|access|encryption|session|refresh|bearer|csrf|auth)[-_]?(?:key|token)/i;
 
 function serializeError(err: unknown): unknown {
   if (err instanceof Error) {

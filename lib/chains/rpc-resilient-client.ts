@@ -45,8 +45,12 @@ function sleep(ms: number): Promise<void> {
 // audit), and this type is the enforcement of that - there is no generic
 // "send anything" escape hatch, so reusing this wrapper for a future write
 // path would require a conscious, separate decision rather than an
-// accidental one.
-export type ReadClient = Pick<PublicClient, "readContract" | "multicall" | "getBalance" | "getBlockNumber">;
+// accidental one. getLogs was added alongside the event-ingestion
+// primitives (lib/indexing/events.ts) - still strictly a read.
+export type ReadClient = Pick<
+  PublicClient,
+  "readContract" | "multicall" | "getBalance" | "getBlockNumber" | "getLogs"
+>;
 
 // Runs `fn` against each configured RPC provider for `chainSlug` in order
 // (primary, then any operator-configured fallback - see rpcUrlsFor).

@@ -21,7 +21,7 @@ const SEARCH_BY_TYPE = {
 
 export async function GET(request: Request) {
   const ip = getClientIp(request);
-  const limited = checkRateLimit(`alert-target-search:${ip}`, SEARCH_LIMIT);
+  const limited = await checkRateLimit(`alert-target-search:${ip}`, SEARCH_LIMIT);
   if (!limited.allowed) {
     return NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 });
   }

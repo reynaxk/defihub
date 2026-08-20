@@ -2,6 +2,7 @@ import { and, asc, count, desc, eq, gte, ilike, isNotNull, lte, or, type SQL } f
 import { db } from "@/lib/database/client";
 import { chains, protocols, yieldPools } from "@/lib/database/schema";
 import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
+import { escapeLikePattern } from "@/lib/utils/like-pattern";
 
 export interface YieldFilters {
   chainSlug?: string;
@@ -28,7 +29,7 @@ function buildConditions(filters: YieldFilters): SQL[] {
   if (filters.maxApy != null) conditions.push(lte(yieldPools.apy, filters.maxApy.toString()));
   if (filters.minTvl != null) conditions.push(gte(yieldPools.tvlUsd, filters.minTvl.toString()));
   if (filters.search) {
-    const term = `%${filters.search}%`;
+    const term = `%${escapeLikePattern(filters.search)}%`;
     const clause = or(ilike(yieldPools.symbol, term), ilike(protocols.name, term));
     if (clause) conditions.push(clause);
   }
@@ -110,21 +111,31 @@ export async function getYieldPoolsList(
   const conditions = buildConditions(filters);
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 
-  const [rows, countRows] = await Promise.all([
-    baseQuery().where(where).orderBy(sortColumn(filters)).limit(pageSize).offset((page - 1) * pageSize),
-    db
-      .select({ value: count() })
-      .from(yieldPools)
-      .innerJoin(chains, eq(chains.id, yieldPools.chainId))
-      .leftJoin(protocols, eq(protocols.id, yieldPools.protocolId))
-      .where(where),
-  ]);
-
+  // Count first, then clamp the requested page to what actually exists,
+  // before computing the offset - see the identical comment in
+  // getProtocolsList (queries/protocols.ts) for why this needs to be
+  // sequential rather than run in parallel with the items query.
+  const countRows = await db
+    .select({ value: count() })
+    .from(yieldPools)
+    .innerJoin(chains, eq(chains.id, yieldPools.chainId))
+    .leftJoin(protocols, eq(protocols.id, yieldPools.protocolId))
+    .where(where);
   const total = countRows[0]?.value ?? 0;
+  const clampedPage = Math.min(page, computeTotalPages(total, pageSize));
+
+  const rows = await baseQuery()
+    .where(where)
+    // Secondary sort on id for stable pagination - apy/tvlUsd tie
+    // frequently (many pools sit at exactly 0), and Postgres doesn't
+    // guarantee tie order across separate LIMIT/OFFSET calls without one.
+    .orderBy(sortColumn(filters), yieldPools.id)
+    .limit(pageSize)
+    .offset((clampedPage - 1) * pageSize);
 
   return {
     items: normalizeRows(rows),
-    page,
+    page: clampedPage,
     pageSize,
     total,
     totalPages: computeTotalPages(total, pageSize),

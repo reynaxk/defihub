@@ -61,6 +61,13 @@ export function ChainsTable({
               </TableCell>
             </TableRow>
           ))}
+          {chains.length === 0 && (
+            <TableRow>
+              <TableCell colSpan={watchedChainIds ? 7 : 6} className="py-10 text-center text-muted-foreground">
+                No chains to show yet.
+              </TableCell>
+            </TableRow>
+          )}
         </TableBody>
       </Table>
     </div>

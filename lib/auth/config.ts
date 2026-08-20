@@ -11,7 +11,12 @@ import { accounts, users, verificationTokens } from "@/lib/database/schema";
 import { checkRateLimit, getClientIp } from "@/lib/security/rate-limit";
 
 const credentialsSchema = z.object({
-  email: z.string().email(),
+  // Trimmed/lowercased before it ever reaches a DB comparison or rate-limit
+  // key - email delivery is effectively case-insensitive, so without this,
+  // "User@x.com" and "user@x.com" would look like two different accounts
+  // (and two independent rate-limit buckets) even though they're the same
+  // real mailbox.
+  email: z.string().trim().toLowerCase().email(),
   password: z.string().min(1),
 });
 
@@ -48,8 +53,10 @@ const providers: Provider[] = [
       const { email, password } = parsed.data;
 
       const ip = getClientIp(request);
-      const ipLimit = checkRateLimit(`login-ip:${ip}`, LOGIN_IP_LIMIT);
-      const emailLimit = checkRateLimit(`login-email:${email}`, LOGIN_EMAIL_LIMIT);
+      const [ipLimit, emailLimit] = await Promise.all([
+        checkRateLimit(`login-ip:${ip}`, LOGIN_IP_LIMIT),
+        checkRateLimit(`login-email:${email}`, LOGIN_EMAIL_LIMIT),
+      ]);
       if (!ipLimit.allowed || !emailLimit.allowed) throw new RateLimitedSignin();
 
       const [user] = await db.select().from(users).where(eq(users.email, email));
@@ -89,8 +96,39 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   pages: { signIn: "/login" },
   providers,
   callbacks: {
+    // Sessions are stateless JWTs (required for the Credentials provider,
+    // per the comment above), so a reset password would otherwise stay
+    // silently overridable by any JWT issued before the reset, for that
+    // token's full maxAge. This callback re-runs on every server-side
+    // auth() call and every /api/auth/session fetch (confirmed against
+    // @auth/core's actual session action, not assumed) - not just at
+    // sign-in - so the DB check below actually closes that gap rather than
+    // only covering the moment of sign-in.
     async jwt({ token, user }) {
-      if (user) token.sub = user.id;
+      if (user?.id) {
+        token.sub = user.id;
+        const [dbUser] = await db
+          .select({ passwordChangedAt: users.passwordChangedAt })
+          .from(users)
+          .where(eq(users.id, user.id));
+        token.passwordChangedAt = dbUser?.passwordChangedAt?.getTime() ?? null;
+        return token;
+      }
+
+      if (token.sub) {
+        const [dbUser] = await db
+          .select({ passwordChangedAt: users.passwordChangedAt })
+          .from(users)
+          .where(eq(users.id, token.sub));
+        const dbChangedAt = dbUser?.passwordChangedAt?.getTime() ?? null;
+        // Reject only on an actual mismatch (a reset that happened after
+        // this token was issued) - both being null (never reset) is the
+        // normal case for most accounts and must not invalidate anything.
+        if (dbChangedAt !== null && dbChangedAt !== token.passwordChangedAt) {
+          return null;
+        }
+      }
+
       return token;
     },
     async session({ session, token }) {

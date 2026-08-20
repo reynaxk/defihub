@@ -12,8 +12,9 @@ import {
   primaryKey,
   uniqueIndex,
   index,
+  check,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 
 // ---------------------------------------------------------------------------
 // Chains
@@ -116,6 +117,15 @@ export const protocolMetrics = pgTable(
   },
   (table) => [
     index("protocol_metrics_protocol_ts_idx").on(table.protocolId, table.timestamp),
+    // Every hot list page (home, /protocols x2 per request, /chain/[slug],
+    // CSV export) filters/aggregates by chain_id (either `IS NULL` for the
+    // cross-chain aggregate rows, or `= <chain>` for a specific chain's
+    // rows) and takes MAX(timestamp) or ORDER BY timestamp within that
+    // group - neither the protocol_id-leading index above nor the unique
+    // snapshot index below can serve either without a full scan. Btree
+    // indexes support `IS NULL` on a leading column same as an equality
+    // match, so this one index covers both query shapes.
+    index("protocol_metrics_chain_ts_idx").on(table.chainId, table.timestamp),
     uniqueIndex("protocol_metrics_unique_snapshot").on(
       table.protocolId,
       table.chainId,
@@ -224,6 +234,11 @@ export const protocolAiSummaries = pgTable("protocol_ai_summaries", {
     .references(() => protocols.id, { onDelete: "cascade" }),
   content: text("content").notNull(),
   model: varchar("model", { length: 64 }).notNull(),
+  // TVL at the moment this summary was generated - lets a later read detect
+  // "this summary's scale/risk characterization no longer matches reality"
+  // (e.g. a 50% TVL crash) and stop serving it, rather than caching forever
+  // with no invalidation at all. See getCachedProtocolSummary.
+  tvlAtGeneration: numeric("tvl_at_generation", { precision: 24, scale: 2 }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
@@ -241,6 +256,9 @@ export const protocolAiSummaries = pgTable("protocol_ai_summaries", {
 export const onchainVerifications = pgTable("onchain_verifications", {
   key: varchar("key", { length: 64 }).primaryKey(),
   protocolId: uuid("protocol_id").references(() => protocols.id, { onDelete: "cascade" }),
+  chainId: uuid("chain_id")
+    .notNull()
+    .references(() => chains.id, { onDelete: "cascade" }),
   label: text("label").notNull(),
   poolAddress: varchar("pool_address", { length: 128 }).notNull(),
   tvlUsd: numeric("tvl_usd", { precision: 24, scale: 2 }).notNull(),
@@ -254,16 +272,40 @@ export const onchainVerifications = pgTable("onchain_verifications", {
 // `sessions` table is needed.
 // ---------------------------------------------------------------------------
 
-export const users = pgTable("users", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  name: text("name"),
-  email: text("email").notNull().unique(),
-  emailVerified: timestamp("email_verified", { withTimezone: true }),
-  image: text("image"),
-  // null for OAuth-only accounts
-  passwordHash: text("password_hash"),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+export const users = pgTable(
+  "users",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    name: text("name"),
+    email: text("email").notNull().unique(),
+    emailVerified: timestamp("email_verified", { withTimezone: true }),
+    image: text("image"),
+    // null for OAuth-only accounts
+    passwordHash: text("password_hash"),
+    // Stamped whenever passwordHash changes via the reset-password flow (null
+    // for an account that's never reset its password). Embedded into the JWT
+    // at sign-in and re-checked against this column on every request in
+    // lib/auth/config.ts's jwt callback, so a password reset actually
+    // invalidates sessions issued before it - otherwise a stateless JWT
+    // (required for the Credentials provider) would stay valid for its full
+    // maxAge regardless of a reset, which defeats the point of resetting a
+    // password you suspect is compromised.
+    passwordChangedAt: timestamp("password_changed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    // Added NOT VALID by migration 0019 (existing rows aren't re-checked -
+    // migration 0017's lowercasing deliberately skips unresolved
+    // case-insensitive collision groups rather than auto-merging them, so
+    // some legacy rows may not satisfy this yet), but enforced for every
+    // new INSERT/UPDATE from that migration forward. Registration/login/
+    // forgot-password already normalize email to lowercase before it
+    // reaches the DB (lib/auth/config.ts, app/api/auth/register,
+    // app/api/auth/forgot-password) - this is the backstop that makes that
+    // an actual guarantee rather than just an application-level convention.
+    check("users_email_lowercase", sql`${table.email} = lower(${table.email})`),
+  ],
+);
 
 export const accounts = pgTable(
   "accounts",
@@ -349,6 +391,12 @@ export const alerts = pgTable(
     condition: alertConditionEnum("condition").notNull(),
     threshold: numeric("threshold", { precision: 24, scale: 8 }).notNull(),
     enabled: boolean("enabled").default(true).notNull(),
+    // Whether the condition evaluated true as of the most recent check -
+    // updated every run regardless of outcome, distinct from
+    // lastTriggeredAt (only updated when we actually emailed). Lets the
+    // worker email only on a false->true transition instead of every 10
+    // minutes the condition happens to still hold (see workers/alerts/check.ts).
+    isFiring: boolean("is_firing").default(false).notNull(),
     lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
     lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -358,6 +406,26 @@ export const alerts = pgTable(
     index("alerts_enabled_idx").on(table.enabled),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Rate limiting
+//
+// Postgres-backed, not in-memory: this app deploys as Vercel serverless
+// functions (vercel.json's `crons` array only has meaning there), which
+// routes concurrent requests across multiple isolated instances and cold-
+// starts routinely - an in-memory Map's state isn't shared across any of
+// that, so it couldn't actually enforce a limit under real traffic (every
+// instance sees its own request as the first one). The database is the one
+// piece of shared state every instance already has a connection to, so it's
+// the natural place for this without introducing new infrastructure
+// (Redis/Upstash) just for rate limiting. See lib/security/rate-limit.ts.
+// ---------------------------------------------------------------------------
+
+export const rateLimitBuckets = pgTable("rate_limit_buckets", {
+  key: text("key").primaryKey(),
+  count: integer("count").notNull(),
+  windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+});
 
 // ---------------------------------------------------------------------------
 // Relations (enables db.query.* relational API)
@@ -443,5 +511,9 @@ export const onchainVerificationsRelations = relations(onchainVerifications, ({ 
   protocol: one(protocols, {
     fields: [onchainVerifications.protocolId],
     references: [protocols.id],
+  }),
+  chain: one(chains, {
+    fields: [onchainVerifications.chainId],
+    references: [chains.id],
   }),
 }));

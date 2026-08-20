@@ -2,6 +2,7 @@ import { and, count, desc, eq, ilike, isNotNull, isNull, sql } from "drizzle-orm
 import { db } from "@/lib/database/client";
 import { chains, protocolChains, protocolMetrics, protocols } from "@/lib/database/schema";
 import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
+import { escapeLikePattern } from "@/lib/utils/like-pattern";
 
 // All protocols get upserted with the same `timestamp` value within a single
 // sync run, so "the most recent sync's rows" is just "rows at MAX(timestamp)"
@@ -101,7 +102,7 @@ export async function getProtocolsList(filters: ProtocolFilters = {}): Promise<P
 
   const conditions = [isNull(protocolMetrics.chainId)];
   if (filters.category) conditions.push(eq(protocols.category, filters.category));
-  if (filters.search) conditions.push(ilike(protocols.name, `%${filters.search}%`));
+  if (filters.search) conditions.push(ilike(protocols.name, `%${escapeLikePattern(filters.search)}%`));
 
   let itemsQuery = db
     .select({
@@ -145,16 +146,29 @@ export async function getProtocolsList(filters: ProtocolFilters = {}): Promise<P
   const sortColumn = protocolSortColumn(filters.sortBy);
   const sortDir = filters.sortDir === "asc" ? sql`asc` : sql`desc`;
 
-  const [rows, countRows] = await Promise.all([
-    itemsQuery
-      .where(and(...conditions))
-      .orderBy(sql`${sortColumn} ${sortDir} nulls last`)
-      .limit(pageSize)
-      .offset((page - 1) * pageSize),
-    countQuery.where(and(...conditions)),
-  ]);
-
+  // Count first, then clamp the requested page to what actually exists,
+  // before computing the offset - normalizePagination only floors/defaults
+  // page, it can't clamp to totalPages since total isn't known yet at that
+  // point. Without this, an out-of-range page (stale bookmark after the
+  // underlying data set shrinks, or a hand-edited URL) would offset past
+  // every real row, and the caller's "Showing X-Y of Z" display math (built
+  // from this same returned `page`) would report a range that doesn't
+  // match the (empty) items actually returned.
+  const countRows = await countQuery.where(and(...conditions));
   const total = countRows[0]?.value ?? 0;
+  const clampedPage = Math.min(page, computeTotalPages(total, pageSize));
+
+  const rows = await itemsQuery
+    .where(and(...conditions))
+    // A secondary sort key on the primary key is required for stable
+    // pagination: Postgres doesn't guarantee tie order otherwise, and
+    // ties are common here (tvlChange1d/7d, fees24h, revenue24h are
+    // frequently null or 0 for many protocols) - without this, the same
+    // row can appear on two different pages, or get skipped, purely from
+    // how a given LIMIT/OFFSET happens to land within a tied group.
+    .orderBy(sql`${sortColumn} ${sortDir} nulls last`, protocols.id)
+    .limit(pageSize)
+    .offset((clampedPage - 1) * pageSize);
 
   return {
     items: rows.map((r) => ({
@@ -166,7 +180,7 @@ export async function getProtocolsList(filters: ProtocolFilters = {}): Promise<P
       tvlChange1d: r.tvlChange1d != null ? Number(r.tvlChange1d) : null,
       tvlChange7d: r.tvlChange7d != null ? Number(r.tvlChange7d) : null,
     })),
-    page,
+    page: clampedPage,
     pageSize,
     total,
     totalPages: computeTotalPages(total, pageSize),
@@ -186,7 +200,7 @@ export async function getProtocolsForExport(
 ): Promise<ProtocolListItem[]> {
   const conditions = [isNull(protocolMetrics.chainId)];
   if (filters.category) conditions.push(eq(protocols.category, filters.category));
-  if (filters.search) conditions.push(ilike(protocols.name, `%${filters.search}%`));
+  if (filters.search) conditions.push(ilike(protocols.name, `%${escapeLikePattern(filters.search)}%`));
 
   let itemsQuery = db
     .select({

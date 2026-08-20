@@ -134,29 +134,36 @@ export async function getTokensPageList(
   const where = conditions.length ? and(...conditions) : undefined;
   const orderColumn = tokenSortColumn(opts.sort);
 
-  const [rows, countRows] = await Promise.all([
-    db
-      .select(tokenListColumns())
-      .from(tokens)
-      .innerJoin(chains, eq(chains.id, tokens.chainId))
-      .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
-      .where(where)
-      .orderBy(sql`${orderColumn} desc nulls last`)
-      .limit(pageSize)
-      .offset((page - 1) * pageSize),
-    db
-      .select({ value: count() })
-      .from(tokens)
-      .innerJoin(chains, eq(chains.id, tokens.chainId))
-      .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
-      .where(where),
-  ]);
-
+  // Count first, then clamp the requested page to what actually exists,
+  // before computing the offset - see the identical comment in
+  // getProtocolsList (queries/protocols.ts) for why this needs to be
+  // sequential rather than run in parallel with the items query.
+  const countRows = await db
+    .select({ value: count() })
+    .from(tokens)
+    .innerJoin(chains, eq(chains.id, tokens.chainId))
+    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+    .where(where);
   const total = countRows[0]?.value ?? 0;
+  const clampedPage = Math.min(page, computeTotalPages(total, pageSize));
+
+  const rows = await db
+    .select(tokenListColumns())
+    .from(tokens)
+    .innerJoin(chains, eq(chains.id, tokens.chainId))
+    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+    .where(where)
+    // Secondary sort on id for stable pagination - marketCap/volume24h/
+    // priceChange24h tie frequently (many tokens sit at null or 0), and
+    // Postgres doesn't guarantee tie order across separate LIMIT/OFFSET
+    // calls without one.
+    .orderBy(sql`${orderColumn} desc nulls last`, tokens.id)
+    .limit(pageSize)
+    .offset((clampedPage - 1) * pageSize);
 
   return {
     items: normalizeTokenRows(rows),
-    page,
+    page: clampedPage,
     pageSize,
     total,
     totalPages: computeTotalPages(total, pageSize),

@@ -1,0 +1,1 @@
+ALTER TABLE "alerts" ADD COLUMN "is_firing" boolean DEFAULT false NOT NULL;

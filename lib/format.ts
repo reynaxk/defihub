@@ -52,12 +52,22 @@ export function formatApy(value: number | null | undefined): string {
   return `${value.toFixed(2)}%`;
 }
 
+// Explicit timeZone: "UTC" - its one call site (app/protocol/[slug]/page.tsx)
+// runs in a Server Component, so this executes on the server, not in a
+// visiting browser. Without a pinned zone, Intl.DateTimeFormat resolves to
+// wherever the server process happens to be deployed, and every visitor
+// worldwide would see the identical wall-clock string computed from that
+// zone rather than anything meaningful to them. UTC is at least
+// deterministic and matches the label below, unlike the app's other
+// toLocaleString() calls, which are fine deferring to the browser's own
+// locale/zone because those specifically run client-side.
 const dateTimeFormat = new Intl.DateTimeFormat("en-US", {
   dateStyle: "medium",
   timeStyle: "short",
+  timeZone: "UTC",
 });
 
 export function formatDate(value: Date | string | null | undefined): string {
   if (value == null) return "—";
-  return dateTimeFormat.format(new Date(value));
+  return `${dateTimeFormat.format(new Date(value))} UTC`;
 }

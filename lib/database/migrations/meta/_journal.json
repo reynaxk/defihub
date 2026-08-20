@@ -78,6 +78,69 @@
       "when": 1787041942096,
       "tag": "0010_lyrical_warlock",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1787090697002,
+      "tag": "0011_add_onchain_verifications_chain_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1787090778533,
+      "tag": "0012_onchain_verifications_chain_id_not_null",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1787099264570,
+      "tag": "0013_alerts_is_firing",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1787102672235,
+      "tag": "0014_protocol_metrics_chain_ts_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1787130136677,
+      "tag": "0015_ai_summary_tvl_at_generation",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1787131904093,
+      "tag": "0016_rate_limit_buckets",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787138672125,
+      "tag": "0017_lowercase_user_emails",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1787138842680,
+      "tag": "0018_many_the_order",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1787147252096,
+      "tag": "0019_productive_garia",
+      "breakpoints": true
     }
   ]
 }

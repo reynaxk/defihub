@@ -210,8 +210,15 @@ export async function checkAlerts() {
       reading.previous,
     );
 
-    if (fires) {
-      await sendEmail({
+    // Only email on a false->true transition, not every 10-minute tick the
+    // condition still holds - an "above $X" alert typically stays above $X
+    // for hours/days once crossed, so without this check every enabled
+    // alert would re-send an email every single run for as long as its
+    // condition remains true. isFiring tracks the condition's state as of
+    // the last check (updated below regardless of outcome) independently of
+    // lastTriggeredAt, which stays "the last time we actually emailed".
+    if (fires && !alert.isFiring) {
+      const sent = await sendEmail({
         to: userEmail,
         subject: `DeFiHub alert: ${reading.displayName}`,
         html: alertEmailHtml({
@@ -222,8 +229,20 @@ export async function checkAlerts() {
           appUrl: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
         }),
       });
-      await db.update(alerts).set({ lastTriggeredAt: new Date() }).where(eq(alerts.id, alert.id));
-      triggered++;
+      // isFiring only flips to true once the email actually sent - if
+      // Resend failed, this alert is left exactly as it was so the next
+      // run's `fires && !alert.isFiring` check is still true and retries
+      // it, instead of a failed send silently being treated the same as a
+      // delivered one and never being retried.
+      if (sent) {
+        await db
+          .update(alerts)
+          .set({ isFiring: true, lastTriggeredAt: new Date() })
+          .where(eq(alerts.id, alert.id));
+        triggered++;
+      }
+    } else if (fires !== alert.isFiring) {
+      await db.update(alerts).set({ isFiring: fires }).where(eq(alerts.id, alert.id));
     }
   }
 

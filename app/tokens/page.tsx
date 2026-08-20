@@ -43,8 +43,12 @@ export default async function TokensPage({
     result.items.map((t) => t.id),
   );
 
-  const firstRow = (page - 1) * result.pageSize + 1;
-  const lastRow = Math.min(result.total, page * result.pageSize);
+  // Uses result.page (what getTokensPageList actually normalized/queried
+  // with) rather than the raw local `page`, so an out-of-range or
+  // non-integer ?page= value doesn't produce a "Showing X-Y" range that
+  // doesn't match the rows actually rendered below.
+  const firstRow = (result.page - 1) * result.pageSize + 1;
+  const lastRow = Math.min(result.total, result.page * result.pageSize);
 
   function buildHref(targetPage: number) {
     const query = new URLSearchParams();
@@ -77,7 +81,7 @@ export default async function TokensPage({
         />
       </div>
 
-      <Pagination page={page} totalPages={result.totalPages} buildHref={buildHref} />
+      <Pagination page={result.page} totalPages={result.totalPages} buildHref={buildHref} />
     </div>
   );
 }

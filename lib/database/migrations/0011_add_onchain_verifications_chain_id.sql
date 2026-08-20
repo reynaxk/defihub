@@ -1,0 +1,2 @@
+ALTER TABLE "onchain_verifications" ADD COLUMN "chain_id" uuid;--> statement-breakpoint
+ALTER TABLE "onchain_verifications" ADD CONSTRAINT "onchain_verifications_chain_id_chains_id_fk" FOREIGN KEY ("chain_id") REFERENCES "public"."chains"("id") ON DELETE cascade ON UPDATE no action;

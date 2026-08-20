@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -31,6 +31,22 @@ export function ProtocolFilters({
   const searchParams = useSearchParams();
   const [search, setSearch] = useState(searchParams.get("q") ?? "");
   const [, startTransition] = useTransition();
+  const lastQ = useRef(searchParams.get("q") ?? "");
+
+  // Resyncs the search input when the URL changes for a reason other than
+  // this component's own updateParam() call - e.g. browser back/forward.
+  // Without this, the results table (server-rendered from the URL) reverts
+  // correctly on Back, but this input keeps showing stale text since local
+  // state only ever updates via its own onChange/Enter/blur. The ref guard
+  // makes this a no-op on the round-trip from this component's own pushes,
+  // where searchParams already matches local state by the time it lands.
+  useEffect(() => {
+    const q = searchParams.get("q") ?? "";
+    if (lastQ.current !== q) {
+      lastQ.current = q;
+      setSearch(q);
+    }
+  }, [searchParams]);
 
   function updateParam(key: string, value: string | null) {
     const params = new URLSearchParams(searchParams.toString());

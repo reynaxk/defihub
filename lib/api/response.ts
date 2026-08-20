@@ -7,9 +7,9 @@ import { checkRateLimit, getClientIp } from "@/lib/security/rate-limit";
 // subscriptions (metered, per-key limits) actually ship.
 const PUBLIC_API_LIMIT = { limit: 60, windowMs: 60 * 1000 };
 
-export function checkPublicApiRateLimit(request: Request): NextResponse | null {
+export async function checkPublicApiRateLimit(request: Request): Promise<NextResponse | null> {
   const ip = getClientIp(request);
-  const result = checkRateLimit(`public-api:${ip}`, PUBLIC_API_LIMIT);
+  const result = await checkRateLimit(`public-api:${ip}`, PUBLIC_API_LIMIT);
   if (!result.allowed) {
     return apiError("Rate limit exceeded (60 requests/minute). Try again shortly.", 429, {
       "Retry-After": String(result.retryAfterSeconds),

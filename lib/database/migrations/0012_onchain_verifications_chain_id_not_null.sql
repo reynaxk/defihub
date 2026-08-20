@@ -1,0 +1,2 @@
+UPDATE "onchain_verifications" SET "chain_id" = (SELECT "id" FROM "chains" WHERE "slug" = 'ethereum') WHERE "chain_id" IS NULL;--> statement-breakpoint
+ALTER TABLE "onchain_verifications" ALTER COLUMN "chain_id" SET NOT NULL;

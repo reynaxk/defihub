@@ -4,6 +4,14 @@ import { z } from "zod";
 import { auth } from "@/lib/auth/config";
 import { db } from "@/lib/database/client";
 import { alertConditionEnum, alertTypeEnum, alerts } from "@/lib/database/schema";
+import { checkRateLimit } from "@/lib/security/rate-limit";
+
+// Each alert is checked every 10 minutes indefinitely once created (see
+// workers/alerts/check.ts) and can email on every future crossing - unlike
+// a one-shot action, the cost here compounds over the alert's whole
+// lifetime, not just at creation. Capped per user like every other
+// cost-incurring authenticated route.
+const CREATE_ALERT_LIMIT = { limit: 20, windowMs: 60 * 60 * 1000 };
 
 const createAlertSchema = z.object({
   type: z.enum(alertTypeEnum.enumValues),
@@ -28,6 +36,14 @@ export async function GET() {
 export async function POST(request: Request) {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const limited = await checkRateLimit(`create-alert:${session.user.id}`, CREATE_ALERT_LIMIT);
+  if (!limited.allowed) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded. Try again later." },
+      { status: 429, headers: { "Retry-After": String(limited.retryAfterSeconds) } },
+    );
+  }
 
   const body = await request.json().catch(() => null);
   const parsed = createAlertSchema.safeParse(body);

@@ -31,7 +31,7 @@ const CONDITIONS = [
 
 const createAlertSchema = z.object({
   type: z.enum(["protocol_tvl", "chain_tvl", "token_price", "pool_apy"]),
-  target: z.string().min(1, "Required"),
+  target: z.string().min(1, "Required").max(256, "At most 256 characters"),
   condition: z.enum(["above", "below", "percent_change_up", "percent_change_down"]),
   threshold: z
     .string()
@@ -274,7 +274,11 @@ function AlertGroup({
                 </TableCell>
                 <TableCell className="text-right tabular-nums">{alert.threshold}</TableCell>
                 <TableCell>
-                  <Switch checked={alert.enabled} onCheckedChange={(checked) => onToggle(alert.id, checked)} />
+                  <Switch
+                    checked={alert.enabled}
+                    onCheckedChange={(checked) => onToggle(alert.id, checked)}
+                    aria-label={`${alert.enabled ? "Disable" : "Enable"} alert for ${alert.target}`}
+                  />
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {alert.lastTriggeredAt ? new Date(alert.lastTriggeredAt).toLocaleString() : "Never"}

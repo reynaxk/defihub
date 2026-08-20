@@ -69,8 +69,22 @@ export async function POST(request: Request) {
     // error's real shape, not assumed) - `err.code` on the outer
     // Drizzle-thrown error is undefined; the SQLSTATE is at err.cause.code.
     const cause = err && typeof err === "object" && "cause" in err ? err.cause : null;
-    if (cause && typeof cause === "object" && "code" in cause && cause.code === "23503") {
+    const code = cause && typeof cause === "object" && "code" in cause ? cause.code : null;
+    if (code === "23503") {
       return NextResponse.json({ error: "That item doesn't exist" }, { status: 400 });
+    }
+    // 23505 = unique_violation: the check-then-insert above isn't atomic, so
+    // two requests for the same (userId, item) racing (a double-click before
+    // the button's disabled state commits to the DOM, or two open tabs) can
+    // both pass the "not already watched" check before either commits. The
+    // loser's insert then trips the table's real unique index
+    // (lib/database/schema.ts's watchlist_user_*_unique constraints) instead
+    // of anything this route validates itself. Since this is a toggle whose
+    // goal state is "watched", the loser having lost the race doesn't mean
+    // anything went wrong from the caller's point of view - the item is
+    // watched either way - so this responds like a success, not an error.
+    if (code === "23505") {
+      return NextResponse.json({ watching: true });
     }
     throw err;
   }

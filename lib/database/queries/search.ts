@@ -1,6 +1,7 @@
 import { eq, ilike, or } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, protocols, tokens } from "@/lib/database/schema";
+import { escapeLikePattern } from "@/lib/utils/like-pattern";
 
 const RESULTS_PER_KIND = 5;
 
@@ -20,7 +21,7 @@ export interface SearchResult {
 export async function search(query: string): Promise<SearchResult[]> {
   const q = query.trim();
   if (q.length < 2) return [];
-  const pattern = `%${q}%`;
+  const pattern = `%${escapeLikePattern(q)}%`;
 
   const [protocolRows, chainRows, tokenRows] = await Promise.all([
     db

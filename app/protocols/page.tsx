@@ -54,8 +54,13 @@ export default async function ProtocolsPage({
     result.items.map((p) => p.id),
   );
 
-  const firstRow = (page - 1) * result.pageSize + 1;
-  const lastRow = Math.min(result.total, page * result.pageSize);
+  // Uses result.page (what getProtocolsList actually normalized/queried
+  // with - floored, clamped to >= 1) rather than the raw local `page`, so
+  // an out-of-range page (?page=999 past the last real page) or a
+  // non-integer one (?page=2.9) doesn't produce a "Showing X-Y" range or
+  // rank numbers that don't match the rows actually rendered below.
+  const firstRow = (result.page - 1) * result.pageSize + 1;
+  const lastRow = Math.min(result.total, result.page * result.pageSize);
 
   function buildHref(targetPage: number) {
     const query = new URLSearchParams();
@@ -86,13 +91,13 @@ export default async function ProtocolsPage({
       <div className="mt-4">
         <ProtocolsTable
           protocols={result.items}
-          rankOffset={(page - 1) * result.pageSize}
+          rankOffset={(result.page - 1) * result.pageSize}
           isSignedIn={Boolean(session?.user)}
           watchedProtocolIds={watchedProtocolIds}
         />
       </div>
 
-      <Pagination page={page} totalPages={result.totalPages} buildHref={buildHref} />
+      <Pagination page={result.page} totalPages={result.totalPages} buildHref={buildHref} />
     </div>
   );
 }

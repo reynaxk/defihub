@@ -9,7 +9,7 @@ const SEARCH_LIMIT = { limit: 60, windowMs: 60 * 1000 };
 
 export async function GET(request: Request) {
   const ip = getClientIp(request);
-  const limited = checkRateLimit(`search:${ip}`, SEARCH_LIMIT);
+  const limited = await checkRateLimit(`search:${ip}`, SEARCH_LIMIT);
   if (!limited.allowed) {
     return NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 });
   }

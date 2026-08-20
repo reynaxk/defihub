@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -29,6 +29,31 @@ export function YieldFilters({
   const [search, setSearch] = useState(searchParams.get("q") ?? "");
   const [minTvl, setMinTvl] = useState(searchParams.get("minTvl") ?? "");
   const [, startTransition] = useTransition();
+  const lastQ = useRef(searchParams.get("q") ?? "");
+  const lastMinTvl = useRef(searchParams.get("minTvl") ?? "");
+
+  // Unlike the Selects below (which read searchParams.get(...) directly on
+  // every render), search/minTvl are local state so typing doesn't push a
+  // URL update on every keystroke - only on Enter/blur. That means they
+  // don't automatically resync when the URL changes for a reason other than
+  // this component's own updateParams() call, e.g. browser back/forward:
+  // the results table (server-rendered from the URL) reverts correctly, but
+  // these inputs would keep showing stale text. Resyncing here fixes that;
+  // the ref guard makes this a no-op on the round-trip from this
+  // component's own pushes, where searchParams already matches local state
+  // by the time it lands.
+  useEffect(() => {
+    const q = searchParams.get("q") ?? "";
+    if (lastQ.current !== q) {
+      lastQ.current = q;
+      setSearch(q);
+    }
+    const minTvlParam = searchParams.get("minTvl") ?? "";
+    if (lastMinTvl.current !== minTvlParam) {
+      lastMinTvl.current = minTvlParam;
+      setMinTvl(minTvlParam);
+    }
+  }, [searchParams]);
 
   function updateParams(updates: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams.toString());

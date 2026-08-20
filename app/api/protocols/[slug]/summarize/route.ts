@@ -22,7 +22,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     return NextResponse.json({ error: "AI summary unavailable" }, { status: 503 });
   }
 
-  const limited = checkRateLimit(`ai-summary:${session.user.id}`, SUMMARIZE_LIMIT);
+  const limited = await checkRateLimit(`ai-summary:${session.user.id}`, SUMMARIZE_LIMIT);
   if (!limited.allowed) {
     return NextResponse.json(
       { error: "Rate limit exceeded. Try again later." },

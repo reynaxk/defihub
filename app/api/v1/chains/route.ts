@@ -6,7 +6,7 @@ export async function OPTIONS() {
 }
 
 export async function GET(request: Request) {
-  const limited = checkPublicApiRateLimit(request);
+  const limited = await checkPublicApiRateLimit(request);
   if (limited) return limited;
 
   const chains = await getTopChains();

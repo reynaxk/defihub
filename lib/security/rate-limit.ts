@@ -1,77 +1,104 @@
-// In-memory sliding-window rate limiter. Deliberately not Redis-backed:
-// this app runs as a single instance today, and Redis was explicitly
-// deferred until the product actually needs shared cache/queue state -
-// inventing that infra just for rate limiting would be scope creep.
-// Caveat this carries: limits reset on redeploy and don't share state
-// across instances, so this needs to move to a shared store (Redis, etc.)
-// before running more than one instance in production.
+import { sql } from "drizzle-orm";
+import { db } from "@/lib/database/client";
 
-interface Bucket {
-  count: number;
-  windowStart: number;
-}
+// Re-exported so every existing call site
+// (`import { checkRateLimit, getClientIp } from "@/lib/security/rate-limit"`)
+// keeps working unchanged - the implementation moved to its own module so
+// it stays importable in tests without pulling in the DB client. See
+// client-ip.ts for why.
+export { getClientIp } from "./client-ip";
 
-const buckets = new Map<string, Bucket>();
-
-// Periodic sweep so the map doesn't grow unbounded across long-running
-// processes. Five minutes is frequent enough to matter, infrequent enough
-// to not cost anything.
-const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
-let lastSweep = Date.now();
-
-function sweep(maxWindowMs: number) {
-  const now = Date.now();
-  if (now - lastSweep < SWEEP_INTERVAL_MS) return;
-  lastSweep = now;
-  for (const [key, bucket] of buckets) {
-    if (now - bucket.windowStart >= maxWindowMs) buckets.delete(key);
-  }
-}
+// Postgres-backed, not in-memory. This app deploys as Vercel serverless
+// functions (vercel.json's `crons` array only has meaning there), which
+// routes concurrent requests across multiple isolated instances and cold-
+// starts routinely - an in-memory Map's state isn't shared across any of
+// that, so it couldn't actually enforce a limit under real traffic (every
+// instance sees its own request as the first one, and every cold start
+// resets everyone's count to zero for free). The database is the one piece
+// of shared state every instance already has a connection to, so it's the
+// natural place for this without introducing new infrastructure (Redis/
+// Upstash) just for rate limiting. See lib/database/schema.ts's
+// rateLimitBuckets table for the storage-side reasoning.
+//
+// The increment-and-check happens in a single INSERT ... ON CONFLICT
+// statement, not a separate read-then-write - Postgres executes the
+// UPDATE side of an ON CONFLICT atomically per row (it takes a row-level
+// lock for the duration of the statement), so two concurrent requests for
+// the same key are serialized by the database itself rather than racing in
+// application code. Whichever one commits second sees the first one's
+// incremented count.
 
 export interface RateLimitResult {
   allowed: boolean;
   retryAfterSeconds: number;
 }
 
-export function checkRateLimit(
-  key: string,
-  { limit, windowMs }: { limit: number; windowMs: number },
-): RateLimitResult {
-  sweep(windowMs);
+// Deliberately probabilistic rather than a separate cron job or a JS-level
+// setInterval: this runs inside the same serverless function invocations
+// that are already calling checkRateLimit, so there's no persistent
+// process to hang a timer off, and adding a dedicated cron entry just for
+// housekeeping felt like more moving parts than this needs. At normal
+// traffic volumes across this app's dozen-plus rate-limited routes, 1%
+// still fires often enough to keep the table from growing unbounded.
+// Awaited (not fire-and-forget) specifically because a serverless
+// invocation can be frozen/torn down the instant its response is sent -
+// an un-awaited promise here could simply never run to completion.
+const CLEANUP_PROBABILITY = 0.01;
+const BUCKET_RETENTION = sql`interval '1 day'`;
 
-  const now = Date.now();
-  const bucket = buckets.get(key);
-
-  if (!bucket || now - bucket.windowStart >= windowMs) {
-    buckets.set(key, { count: 1, windowStart: now });
-    return { allowed: true, retryAfterSeconds: 0 };
+async function maybeCleanupOldBuckets(): Promise<void> {
+  if (Math.random() >= CLEANUP_PROBABILITY) return;
+  try {
+    await db.execute(sql`delete from rate_limit_buckets where window_start < now() - ${BUCKET_RETENTION}`);
+  } catch (err) {
+    // Best-effort housekeeping - a failed cleanup shouldn't take down rate
+    // limiting itself, which is the thing actually protecting the route.
+    console.error("[rate-limit] cleanup failed:", err);
   }
-
-  if (bucket.count >= limit) {
-    return {
-      allowed: false,
-      retryAfterSeconds: Math.ceil((bucket.windowStart + windowMs - now) / 1000),
-    };
-  }
-
-  bucket.count++;
-  return { allowed: true, retryAfterSeconds: 0 };
 }
 
-/**
- * Best-effort client IP extraction. Standard `Request` objects have no
- * `.ip` field (unlike the old `NextApiRequest`); this is what Vercel and
- * most reverse proxies set. Falls back to a shared bucket in
- * environments without a proxy in front (e.g. bare local dev) - less
- * precise, but still bounds total request volume rather than doing
- * nothing.
- */
-export function getClientIp(request: Request): string {
-  const forwardedFor = request.headers.get("x-forwarded-for");
-  if (forwardedFor) return forwardedFor.split(",")[0].trim();
+interface BucketRow extends Record<string, unknown> {
+  count: number;
+  window_start: string;
+}
 
-  const realIp = request.headers.get("x-real-ip");
-  if (realIp) return realIp;
+export async function checkRateLimit(
+  key: string,
+  { limit, windowMs }: { limit: number; windowMs: number },
+): Promise<RateLimitResult> {
+  await maybeCleanupOldBuckets();
 
-  return "unknown";
+  const windowInterval = sql`make_interval(secs => ${windowMs / 1000})`;
+
+  // `now()` is evaluated once per statement in Postgres (not once per
+  // reference), so the two uses below - in the fresh-row default and in
+  // the conflict branch's staleness check - are guaranteed consistent
+  // within this one round trip.
+  const rows = await db.execute<BucketRow>(sql`
+    insert into rate_limit_buckets (key, count, window_start)
+    values (${key}, 1, now())
+    on conflict (key) do update set
+      count = case
+        when rate_limit_buckets.window_start <= now() - ${windowInterval}
+          then 1
+          else rate_limit_buckets.count + 1
+      end,
+      window_start = case
+        when rate_limit_buckets.window_start <= now() - ${windowInterval}
+          then now()
+          else rate_limit_buckets.window_start
+      end
+    returning count, window_start
+  `);
+
+  const row = rows[0];
+  const count = Number(row.count);
+  const windowStartMs = new Date(row.window_start).getTime();
+
+  if (count > limit) {
+    const retryAfterSeconds = Math.max(0, Math.ceil((windowStartMs + windowMs - Date.now()) / 1000));
+    return { allowed: false, retryAfterSeconds };
+  }
+
+  return { allowed: true, retryAfterSeconds: 0 };
 }

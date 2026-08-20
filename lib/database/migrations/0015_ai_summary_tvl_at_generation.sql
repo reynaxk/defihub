@@ -1,0 +1,1 @@
+ALTER TABLE "protocol_ai_summaries" ADD COLUMN "tvl_at_generation" numeric(24, 2);

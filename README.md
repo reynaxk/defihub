@@ -43,7 +43,7 @@ Fill in `DATABASE_URL` at minimum. Everything else is optional:
 | `COINGECKO_API_KEY` | No | Price/token sync uses the public rate limit (~5-15 req/min) instead of the free Demo plan's 100 req/min |
 | `ANTHROPIC_API_KEY` | No | The "AI summary" button on protocol pages doesn't render |
 | `RESEND_API_KEY` | No | Alert emails are logged to the console instead of sent |
-| `ETH_RPC_URL` | No | Falls back to a free public Ethereum RPC endpoint for the on-chain verification check |
+| `ETHEREUM_RPC_URL` / `ARBITRUM_RPC_URL` / `BASE_RPC_URL` / `BNB_CHAIN_RPC_URL` / `AVALANCHE_RPC_URL` / `POLYGON_RPC_URL` / `OPTIMISM_RPC_URL` | No | Each falls back to a free public RPC endpoint, used by the on-chain verification check and the `/wallet` balance viewer |
 
 ### 4. Set up the database
 

@@ -1,48 +1,30 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { checkRateLimit, getClientIp } from "./rate-limit";
-
-describe("checkRateLimit", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("allows requests up to the limit", () => {
-    const key = `test-${Math.random()}`;
-    for (let i = 0; i < 3; i++) {
-      expect(checkRateLimit(key, { limit: 3, windowMs: 60_000 }).allowed).toBe(true);
-    }
-  });
-
-  it("blocks the request that exceeds the limit", () => {
-    const key = `test-${Math.random()}`;
-    for (let i = 0; i < 3; i++) checkRateLimit(key, { limit: 3, windowMs: 60_000 });
-    const result = checkRateLimit(key, { limit: 3, windowMs: 60_000 });
-    expect(result.allowed).toBe(false);
-    expect(result.retryAfterSeconds).toBeGreaterThan(0);
-  });
-
-  it("resets after the window elapses", () => {
-    const key = `test-${Math.random()}`;
-    for (let i = 0; i < 3; i++) checkRateLimit(key, { limit: 3, windowMs: 60_000 });
-    expect(checkRateLimit(key, { limit: 3, windowMs: 60_000 }).allowed).toBe(false);
-
-    vi.advanceTimersByTime(60_001);
-
-    expect(checkRateLimit(key, { limit: 3, windowMs: 60_000 }).allowed).toBe(true);
-  });
-
-  it("tracks separate keys independently", () => {
-    const keyA = `test-a-${Math.random()}`;
-    const keyB = `test-b-${Math.random()}`;
-    for (let i = 0; i < 3; i++) checkRateLimit(keyA, { limit: 3, windowMs: 60_000 });
-    expect(checkRateLimit(keyA, { limit: 3, windowMs: 60_000 }).allowed).toBe(false);
-    expect(checkRateLimit(keyB, { limit: 3, windowMs: 60_000 }).allowed).toBe(true);
-  });
-});
+// checkRateLimit's tests below hit a real Postgres database rather than
+// mocking it: its actual correctness lives entirely in a single SQL
+// statement's atomicity (the INSERT ... ON CONFLICT in rate-limit.ts's
+// checkRateLimit), which a mock can't meaningfully exercise - the whole
+// point of that statement shape is that Postgres itself serializes
+// concurrent requests for the same key, not application code, so the only
+// way to actually verify it is to fire real concurrent requests at a real
+// database and check what comes back.
+//
+// This requires DATABASE_URL to resolve to a real, reachable Postgres
+// instance - the same requirement every other DB-touching script in this
+// project already has (db:migrate, seed, the sync:* workers). The "test"
+// npm script loads .env.local via dotenv-cli for exactly this reason (see
+// package.json) - previously it didn't, which is why these tests didn't
+// exist here before: importing anything that touches the DB client threw
+// immediately without DATABASE_URL, and vitest doesn't load .env.local on
+// its own.
+//
+// Every test below uses a key prefixed with a random per-run id so repeated
+// local runs can't collide with leftover rows from a previous run, and all
+// rows are deleted in the top-level afterAll.
+import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
+import { afterAll, describe, expect, it } from "vitest";
+import { closeDb, db } from "@/lib/database/client";
+import { getClientIp } from "./client-ip";
+import { checkRateLimit } from "./rate-limit";
 
 describe("getClientIp", () => {
   it("prefers x-forwarded-for, using the first address", () => {
@@ -61,4 +43,85 @@ describe("getClientIp", () => {
     const req = new Request("http://localhost");
     expect(getClientIp(req)).toBe("unknown");
   });
+});
+
+describe("checkRateLimit", () => {
+  const runId = randomUUID();
+  const keyPrefix = `test-rate-limit-${runId}-`;
+  const testKey = (suffix: string) => `${keyPrefix}${suffix}`;
+
+  afterAll(async () => {
+    await db.execute(sql`delete from rate_limit_buckets where key like ${`${keyPrefix}%`}`);
+    await closeDb();
+  });
+
+  it("allows exactly `limit` requests within a window and blocks the next one", async () => {
+    const key = testKey("boundary");
+    const opts = { limit: 3, windowMs: 60_000 };
+
+    const results = [];
+    for (let i = 0; i < 4; i++) {
+      results.push(await checkRateLimit(key, opts));
+    }
+
+    expect(results.map((r) => r.allowed)).toEqual([true, true, true, false]);
+  });
+
+  it("reports retryAfterSeconds as 0 while allowed and positive once blocked", async () => {
+    const key = testKey("retry-after");
+    const opts = { limit: 1, windowMs: 60_000 };
+
+    const first = await checkRateLimit(key, opts);
+    const second = await checkRateLimit(key, opts);
+
+    expect(first.allowed).toBe(true);
+    expect(first.retryAfterSeconds).toBe(0);
+    expect(second.allowed).toBe(false);
+    expect(second.retryAfterSeconds).toBeGreaterThan(0);
+    expect(second.retryAfterSeconds).toBeLessThanOrEqual(60);
+  });
+
+  it("resets the window once it elapses, allowing requests again", async () => {
+    const key = testKey("window-reset");
+    const opts = { limit: 1, windowMs: 300 };
+
+    const first = await checkRateLimit(key, opts);
+    const second = await checkRateLimit(key, opts);
+    expect(first.allowed).toBe(true);
+    expect(second.allowed).toBe(false);
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const third = await checkRateLimit(key, opts);
+    expect(third.allowed).toBe(true);
+  });
+
+  it("tracks independent keys separately, with no cross-key interference", async () => {
+    const keyA = testKey("independent-a");
+    const keyB = testKey("independent-b");
+    const opts = { limit: 1, windowMs: 60_000 };
+
+    const a1 = await checkRateLimit(keyA, opts);
+    const b1 = await checkRateLimit(keyB, opts);
+    const a2 = await checkRateLimit(keyA, opts);
+    const b2 = await checkRateLimit(keyB, opts);
+
+    expect(a1.allowed).toBe(true);
+    expect(b1.allowed).toBe(true);
+    expect(a2.allowed).toBe(false);
+    expect(b2.allowed).toBe(false);
+  });
+
+  it("serializes truly concurrent requests for the same key atomically - exactly `limit` succeed", async () => {
+    const key = testKey("concurrent");
+    const opts = { limit: 5, windowMs: 60_000 };
+
+    // Promise.all, not a for-loop: these fire as genuinely simultaneous
+    // requests, not sequenced ones - the in-memory limiter this replaced
+    // would have raced and let more than `limit` through here.
+    const results = await Promise.all(Array.from({ length: 20 }, () => checkRateLimit(key, opts)));
+
+    const allowedCount = results.filter((r) => r.allowed).length;
+    expect(allowedCount).toBe(5);
+  }, 15_000);
 });

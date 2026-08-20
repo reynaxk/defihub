@@ -8,7 +8,11 @@ import { checkRateLimit, getClientIp } from "@/lib/security/rate-limit";
 
 const registerSchema = z.object({
   name: z.string().min(1).max(120).optional(),
-  email: z.string().email(),
+  // Trimmed/lowercased so "User@x.com" can't register a second, shadow
+  // account backed by the same real mailbox as an existing "user@x.com" -
+  // see lib/auth/config.ts's credentialsSchema for the matching login-side
+  // fix.
+  email: z.string().trim().toLowerCase().email(),
   password: z.string().min(8).max(128),
 });
 
@@ -18,7 +22,7 @@ const REGISTER_LIMIT = { limit: 5, windowMs: 60 * 60 * 1000 };
 
 export async function POST(request: Request) {
   const ip = getClientIp(request);
-  const rateLimit = checkRateLimit(`register:${ip}`, REGISTER_LIMIT);
+  const rateLimit = await checkRateLimit(`register:${ip}`, REGISTER_LIMIT);
   if (!rateLimit.allowed) {
     return NextResponse.json(
       { error: "Too many accounts created from this address. Try again later." },

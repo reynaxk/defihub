@@ -81,8 +81,8 @@ function ChainCard({ chain }: { chain: ChainResult }) {
           {Number(chain.nativeBalance) > 0 && (
             <div className="flex items-center justify-between text-sm">
               <span className="text-muted-foreground">{chain.nativeToken}</span>
-              <span className="flex items-baseline gap-2">
-                <span className="tabular-nums font-medium">{chain.nativeBalance}</span>
+              <span className="flex min-w-0 flex-col items-end">
+                <span className="w-full truncate text-right tabular-nums font-medium">{chain.nativeBalance}</span>
                 <span className="tabular-nums text-xs text-muted-foreground">
                   {chain.nativeValueUsd != null ? formatUsd(chain.nativeValueUsd) : "—"}
                 </span>
@@ -95,8 +95,8 @@ function ChainCard({ chain }: { chain: ChainResult }) {
                 <EntityLogo src={token.logoUrl} name={token.symbol} size={16} />
                 {token.symbol}
               </span>
-              <span className="flex items-baseline gap-2">
-                <span className="tabular-nums font-medium">{token.balance}</span>
+              <span className="flex min-w-0 flex-col items-end">
+                <span className="w-full truncate text-right tabular-nums font-medium">{token.balance}</span>
                 <span className="tabular-nums text-xs text-muted-foreground">
                   {token.valueUsd != null ? formatUsd(token.valueUsd) : "—"}
                 </span>

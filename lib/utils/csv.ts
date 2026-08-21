@@ -35,6 +35,14 @@ export function csvResponse(filename: string, csv: string): Response {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": `attachment; filename="${filename}"`,
+      // Same short cache window as lib/api/response.ts's JSON API
+      // responses - data refreshes on the hourly-ish ingestion schedule, so
+      // this meaningfully cuts repeat-request DB load (these are
+      // unauthenticated, rate-limited public export endpoints) without
+      // serving stale-feeling data. Every other response type in this
+      // codebase's public API already sets this; the CSV path was the one
+      // gap.
+      "Cache-Control": "public, max-age=60, stale-while-revalidate=300",
     },
   });
 }

@@ -126,11 +126,26 @@ export const protocolMetrics = pgTable(
     // indexes support `IS NULL` on a leading column same as an equality
     // match, so this one index covers both query shapes.
     index("protocol_metrics_chain_ts_idx").on(table.chainId, table.timestamp),
+    // Postgres treats every NULL as distinct from every other NULL in a
+    // unique index, so this composite index only actually enforces
+    // uniqueness for per-chain rows (chainId non-null) - two aggregate rows
+    // (chainId IS NULL) with the identical (protocolId, timestamp) are NOT
+    // rejected as a conflict, so workers/protocols/sync.ts's
+    // onConflictDoNothing() silently never engages for them. Confirmed
+    // exploitable: DefiLlama's protocol list is known to list the same
+    // protocol twice under a parent/child relationship, which would insert
+    // as true, undetected duplicates within a single sync run - doubling
+    // that protocol on the homepage/protocols list and inflating totals.
+    // Kept alongside the composite index above (which still correctly
+    // covers the per-chain case) rather than replacing it.
     uniqueIndex("protocol_metrics_unique_snapshot").on(
       table.protocolId,
       table.chainId,
       table.timestamp,
     ),
+    uniqueIndex("protocol_metrics_unique_aggregate_snapshot")
+      .on(table.protocolId, table.timestamp)
+      .where(sql`${table.chainId} is null`),
   ],
 );
 

@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "protocol_metrics_unique_aggregate_snapshot" ON "protocol_metrics" USING btree ("protocol_id","timestamp") WHERE "protocol_metrics"."chain_id" is null;

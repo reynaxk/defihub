@@ -6,6 +6,7 @@
 // regardless of whatever else already exists in the database.
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
+import postgres from "postgres";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
 import { chainMetrics, chains, protocolMetrics, protocols, tokenPrices, tokens } from "@/lib/database/schema";
@@ -182,5 +183,42 @@ describe("rollupMetrics", () => {
 
     const rows = await db.select().from(chainMetrics).where(eq(chainMetrics.chainId, chainId));
     expect(rows).toHaveLength(2);
+  });
+
+  // rollupMetrics() itself can't be exercised for genuine concurrency in
+  // this test suite: the app's shared `db` client pools at most 1
+  // connection outside production (lib/database/client.ts), so two
+  // `Promise.all`'d calls through it would simply queue rather than run
+  // concurrently, and the second would find the lock already released by
+  // the time it starts - silently passing without testing anything. This
+  // opens two independent raw connections instead, directly proving the
+  // exact advisory-lock primitive runRollup uses (same key, same
+  // transaction-scoped function) blocks a second session while the first
+  // holds it.
+  it("blocks a second session from acquiring the same transaction-scoped advisory lock", async () => {
+    const ROLLUP_ADVISORY_LOCK_KEY = 728140501;
+    const connA = postgres(process.env.DATABASE_URL!, { max: 1, prepare: false });
+    const connB = postgres(process.env.DATABASE_URL!, { max: 1, prepare: false });
+
+    try {
+      await connA.begin(async (txA) => {
+        const [{ locked: lockedA }] = await txA`select pg_try_advisory_xact_lock(${ROLLUP_ADVISORY_LOCK_KEY}) as locked`;
+        expect(lockedA).toBe(true);
+
+        // A second, independent session tries for the identical key while
+        // the first still holds it inside an open transaction.
+        const [{ locked: lockedB }] =
+          await connB`select pg_try_advisory_xact_lock(${ROLLUP_ADVISORY_LOCK_KEY}) as locked`;
+        expect(lockedB).toBe(false);
+      });
+
+      // Released on COMMIT - a session acquiring it afterward succeeds.
+      const [{ locked: lockedAfterCommit }] =
+        await connB`select pg_try_advisory_xact_lock(${ROLLUP_ADVISORY_LOCK_KEY}) as locked`;
+      expect(lockedAfterCommit).toBe(true);
+    } finally {
+      await connA.end();
+      await connB.end();
+    }
   });
 });

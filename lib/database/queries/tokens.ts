@@ -3,36 +3,47 @@ import { db } from "@/lib/database/client";
 import { chains, tokenPrices, tokens } from "@/lib/database/schema";
 import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
 
-// One row per token: the most recent token_prices snapshot. Tokens sync at
-// different cadences (the tokens worker writes an initial point, the prices
-// worker refreshes every 15 min) so a per-token DISTINCT ON is correct where
-// a single shared-timestamp MAX() subquery (as protocols.ts uses) would not
-// be, since not every token necessarily has a row at the same timestamp.
-const latestPricePerToken = db
-  .selectDistinctOn([tokenPrices.tokenId], {
-    tokenId: tokenPrices.tokenId,
-    priceUsd: tokenPrices.priceUsd,
-    marketCap: tokenPrices.marketCap,
-    volume24h: tokenPrices.volume24h,
-    priceChange24h: tokenPrices.priceChange24h,
-  })
-  .from(tokenPrices)
-  .orderBy(tokenPrices.tokenId, desc(tokenPrices.timestamp))
-  .as("latest_price");
+// Correlated LATERAL subquery, one call per join site (a fresh builder
+// instance each time, not a shared constant - each outer query needs its
+// own). Previously this was a plain DISTINCT ON over the whole table,
+// joined afterward with no correlation Postgres could push down - that
+// forced a full scan of every row in token_prices (one of the three
+// explicitly unbounded, ever-growing time-series tables, refreshed every
+// 15 min) on every single call site below: the tokens list, the movers
+// widget, wallet balance checks, and native-token pricing. LATERAL lets
+// Postgres push `tokens.id` into the subquery per outer row and use the
+// existing (token_id, timestamp) primary key for an indexed lookup
+// instead, the same way a correlated N+1-shaped read would - except this
+// is still one query, not N.
+function latestPriceLateral() {
+  return db
+    .select({
+      priceUsd: tokenPrices.priceUsd,
+      marketCap: tokenPrices.marketCap,
+      volume24h: tokenPrices.volume24h,
+      priceChange24h: tokenPrices.priceChange24h,
+    })
+    .from(tokenPrices)
+    .where(eq(tokenPrices.tokenId, tokens.id))
+    .orderBy(desc(tokenPrices.timestamp))
+    .limit(1)
+    .as("latest_price");
+}
 
-// priceChange7d is only written by the 6-hourly token-discovery sync, not
-// the 15-min price-refresh sync (see schema.ts) - most rows have it null, so
-// "the latest row" usually wouldn't have a 7d figure. This looks back to the
-// most recent row that actually has one, per token.
-const latestNon7dNullChange = db
-  .selectDistinctOn([tokenPrices.tokenId], {
-    tokenId: tokenPrices.tokenId,
-    priceChange7d: tokenPrices.priceChange7d,
-  })
-  .from(tokenPrices)
-  .where(isNotNull(tokenPrices.priceChange7d))
-  .orderBy(tokenPrices.tokenId, desc(tokenPrices.timestamp))
-  .as("latest_7d_change");
+// Same LATERAL correlation, for the 7d-change lookback (priceChange7d is
+// only written by the 6-hourly token-discovery sync, not the 15-min
+// price-refresh sync - most rows have it null, so "the latest row" usually
+// wouldn't have a 7d figure; this looks back to the most recent row that
+// actually has one, per token).
+function latestNon7dChangeLateral() {
+  return db
+    .select({ priceChange7d: tokenPrices.priceChange7d })
+    .from(tokenPrices)
+    .where(and(eq(tokenPrices.tokenId, tokens.id), isNotNull(tokenPrices.priceChange7d)))
+    .orderBy(desc(tokenPrices.timestamp))
+    .limit(1)
+    .as("latest_7d_change");
+}
 
 export interface TokenListItem {
   id: string;
@@ -50,7 +61,7 @@ export interface TokenListItem {
 
 export type TokenSort = "marketCap" | "price" | "volume24h" | "priceChange24h";
 
-function tokenListColumns() {
+function tokenListColumns(latest: ReturnType<typeof latestPriceLateral>) {
   return {
     id: tokens.id,
     address: tokens.address,
@@ -59,23 +70,23 @@ function tokenListColumns() {
     logoUrl: tokens.logoUrl,
     chainName: chains.name,
     chainSlug: chains.slug,
-    priceUsd: latestPricePerToken.priceUsd,
-    marketCap: latestPricePerToken.marketCap,
-    volume24h: latestPricePerToken.volume24h,
-    priceChange24h: latestPricePerToken.priceChange24h,
+    priceUsd: latest.priceUsd,
+    marketCap: latest.marketCap,
+    volume24h: latest.volume24h,
+    priceChange24h: latest.priceChange24h,
   };
 }
 
-function tokenSortColumn(sort: TokenSort | undefined) {
+function tokenSortColumn(latest: ReturnType<typeof latestPriceLateral>, sort: TokenSort | undefined) {
   switch (sort) {
     case "price":
-      return latestPricePerToken.priceUsd;
+      return latest.priceUsd;
     case "volume24h":
-      return latestPricePerToken.volume24h;
+      return latest.volume24h;
     case "priceChange24h":
-      return latestPricePerToken.priceChange24h;
+      return latest.priceChange24h;
     default:
-      return latestPricePerToken.marketCap;
+      return latest.marketCap;
   }
 }
 
@@ -104,13 +115,14 @@ export async function getTokensList(
   opts: { chainSlug?: string; sort?: TokenSort } = {},
 ): Promise<TokenListItem[]> {
   const conditions = opts.chainSlug ? [eq(chains.slug, opts.chainSlug)] : [];
-  const orderColumn = tokenSortColumn(opts.sort);
+  const latest = latestPriceLateral();
+  const orderColumn = tokenSortColumn(latest, opts.sort);
 
   const rows = await db
-    .select(tokenListColumns())
+    .select(tokenListColumns(latest))
     .from(tokens)
     .innerJoin(chains, eq(chains.id, tokens.chainId))
-    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+    .innerJoinLateral(latest, sql`true`)
     .where(conditions.length ? and(...conditions) : undefined)
     .orderBy(sql`${orderColumn} desc nulls last`)
     .limit(TOKENS_MAX_ROWS);
@@ -132,7 +144,6 @@ export async function getTokensPageList(
   const { page, pageSize } = normalizePagination(opts);
   const conditions = opts.chainSlug ? [eq(chains.slug, opts.chainSlug)] : [];
   const where = conditions.length ? and(...conditions) : undefined;
-  const orderColumn = tokenSortColumn(opts.sort);
 
   // Count first, then clamp the requested page to what actually exists,
   // before computing the offset - see the identical comment in
@@ -142,16 +153,18 @@ export async function getTokensPageList(
     .select({ value: count() })
     .from(tokens)
     .innerJoin(chains, eq(chains.id, tokens.chainId))
-    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+    .innerJoinLateral(latestPriceLateral(), sql`true`)
     .where(where);
   const total = countRows[0]?.value ?? 0;
   const clampedPage = Math.min(page, computeTotalPages(total, pageSize));
 
+  const latest = latestPriceLateral();
+  const orderColumn = tokenSortColumn(latest, opts.sort);
   const rows = await db
-    .select(tokenListColumns())
+    .select(tokenListColumns(latest))
     .from(tokens)
     .innerJoin(chains, eq(chains.id, tokens.chainId))
-    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+    .innerJoinLateral(latest, sql`true`)
     .where(where)
     // Secondary sort on id for stable pagination - marketCap/volume24h/
     // priceChange24h tie frequently (many tokens sit at null or 0), and
@@ -189,7 +202,9 @@ export type MoverWindow = "24h" | "7d";
 // top-N spot in either direction.
 async function queryMovers(limit: number, window: MoverWindow, direction: "desc" | "asc") {
   if (window === "7d") {
-    const changeColumn = latestNon7dNullChange.priceChange7d;
+    const latest = latestPriceLateral();
+    const latest7d = latestNon7dChangeLateral();
+    const changeColumn = latest7d.priceChange7d;
     return db
       .select({
         id: tokens.id,
@@ -197,19 +212,20 @@ async function queryMovers(limit: number, window: MoverWindow, direction: "desc"
         chainSlug: chains.slug,
         symbol: tokens.symbol,
         logoUrl: tokens.logoUrl,
-        priceUsd: latestPricePerToken.priceUsd,
+        priceUsd: latest.priceUsd,
         priceChange: changeColumn,
       })
       .from(tokens)
       .innerJoin(chains, eq(chains.id, tokens.chainId))
-      .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
-      .innerJoin(latestNon7dNullChange, eq(latestNon7dNullChange.tokenId, tokens.id))
+      .innerJoinLateral(latest, sql`true`)
+      .innerJoinLateral(latest7d, sql`true`)
       .where(isNotNull(changeColumn))
       .orderBy(direction === "desc" ? desc(changeColumn) : asc(changeColumn))
       .limit(limit);
   }
 
-  const changeColumn = latestPricePerToken.priceChange24h;
+  const latest = latestPriceLateral();
+  const changeColumn = latest.priceChange24h;
   return db
     .select({
       id: tokens.id,
@@ -217,12 +233,12 @@ async function queryMovers(limit: number, window: MoverWindow, direction: "desc"
       chainSlug: chains.slug,
       symbol: tokens.symbol,
       logoUrl: tokens.logoUrl,
-      priceUsd: latestPricePerToken.priceUsd,
+      priceUsd: latest.priceUsd,
       priceChange: changeColumn,
     })
     .from(tokens)
     .innerJoin(chains, eq(chains.id, tokens.chainId))
-    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+    .innerJoinLateral(latest, sql`true`)
     .where(isNotNull(changeColumn))
     .orderBy(direction === "desc" ? desc(changeColumn) : asc(changeColumn))
     .limit(limit);
@@ -422,19 +438,20 @@ const BALANCE_CHECK_TOKENS_PER_CHAIN = 50;
 // request a reasonable size - ordered by market cap so the tokens most
 // likely to actually be held show up first if a chain has more than the cap.
 export async function getTokensForBalanceCheck(chainSlug: string): Promise<BalanceCheckToken[]> {
+  const latest = latestPriceLateral();
   const rows = await db
     .select({
       address: tokens.address,
       symbol: tokens.symbol,
       decimals: tokens.decimals,
       logoUrl: tokens.logoUrl,
-      priceUsd: latestPricePerToken.priceUsd,
+      priceUsd: latest.priceUsd,
     })
     .from(tokens)
     .innerJoin(chains, eq(chains.id, tokens.chainId))
-    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+    .innerJoinLateral(latest, sql`true`)
     .where(eq(chains.slug, chainSlug))
-    .orderBy(sql`${latestPricePerToken.marketCap} desc nulls last`)
+    .orderBy(sql`${latest.marketCap} desc nulls last`)
     .limit(BALANCE_CHECK_TOKENS_PER_CHAIN);
 
   return rows.map((r) => ({ ...r, priceUsd: r.priceUsd != null ? Number(r.priceUsd) : null }));
@@ -446,13 +463,14 @@ export async function getTokensForBalanceCheck(chainSlug: string): Promise<Balan
 // than a hardcoded per-chain sentinel address, and limit(1) ordered by
 // market cap breaks a tie if more than one row ever shares that symbol.
 export async function getNativeTokenPrice(chainSlug: string): Promise<number | null> {
+  const latest = latestPriceLateral();
   const [row] = await db
-    .select({ priceUsd: latestPricePerToken.priceUsd })
+    .select({ priceUsd: latest.priceUsd })
     .from(tokens)
     .innerJoin(chains, eq(chains.id, tokens.chainId))
-    .innerJoin(latestPricePerToken, eq(latestPricePerToken.tokenId, tokens.id))
+    .innerJoinLateral(latest, sql`true`)
     .where(and(eq(chains.slug, chainSlug), eq(tokens.symbol, chains.nativeToken)))
-    .orderBy(sql`${latestPricePerToken.marketCap} desc nulls last`)
+    .orderBy(sql`${latest.marketCap} desc nulls last`)
     .limit(1);
 
   return row?.priceUsd != null ? Number(row.priceUsd) : null;

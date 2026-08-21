@@ -2,7 +2,7 @@
 // the actual thing under test is what lands in chain_metrics + sync_runs, not
 // mockable behavior. Only the external DefiLlama call is mocked.
 import { randomUUID } from "node:crypto";
-import { and, eq, desc } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
 import { chainMetrics, chains, syncRuns } from "@/lib/database/schema";

@@ -15,15 +15,26 @@ export interface ChainListItem {
   change30d: number | null;
 }
 
+// computeTvlChanges' 30d window needs a real data point at least ~21 days
+// back to resolve (its own 0.7 tolerance) - matches the identical constant
+// and reasoning in getChainBySlug below.
+const TOP_CHAINS_HISTORY_DAYS = 35;
+
 export async function getTopChains(): Promise<ChainListItem[]> {
   const chainRows = await db.select().from(chains);
 
-  // Only ever 5-10 chains, each with a modest daily-point history - cheaper
-  // and simpler to compute changes in JS from the full set than to express
-  // "value at latest, 1d-ago, 7d-ago, 30d-ago" as one SQL query per chain.
+  // Bounded to the window computeTvlChanges actually needs, not every row
+  // ever synced - this was the one query left fetching the entire
+  // chain_metrics table unfiltered (every other history read in this
+  // codebase pushes a `since` bound into SQL). chain_metrics is one of the
+  // three explicitly unbounded, ever-growing time-series tables, and this
+  // function backs the uncached public /api/v1/chains and /api/export/chains
+  // routes in addition to the ISR-cached homepage/chains pages.
+  const since = new Date(Date.now() - TOP_CHAINS_HISTORY_DAYS * 24 * 60 * 60 * 1000);
   const allMetrics = await db
     .select({ chainId: chainMetrics.chainId, timestamp: chainMetrics.timestamp, tvl: chainMetrics.tvl })
     .from(chainMetrics)
+    .where(gte(chainMetrics.timestamp, since))
     .orderBy(chainMetrics.timestamp);
 
   const byChain = new Map<string, { timestamp: Date; tvl: number | null }[]>();

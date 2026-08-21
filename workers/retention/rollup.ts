@@ -24,8 +24,16 @@ import { withSyncRun } from "../../lib/observability/sync-run";
 // single row that survives each bucket is a real historical snapshot, never
 // a manufactured average. Each statement is self-contained and trivially
 // idempotent (a second run finds nothing left to delete in an
-// already-downsampled bucket), so this is safe to re-run, retry, or run
-// concurrently with itself without corrupting anything.
+// already-downsampled bucket) - re-running or retrying this worker can
+// never corrupt data. It CAN still deadlock against itself, though: two
+// concurrent invocations running the identical self-join DELETE can lock
+// the same rows in a different order, which Postgres's deadlock detector
+// resolves by aborting one of the two transactions. That's not data
+// corruption, but it is a spurious failed run and wasted work under
+// exactly the conditions (a slow run overlapping the next scheduled tick,
+// or a platform cron retry after a timeout) most likely to trigger it - so
+// a second concurrent invocation takes an advisory lock and bails out
+// immediately instead of racing for row locks. See runRollup below.
 
 const MID_TIER_DAYS = 30;
 const OLD_TIER_DAYS = 180;
@@ -36,14 +44,12 @@ export interface RollupStats {
   tokenPrices: { before: number; after: number };
 }
 
-async function rowCount(table: typeof chainMetrics | typeof protocolMetrics | typeof tokenPrices): Promise<number> {
-  const [row] = await db.select({ value: count() }).from(table);
-  return row?.value ?? 0;
-}
-
-export async function rollupMetrics(): Promise<RollupStats> {
+export async function rollupMetrics(): Promise<RollupStats | null> {
   return withSyncRun("rollup-metrics", async () => {
     const stats = await runRollup();
+    if (stats === null) {
+      return { result: null, stats: { recordsProcessed: 0, metadata: { skipped: "already running elsewhere" } } };
+    }
     const totalRemoved =
       stats.chainMetrics.before -
       stats.chainMetrics.after +
@@ -53,73 +59,95 @@ export async function rollupMetrics(): Promise<RollupStats> {
   });
 }
 
-async function runRollup(): Promise<RollupStats> {
-  const before = {
-    chainMetrics: await rowCount(chainMetrics),
-    protocolMetrics: await rowCount(protocolMetrics),
-    tokenPrices: await rowCount(tokenPrices),
-  };
+// Arbitrary key, unique to this worker among this app's advisory-lock
+// users (there are no others today). Transaction-scoped
+// (pg_try_advisory_xact_lock, not the session-scoped pg_try_advisory_lock)
+// so Postgres releases it automatically on COMMIT or ROLLBACK - no
+// separate unlock call to get wrong, and no risk of the lock getting stuck
+// on a pooled connection that a later unlock happens not to land back on
+// (postgres.js's pool doesn't guarantee connection affinity across
+// separate top-level queries, only within one transaction).
+const ROLLUP_ADVISORY_LOCK_KEY = 728140501;
 
-  // chain_metrics: keep the latest row per (chain, day) beyond the old tier.
-  await db.execute(sql`
-    delete from chain_metrics a using chain_metrics b
-    where a.chain_id = b.chain_id
-      and date_trunc('day', a.timestamp at time zone 'utc') = date_trunc('day', b.timestamp at time zone 'utc')
-      and a.timestamp < b.timestamp
-      and a.timestamp < now() - make_interval(days => ${OLD_TIER_DAYS})
-  `);
+async function runRollup(): Promise<RollupStats | null> {
+  return db.transaction(async (tx) => {
+    const [{ locked }] = await tx.execute<{ locked: boolean }>(
+      sql`select pg_try_advisory_xact_lock(${ROLLUP_ADVISORY_LOCK_KEY}) as locked`,
+    );
+    if (!locked) {
+      logger.warn("rollup already in progress in another invocation, skipping this run", {
+        component: "retention",
+      });
+      return null;
+    }
 
-  // protocol_metrics: chain_id is null for aggregate (all-chains) rows, so
-  // the bucket join needs IS NOT DISTINCT FROM rather than plain equality -
-  // NULL = NULL is never true in SQL, which would otherwise treat every
-  // pair of aggregate rows as belonging to different buckets.
-  await db.execute(sql`
-    delete from protocol_metrics a using protocol_metrics b
-    where a.protocol_id = b.protocol_id
-      and a.chain_id is not distinct from b.chain_id
-      and date_trunc('day', a.timestamp at time zone 'utc') = date_trunc('day', b.timestamp at time zone 'utc')
-      and a.timestamp < b.timestamp
-      and a.timestamp < now() - make_interval(days => ${OLD_TIER_DAYS})
-  `);
+    const before = {
+      chainMetrics: (await tx.select({ value: count() }).from(chainMetrics))[0]?.value ?? 0,
+      protocolMetrics: (await tx.select({ value: count() }).from(protocolMetrics))[0]?.value ?? 0,
+      tokenPrices: (await tx.select({ value: count() }).from(tokenPrices))[0]?.value ?? 0,
+    };
 
-  // token_prices, mid tier: keep the latest row per (token, hour) strictly
-  // within the 30-180 day window. Bounded on both sides so this pass never
-  // touches rows the daily tier below is responsible for.
-  await db.execute(sql`
-    delete from token_prices a using token_prices b
-    where a.token_id = b.token_id
-      and date_trunc('hour', a.timestamp at time zone 'utc') = date_trunc('hour', b.timestamp at time zone 'utc')
-      and a.timestamp < b.timestamp
-      and a.timestamp < now() - make_interval(days => ${MID_TIER_DAYS})
-      and a.timestamp >= now() - make_interval(days => ${OLD_TIER_DAYS})
-  `);
+    // chain_metrics: keep the latest row per (chain, day) beyond the old tier.
+    await tx.execute(sql`
+      delete from chain_metrics a using chain_metrics b
+      where a.chain_id = b.chain_id
+        and date_trunc('day', a.timestamp at time zone 'utc') = date_trunc('day', b.timestamp at time zone 'utc')
+        and a.timestamp < b.timestamp
+        and a.timestamp < now() - make_interval(days => ${OLD_TIER_DAYS})
+    `);
 
-  // token_prices, old tier: keep the latest row per (token, day) beyond 180
-  // days - applies whether or not the mid tier already ran on these rows in
-  // a prior invocation.
-  await db.execute(sql`
-    delete from token_prices a using token_prices b
-    where a.token_id = b.token_id
-      and date_trunc('day', a.timestamp at time zone 'utc') = date_trunc('day', b.timestamp at time zone 'utc')
-      and a.timestamp < b.timestamp
-      and a.timestamp < now() - make_interval(days => ${OLD_TIER_DAYS})
-  `);
+    // protocol_metrics: chain_id is null for aggregate (all-chains) rows, so
+    // the bucket join needs IS NOT DISTINCT FROM rather than plain equality -
+    // NULL = NULL is never true in SQL, which would otherwise treat every
+    // pair of aggregate rows as belonging to different buckets.
+    await tx.execute(sql`
+      delete from protocol_metrics a using protocol_metrics b
+      where a.protocol_id = b.protocol_id
+        and a.chain_id is not distinct from b.chain_id
+        and date_trunc('day', a.timestamp at time zone 'utc') = date_trunc('day', b.timestamp at time zone 'utc')
+        and a.timestamp < b.timestamp
+        and a.timestamp < now() - make_interval(days => ${OLD_TIER_DAYS})
+    `);
 
-  const after = {
-    chainMetrics: await rowCount(chainMetrics),
-    protocolMetrics: await rowCount(protocolMetrics),
-    tokenPrices: await rowCount(tokenPrices),
-  };
+    // token_prices, mid tier: keep the latest row per (token, hour) strictly
+    // within the 30-180 day window. Bounded on both sides so this pass never
+    // touches rows the daily tier below is responsible for.
+    await tx.execute(sql`
+      delete from token_prices a using token_prices b
+      where a.token_id = b.token_id
+        and date_trunc('hour', a.timestamp at time zone 'utc') = date_trunc('hour', b.timestamp at time zone 'utc')
+        and a.timestamp < b.timestamp
+        and a.timestamp < now() - make_interval(days => ${MID_TIER_DAYS})
+        and a.timestamp >= now() - make_interval(days => ${OLD_TIER_DAYS})
+    `);
 
-  const stats: RollupStats = {
-    chainMetrics: { before: before.chainMetrics, after: after.chainMetrics },
-    protocolMetrics: { before: before.protocolMetrics, after: after.protocolMetrics },
-    tokenPrices: { before: before.tokenPrices, after: after.tokenPrices },
-  };
+    // token_prices, old tier: keep the latest row per (token, day) beyond 180
+    // days - applies whether or not the mid tier already ran on these rows in
+    // a prior invocation.
+    await tx.execute(sql`
+      delete from token_prices a using token_prices b
+      where a.token_id = b.token_id
+        and date_trunc('day', a.timestamp at time zone 'utc') = date_trunc('day', b.timestamp at time zone 'utc')
+        and a.timestamp < b.timestamp
+        and a.timestamp < now() - make_interval(days => ${OLD_TIER_DAYS})
+    `);
 
-  logger.info("rollup complete", { component: "retention", metadata: stats });
+    const after = {
+      chainMetrics: (await tx.select({ value: count() }).from(chainMetrics))[0]?.value ?? 0,
+      protocolMetrics: (await tx.select({ value: count() }).from(protocolMetrics))[0]?.value ?? 0,
+      tokenPrices: (await tx.select({ value: count() }).from(tokenPrices))[0]?.value ?? 0,
+    };
 
-  return stats;
+    const stats: RollupStats = {
+      chainMetrics: { before: before.chainMetrics, after: after.chainMetrics },
+      protocolMetrics: { before: before.protocolMetrics, after: after.protocolMetrics },
+      tokenPrices: { before: before.tokenPrices, after: after.tokenPrices },
+    };
+
+    logger.info("rollup complete", { component: "retention", metadata: stats });
+
+    return stats;
+  });
 }
 
 if (require.main === module) {

@@ -12,7 +12,9 @@ export default async function SettingsPage() {
 
   return (
     <div className="mx-auto max-w-lg px-4 py-8 sm:px-6">
-      <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
+      <div className="border-b border-border/60 pb-6">
+        <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
+      </div>
 
       <Card className="mt-6">
         <CardHeader>

@@ -1,6 +1,6 @@
-import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
-import { chainMetrics, chains, protocolMetrics, protocols } from "@/lib/database/schema";
+import { chainMetrics, chains, protocolChains, protocolMetrics, protocols } from "@/lib/database/schema";
 import { computeTvlChanges } from "./tvl-change";
 
 export interface ChainListItem {
@@ -86,6 +86,22 @@ export async function getChainSparklines(chainIds: string[]): Promise<Map<string
     byChain.set(r.chainId, list);
   }
   return byChain;
+}
+
+// Real per-chain protocol counts for the chains list table's "Protocols"
+// column - deliberately not per-chain volume/fees: workers/protocols/sync.ts
+// only ever writes `tvl` on a protocol's per-chain metric rows
+// (volume24h/fees24h/revenue24h are null there - DefiLlama's fees/volume
+// providers aren't broken down per-chain), so there is no real per-chain
+// volume/fees figure anywhere in this schema to show.
+export async function getChainProtocolCounts(chainIds: string[]): Promise<Map<string, number>> {
+  if (chainIds.length === 0) return new Map();
+  const rows = await db
+    .select({ chainId: protocolChains.chainId, value: count() })
+    .from(protocolChains)
+    .where(inArray(protocolChains.chainId, chainIds))
+    .groupBy(protocolChains.chainId);
+  return new Map(rows.map((r) => [r.chainId, r.value]));
 }
 
 export async function getGlobalTvlHistory(): Promise<{ timestamp: Date; tvl: number }[]> {

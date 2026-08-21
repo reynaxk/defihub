@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gte, ilike, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, ilike, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, protocolChains, protocolMetrics, protocols } from "@/lib/database/schema";
 import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
@@ -345,6 +345,40 @@ export async function getGlobalMetricsHistory(): Promise<GlobalMetricsHistoryPoi
     fees24h: r.fees24h != null ? Number(r.fees24h) : null,
     revenue24h: r.revenue24h != null ? Number(r.revenue24h) : null,
   }));
+}
+
+export interface ChainBadge {
+  slug: string;
+  name: string;
+  logoUrl: string | null;
+}
+
+// Which chains each protocol is deployed on, for the protocols list table's
+// "Chains" column - a dedicated bulk query rather than a field added to
+// ProtocolListItem/getProtocolsList, which also directly backs the public
+// /api/v1/protocols contract (app/api/v1/protocols/route.ts spreads
+// result.items as-is) and shouldn't gain a field for a list-page visual.
+export async function getProtocolChainBadges(protocolIds: string[]): Promise<Map<string, ChainBadge[]>> {
+  if (protocolIds.length === 0) return new Map();
+  const rows = await db
+    .select({
+      protocolId: protocolChains.protocolId,
+      slug: chains.slug,
+      name: chains.name,
+      logoUrl: chains.logoUrl,
+    })
+    .from(protocolChains)
+    .innerJoin(chains, eq(chains.id, protocolChains.chainId))
+    .where(inArray(protocolChains.protocolId, protocolIds))
+    .orderBy(chains.name);
+
+  const byProtocol = new Map<string, ChainBadge[]>();
+  for (const r of rows) {
+    const list = byProtocol.get(r.protocolId) ?? [];
+    list.push({ slug: r.slug, name: r.name, logoUrl: r.logoUrl });
+    byProtocol.set(r.protocolId, list);
+  }
+  return byProtocol;
 }
 
 export async function getAllCategories(): Promise<string[]> {

@@ -1,10 +1,11 @@
 import Link from "next/link";
-import { ArrowDown, ArrowRight, ArrowUp } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MetricHeader } from "@/components/stats/metric-header";
 import { MetricRow } from "@/components/stats/metric-row";
+import { ChangeBadge } from "@/components/shared/change-badge";
 import { AnimatedNumber } from "@/components/stats/animated-number";
 import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
 import { MarketPulse } from "@/components/chains/market-pulse";
@@ -23,33 +24,13 @@ import { getTopMovers } from "@/lib/database/queries/tokens";
 import { getWatchedChainIds, getWatchedProtocolIds } from "@/lib/database/queries/watchlist";
 import { computeTvlChanges } from "@/lib/database/queries/tvl-change";
 import { auth } from "@/lib/auth/config";
-import { formatPercent, formatUsd } from "@/lib/format";
+import { formatUsd } from "@/lib/format";
 import { sumKnownValues } from "@/lib/utils/aggregate";
-import { cn } from "@/lib/utils";
 import { SUPPORTED_CHAINS } from "@/lib/config/chains";
 
 export const revalidate = 300;
 
 const MARKET_PULSE_CHAINS = 7;
-
-function ChangeBadge({ value, period }: { value: number | null; period?: string }) {
-  if (value == null || Number.isNaN(value)) {
-    return <span className="text-sm text-muted-foreground">—</span>;
-  }
-  const positive = value >= 0;
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1 rounded-md px-2 py-1 text-sm font-medium tabular-nums",
-        positive ? "bg-[var(--success-text)]/10 text-[var(--success-text)]" : "bg-destructive/10 text-destructive",
-      )}
-    >
-      {positive ? <ArrowUp className="size-3.5" /> : <ArrowDown className="size-3.5" />}
-      {formatPercent(value, { signed: true })}
-      {period && <span className="ml-0.5 text-xs font-normal opacity-70">{period}</span>}
-    </span>
-  );
-}
 
 export default async function HomePage() {
   const [

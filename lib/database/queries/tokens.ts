@@ -45,6 +45,70 @@ function latestNon7dChangeLateral() {
     .as("latest_7d_change");
 }
 
+// A healthy token gets a fresh priceChange7d roughly every 6 hours (the
+// token-discovery sync's cadence - see vercel.json). This window is a
+// generous multiple of that (comfortably covers a missed cron tick)
+// without being loose enough to accept a genuinely stale figure - e.g. a
+// token that dropped out of the top-250 discovery sweep and stopped
+// getting new 7d values entirely, while its price still refreshes every
+// 15 minutes from the separate price-only sync.
+const PRICE_CHANGE_7D_FRESHNESS_MS = 24 * 60 * 60 * 1000;
+
+// The token detail page's 7d-change figure - reuses the same "most recent
+// non-null priceChange7d row" lookback as the movers query above (since
+// getTokenHistory's plain "latest row" wouldn't reliably have one - see
+// latestNon7dChangeLateral's own comment), but additionally checks that
+// row isn't stale relative to the token's actual latest price tick. The
+// lookback alone can't tell "the current quote's 7d figure" apart from
+// "the last time this token happened to get a 7d figure, days ago" -
+// pairing an old 7d change with today's price would misrepresent it as a
+// current 7-day return.
+//
+// Both halves are read as one statement, not two separate round trips.
+// Under READ COMMITTED (Postgres's default, unchanged elsewhere in this
+// app - see lib/database/client.ts), each independent statement gets its
+// own fresh snapshot - a sync:tokens insert landing between two separate
+// SELECTs could shift what "the latest row" means between them, pairing a
+// changeRow read before the insert with a latestRow read after it, which
+// doesn't correspond to any single real point in time. A single SQL
+// statement (even with multiple sub-selects/joins inside it) always sees
+// one consistent snapshot for its entire execution, so composing both
+// lookups as one query - rather than reaching for an explicit
+// transaction, which this simple a read doesn't need - closes that gap.
+export async function getTokenPriceChange7d(tokenId: string): Promise<number | null> {
+  const changeRow = db
+    .select({ priceChange7d: tokenPrices.priceChange7d, changeTimestamp: tokenPrices.timestamp })
+    .from(tokenPrices)
+    .where(and(eq(tokenPrices.tokenId, tokenId), isNotNull(tokenPrices.priceChange7d)))
+    .orderBy(desc(tokenPrices.timestamp))
+    .limit(1)
+    .as("change_row");
+
+  const latestRow = db
+    .select({ latestTimestamp: tokenPrices.timestamp })
+    .from(tokenPrices)
+    .where(eq(tokenPrices.tokenId, tokenId))
+    .orderBy(desc(tokenPrices.timestamp))
+    .limit(1)
+    .as("latest_row");
+
+  const [row] = await db
+    .select({
+      priceChange7d: changeRow.priceChange7d,
+      changeTimestamp: changeRow.changeTimestamp,
+      latestTimestamp: latestRow.latestTimestamp,
+    })
+    .from(changeRow)
+    .innerJoin(latestRow, sql`true`);
+
+  if (!row?.priceChange7d) return null;
+
+  const staleness = row.latestTimestamp.getTime() - row.changeTimestamp.getTime();
+  if (staleness > PRICE_CHANGE_7D_FRESHNESS_MS) return null;
+
+  return Number(row.priceChange7d);
+}
+
 export interface TokenListItem {
   id: string;
   address: string;

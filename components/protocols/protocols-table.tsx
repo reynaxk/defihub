@@ -5,19 +5,45 @@ import { EntityLogo } from "@/components/shared/entity-logo";
 import { PercentChange } from "@/components/shared/percent-change";
 import { WatchIconButton } from "@/components/shared/watch-icon-button";
 import { formatUsd } from "@/lib/format";
-import type { ProtocolListItem } from "@/lib/database/queries/protocols";
+import type { ChainBadge, ProtocolListItem } from "@/lib/database/queries/protocols";
+
+const MAX_CHAIN_BADGES = 3;
+
+function ChainBadges({ chains }: { chains: ChainBadge[] }) {
+  if (chains.length === 0) return <span className="text-muted-foreground">—</span>;
+  const shown = chains.slice(0, MAX_CHAIN_BADGES);
+  const overflow = chains.length - shown.length;
+  return (
+    <span className="flex items-center -space-x-1.5">
+      {shown.map((chain) => (
+        <span key={chain.slug} className="rounded-full ring-2 ring-card" title={chain.name}>
+          <EntityLogo src={chain.logoUrl} name={chain.name} size={18} />
+        </span>
+      ))}
+      {overflow > 0 && (
+        <span className="ml-1.5 text-xs text-muted-foreground">+{overflow}</span>
+      )}
+    </span>
+  );
+}
 
 export function ProtocolsTable({
   protocols,
   rankOffset = 0,
   isSignedIn = false,
   watchedProtocolIds,
+  chainsByProtocolId,
   sort,
 }: {
   protocols: ProtocolListItem[];
   rankOffset?: number;
   isSignedIn?: boolean;
   watchedProtocolIds?: Set<string>;
+  // Optional: only the /protocols list page fetches this (a dedicated
+  // bulk query, see getProtocolChainBadges) - other callers of this table
+  // (the homepage's "Top protocols" section) simply don't pass it, and the
+  // column is omitted rather than rendered empty.
+  chainsByProtocolId?: Map<string, ChainBadge[]>;
   sort?: DataTableSort;
 }) {
   const columns: DataTableColumn<ProtocolListItem>[] = [
@@ -32,7 +58,10 @@ export function ProtocolsTable({
       key: "protocol",
       header: "Protocol",
       render: (protocol) => (
-        <Link href={`/protocol/${protocol.slug}`} className="flex items-center gap-2 font-medium">
+        <Link
+          href={`/protocol/${protocol.slug}`}
+          className="flex items-center gap-2 font-medium after:absolute after:inset-0"
+        >
           <EntityLogo src={protocol.logoUrl} name={protocol.name} size={24} />
           {protocol.name}
         </Link>
@@ -45,6 +74,19 @@ export function ProtocolsTable({
       cellClassName: "hidden sm:table-cell",
       render: (protocol) => protocol.category && <Badge variant="secondary">{protocol.category}</Badge>,
     },
+    ...(chainsByProtocolId
+      ? [
+          {
+            key: "chains",
+            header: "Chains",
+            headClassName: "hidden md:table-cell",
+            cellClassName: "hidden md:table-cell",
+            render: (protocol: ProtocolListItem) => (
+              <ChainBadges chains={chainsByProtocolId.get(protocol.id) ?? []} />
+            ),
+          } satisfies DataTableColumn<ProtocolListItem>,
+        ]
+      : []),
     {
       key: "tvl",
       header: "TVL",

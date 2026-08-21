@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { ChainsTable } from "@/components/chains/chains-table";
 import { ExportCsvButton } from "@/components/shared/export-csv-button";
-import { getTopChains } from "@/lib/database/queries/chains";
+import { getChainProtocolCounts, getChainSparklines, getTopChains } from "@/lib/database/queries/chains";
 import { getWatchedChainIds } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
 
@@ -12,24 +12,76 @@ export const metadata: Metadata = {
 
 export const revalidate = 300;
 
-export default async function ChainsPage() {
+const VALID_SORTS = ["tvl", "change24h", "change7d"] as const;
+type ChainSort = (typeof VALID_SORTS)[number];
+
+const SORT_ACCESSORS: Record<ChainSort, (c: { tvl: number | null; change24h: number | null; change7d: number | null }) => number | null> = {
+  tvl: (c) => c.tvl,
+  change24h: (c) => c.change24h,
+  change7d: (c) => c.change7d,
+};
+
+export default async function ChainsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ sort?: string; dir?: string }>;
+}) {
+  const params = await searchParams;
+  const sortBy = (VALID_SORTS as readonly string[]).includes(params.sort ?? "")
+    ? (params.sort as ChainSort)
+    : "tvl";
+  const sortDir = params.dir === "asc" ? "asc" : "desc";
+
   const [session, chains] = await Promise.all([auth(), getTopChains()]);
-  const watchedChainIds = await getWatchedChainIds(
-    session?.user?.id,
-    chains.map((c) => c.id),
-  );
+
+  // getTopChains already ranks by TVL desc - only re-sort when a different
+  // sort is actually requested, so the default (no query params) path
+  // matches its existing, already-correct ordering exactly.
+  const sorted =
+    sortBy === "tvl" && sortDir === "desc"
+      ? chains
+      : [...chains].sort((a, b) => {
+          const av = SORT_ACCESSORS[sortBy](a);
+          const bv = SORT_ACCESSORS[sortBy](b);
+          if (av == null && bv == null) return 0;
+          if (av == null) return 1;
+          if (bv == null) return -1;
+          return sortDir === "asc" ? av - bv : bv - av;
+        });
+
+  const [watchedChainIds, protocolCounts, sparklines] = await Promise.all([
+    getWatchedChainIds(session?.user?.id, chains.map((c) => c.id)),
+    getChainProtocolCounts(chains.map((c) => c.id)),
+    getChainSparklines(chains.map((c) => c.id)),
+  ]);
+
+  function buildSortHref(sortKey: string, dir: "asc" | "desc") {
+    const query = new URLSearchParams();
+    if (sortKey !== "tvl") query.set("sort", sortKey);
+    if (dir === "asc") query.set("dir", dir);
+    const qs = query.toString();
+    return qs ? `/chains?${qs}` : "/chains";
+  }
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+      <div className="flex flex-wrap items-end justify-between gap-3 border-b border-border/60 pb-6">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Chains</h1>
-          <p className="mt-1 text-muted-foreground">{chains.length} chains tracked</p>
+          <p className="text-xs font-medium tracking-[0.15em] text-muted-foreground uppercase">DeFi Markets</p>
+          <h1 className="mt-1.5 text-2xl font-semibold tracking-tight">Chains</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{chains.length} chains tracked</p>
         </div>
         <ExportCsvButton endpoint="/api/export/chains" />
       </div>
       <div className="mt-6">
-        <ChainsTable chains={chains} isSignedIn={Boolean(session?.user)} watchedChainIds={watchedChainIds} />
+        <ChainsTable
+          chains={sorted}
+          isSignedIn={Boolean(session?.user)}
+          watchedChainIds={watchedChainIds}
+          protocolCounts={protocolCounts}
+          sparklines={sparklines}
+          sort={{ key: sortBy, dir: sortDir, hrefFor: buildSortHref }}
+        />
       </div>
     </div>
   );

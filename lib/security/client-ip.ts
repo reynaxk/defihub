@@ -15,7 +15,21 @@
  */
 export function getClientIp(request: Request): string {
   const forwardedFor = request.headers.get("x-forwarded-for");
-  if (forwardedFor) return forwardedFor.split(",")[0].trim();
+  if (forwardedFor) {
+    // Each proxy hop APPENDS the address it received the request from, so
+    // the chain reads client -> proxy1 -> proxy2 -> ... -> last hop before
+    // this server. The FIRST entry is whatever the original client claimed
+    // - fully attacker-controllable on a direct request (Vercel's edge
+    // does not strip or overwrite it) - which previously let every IP-scoped
+    // rate limit in this app (login, registration, forgot-password, the
+    // public API, search, history routes) be bypassed by sending a fresh
+    // random value on every request. The LAST entry is appended by Vercel's
+    // own edge from the connection it actually received, which a client
+    // cannot forge.
+    const parts = forwardedFor.split(",").map((p) => p.trim());
+    const last = parts[parts.length - 1];
+    if (last) return last;
+  }
 
   const realIp = request.headers.get("x-real-ip");
   if (realIp) return realIp;

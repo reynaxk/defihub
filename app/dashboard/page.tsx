@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { StatTile } from "@/components/stats/stat-tile";
 import { AnimatedNumber } from "@/components/stats/animated-number";
-import { auth } from "@/lib/auth/config";
+import { requireSession } from "@/lib/auth/require-session";
 import { getWatchlistWithDetails, type WatchlistEntry } from "@/lib/database/queries/watchlist";
 import { db } from "@/lib/database/client";
 import { alerts } from "@/lib/database/schema";
@@ -59,8 +59,8 @@ function watchlistHref(item: WatchlistEntry): string {
 export const metadata: Metadata = { title: "Dashboard", robots: NOINDEX };
 
 export default async function DashboardPage() {
-  const session = await auth();
-  const userId = session!.user.id;
+  const session = await requireSession();
+  const userId = session.user.id;
 
   const [watchlist, userAlerts] = await Promise.all([
     getWatchlistWithDetails(userId),

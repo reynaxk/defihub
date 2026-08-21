@@ -27,10 +27,24 @@ import { getClientIp } from "./client-ip";
 import { checkRateLimit } from "./rate-limit";
 
 describe("getClientIp", () => {
-  it("prefers x-forwarded-for, using the first address", () => {
+  it("prefers x-forwarded-for, using the last address (the one Vercel's own edge appended)", () => {
     const req = new Request("http://localhost", {
       headers: { "x-forwarded-for": "203.0.113.5, 10.0.0.1" },
     });
+    expect(getClientIp(req)).toBe("10.0.0.1");
+  });
+
+  it("is not fooled by a client-supplied first entry - only the edge-appended last entry is trusted", () => {
+    // The first entry is whatever the connecting client claims via its own
+    // request header - fully attacker-controlled on a direct request.
+    const req = new Request("http://localhost", {
+      headers: { "x-forwarded-for": "1.2.3.4, 203.0.113.5" },
+    });
+    expect(getClientIp(req)).toBe("203.0.113.5");
+  });
+
+  it("handles a single-entry x-forwarded-for (no intermediate proxies)", () => {
+    const req = new Request("http://localhost", { headers: { "x-forwarded-for": "203.0.113.5" } });
     expect(getClientIp(req)).toBe("203.0.113.5");
   });
 

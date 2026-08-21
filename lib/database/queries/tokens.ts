@@ -15,7 +15,7 @@ import { normalizePagination, totalPages as computeTotalPages } from "@/lib/data
 // existing (token_id, timestamp) primary key for an indexed lookup
 // instead, the same way a correlated N+1-shaped read would - except this
 // is still one query, not N.
-function latestPriceLateral() {
+export function latestPriceLateral() {
   return db
     .select({
       priceUsd: tokenPrices.priceUsd,

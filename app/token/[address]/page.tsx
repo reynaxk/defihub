@@ -10,16 +10,29 @@ import { MetricRow } from "@/components/stats/metric-row";
 import { ChangeBadge } from "@/components/shared/change-badge";
 import { AnimatedNumber } from "@/components/stats/animated-number";
 import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
+import { YieldsTable } from "@/components/yields/yields-table";
 import {
   getTokenByAddress,
   getTokenChainPresence,
   getTokenPriceChange7d,
 } from "@/lib/database/queries/tokens";
-import { isWatchingToken } from "@/lib/database/queries/watchlist";
+import { getYieldPools } from "@/lib/database/queries/yields";
+import { getWatchedPoolIds, isWatchingToken } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
 import { formatUsd } from "@/lib/format";
 
 export const revalidate = 300;
+
+// Widely-used tokens (USDT, USDC, WETH...) show up as an underlying asset in
+// hundreds of pools - rendering that many rows at once is both a poor list
+// to scan and, concretely, made this page's server render take 15-20s in
+// dev (confirmed by timing each data-fetch step vs. total request time: the
+// fetches summed to under a second, so the cost was in rendering hundreds
+// of watch-toggle client-component instances). TVL is a more meaningful
+// "relevant" ranking here than raw APY - it surfaces pools that actually
+// hold this token at scale rather than small pools with outsized reward-
+// driven APYs.
+const RELEVANT_POOLS_DISPLAY_LIMIT = 25;
 
 export async function generateMetadata({
   params,
@@ -47,15 +60,31 @@ export default async function TokenDetailPage({
   if (!data) notFound();
 
   const { token, chain, history, latest } = data;
-  const [watching, otherChains, priceChange7d] = await Promise.all([
+  const [watching, otherChains, priceChange7d, relevantPools] = await Promise.all([
     isWatchingToken(session?.user?.id, token.id),
     getTokenChainPresence(token.coingeckoId, token.id),
     getTokenPriceChange7d(token.id),
+    // Real "protocol exposure" / "relevant pools": which yield pools list
+    // this token's address in their underlyingTokens array (confirmed
+    // populated on every pool - see getYieldPools' filter comment). Not a
+    // dollar-weighted exposure figure (that would need per-pool token-
+    // allocation data this app doesn't have), just which real pools
+    // actually involve this token. Sorted by TVL (see
+    // RELEVANT_POOLS_DISPLAY_LIMIT above) rather than the default APY sort.
+    getYieldPools({ underlyingTokenAddress: token.address, sortBy: "tvl" }),
   ]);
+  const displayedPools = relevantPools.slice(0, RELEVANT_POOLS_DISPLAY_LIMIT);
+  const watchedPoolIds = await getWatchedPoolIds(
+    session?.user?.id,
+    displayedPools.map((p) => p.id),
+  );
 
   const priceHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.priceUsd }));
   const marketCapHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.marketCap }));
+  const volumeHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.volume24h }));
   const historyEndpoint = `/api/tokens/${token.address}/history${chainSlug ? `?chain=${chainSlug}` : ""}`;
+
+  const exposedProtocols = [...new Map(relevantPools.filter((p) => p.protocolSlug).map((p) => [p.protocolSlug, p])).values()];
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -139,6 +168,55 @@ export default async function TokenDetailPage({
           />
         </Card>
       )}
+
+      {volumeHistory.some((h) => h.value != null) && (
+        <Card className="mt-8 p-4">
+          <h2 className="mb-2 text-sm font-medium text-muted-foreground">Volume history</h2>
+          <RangedAreaChart data={volumeHistory} valueKind="usd" fetchEndpoint={historyEndpoint} valueField="volume24h" />
+        </Card>
+      )}
+
+      {exposedProtocols.length > 0 && (
+        <div className="mt-8">
+          <h2 className="mb-4 text-xs font-medium tracking-widest text-muted-foreground uppercase">
+            Protocol exposure
+          </h2>
+          <p className="mb-3 text-xs text-muted-foreground">
+            Protocols with at least one tracked pool involving {token.symbol}.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {exposedProtocols.map((p) => (
+              <Link key={p.protocolSlug} href={`/protocol/${p.protocolSlug}`}>
+                <Badge variant="outline" className="gap-1.5">
+                  <EntityLogo src={p.protocolLogoUrl} name={p.protocolName ?? p.protocolSlug!} size={16} />
+                  {p.protocolName}
+                </Badge>
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-8">
+        <h2 className="mb-4 text-xs font-medium tracking-widest text-muted-foreground uppercase">
+          Relevant pools
+        </h2>
+        {relevantPools.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            No tracked pools list {token.symbol} as an underlying asset yet.
+          </p>
+        ) : (
+          <>
+            {relevantPools.length > RELEVANT_POOLS_DISPLAY_LIMIT && (
+              <p className="mb-3 text-xs text-muted-foreground">
+                Showing the top {RELEVANT_POOLS_DISPLAY_LIMIT} of {relevantPools.length} pools involving{" "}
+                {token.symbol}, ranked by TVL.
+              </p>
+            )}
+            <YieldsTable pools={displayedPools} isSignedIn={Boolean(session?.user)} watchedPoolIds={watchedPoolIds} />
+          </>
+        )}
+      </div>
     </div>
   );
 }

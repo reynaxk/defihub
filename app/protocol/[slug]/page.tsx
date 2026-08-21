@@ -16,6 +16,7 @@ import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
 import { AiSummaryCard } from "@/components/protocols/ai-summary-card";
 import { OnchainVerificationCard } from "@/components/protocols/onchain-verification-card";
 import { ChainDistribution } from "@/components/protocols/chain-distribution";
+import { FlowVisualization } from "@/components/shared/flow-visualization";
 import { PercentChange } from "@/components/shared/percent-change";
 import { YieldsTable } from "@/components/yields/yields-table";
 import { getProtocolBySlug, getProtocolChainBreakdown } from "@/lib/database/queries/protocols";
@@ -186,6 +187,14 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
               <ChainDistribution chains={chainBreakdown} />
             </Card>
           )}
+          <Card className="mt-6 p-4">
+            <h2 className="mb-3 text-sm font-medium text-muted-foreground">Capital flows</h2>
+            <FlowVisualization
+              flows={[]}
+              emptyMessage="Cross-chain capital-flow data isn't tracked yet"
+              emptyDetail="DeFiHub tracks each chain's own TVL independently, but has no bridge/transfer data to attribute movement between chains - this section will only show real, directional flows once that pipeline exists, not an estimate derived from independent snapshots."
+            />
+          </Card>
           <OnchainVerificationCard verifications={verifications} />
           <AiSummaryCard
             slug={protocol.slug}

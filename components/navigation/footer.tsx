@@ -38,6 +38,12 @@ export function Footer() {
           <Link href="/tokens" className="hover:text-foreground">
             Tokens
           </Link>
+          <Link href="/stablecoins" className="hover:text-foreground">
+            Stablecoins
+          </Link>
+          <Link href="/bridges" className="hover:text-foreground">
+            Bridges
+          </Link>
           <Link href="/research" className="hover:text-foreground">
             Research
           </Link>

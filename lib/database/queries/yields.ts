@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, ilike, isNotNull, lte, or, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, isNotNull, lte, or, sql, type SQL } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, protocols, yieldPools } from "@/lib/database/schema";
 import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
@@ -14,6 +14,13 @@ export interface YieldFilters {
   maxApy?: number;
   minTvl?: number;
   search?: string;
+  // A pool "involves" a token when that token's address appears in its
+  // underlyingTokens array - confirmed live that this field is populated
+  // on every pool (12,991/12,991), so it's a reliable way to find real
+  // pools relevant to a given token, not a best-effort field. Matched
+  // case-insensitively: sample data has mixed-case EVM addresses
+  // alongside lowercase ones for the same token.
+  underlyingTokenAddress?: string;
   sortBy?: "apy" | "tvl";
   sortDir?: "asc" | "desc";
 }
@@ -32,6 +39,14 @@ function buildConditions(filters: YieldFilters): SQL[] {
     const term = `%${escapeLikePattern(filters.search)}%`;
     const clause = or(ilike(yieldPools.symbol, term), ilike(protocols.name, term));
     if (clause) conditions.push(clause);
+  }
+  if (filters.underlyingTokenAddress) {
+    conditions.push(
+      sql`exists (
+        select 1 from jsonb_array_elements_text(${yieldPools.underlyingTokens}) as elem
+        where lower(elem) = lower(${filters.underlyingTokenAddress})
+      )`,
+    );
   }
   return conditions;
 }

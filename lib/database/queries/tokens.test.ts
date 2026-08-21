@@ -14,6 +14,7 @@ import { closeDb, db } from "@/lib/database/client";
 import { chains, tokenPrices, tokens } from "@/lib/database/schema";
 import {
   getNativeTokenPrice,
+  getTokenPriceChange7d,
   getTokensForBalanceCheck,
   getTokensList,
   getTokensPageList,
@@ -122,6 +123,40 @@ describe("tokens queries - LATERAL join correctness", () => {
 
     const nativePrice = await getNativeTokenPrice(chain.slug);
     expect(nativePrice).toBe(3000);
+  });
+
+  it("getTokenPriceChange7d rejects a stale 7d figure once the current quote has moved past the freshness window", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const tokenId = await makeToken(chain.id, `STALE${randomUUID().slice(0, 6)}`);
+    createdTokenIds.push(tokenId);
+
+    const now = new Date();
+    // The only priceChange7d this token ever got, 2 days ago - stale by any
+    // reasonable freshness window relative to the price row below.
+    await addPrice(tokenId, new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000), 1, { priceChange7d: "42" });
+    // Every price sync since (15-min cadence) has carried no 7d figure at
+    // all, right up to the current quote.
+    await addPrice(tokenId, now, 2, {});
+
+    const change = await getTokenPriceChange7d(tokenId);
+    expect(change).toBeNull();
+  });
+
+  it("getTokenPriceChange7d still returns a recent, within-window 7d figure", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const tokenId = await makeToken(chain.id, `FRESH${randomUUID().slice(0, 6)}`);
+    createdTokenIds.push(tokenId);
+
+    const now = new Date();
+    // A normal healthy gap: the 6-hourly discovery sync set this a couple
+    // of hours before the most recent 15-min price-only tick.
+    await addPrice(tokenId, new Date(now.getTime() - 2 * 60 * 60 * 1000), 1, { priceChange7d: "13.5" });
+    await addPrice(tokenId, now, 2, {});
+
+    const change = await getTokenPriceChange7d(tokenId);
+    expect(change).toBe(13.5);
   });
 
   it("getTokensPageList respects sortDir - backs the sortable table header click", async () => {

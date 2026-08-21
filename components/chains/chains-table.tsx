@@ -69,8 +69,14 @@ export function ChainsTable({
             cellClassName: "hidden sm:table-cell",
             render: (chain: ChainListItem) => {
               const points = sparklines.get(chain.id) ?? [];
+              // Direction reflects what the sparkline itself shows (the
+              // 14-day return, first point to last) rather than change24h -
+              // a chain can easily have a red 24h tick inside a rising
+              // 14-day line, or vice versa, and coloring by the wrong
+              // window looks like a bug even though each number is correct
+              // on its own.
               return points.length >= 2 ? (
-                <Sparkline points={points} positive={(chain.change24h ?? 0) >= 0} />
+                <Sparkline points={points} positive={points[points.length - 1] >= points[0]} />
               ) : (
                 <span className="text-muted-foreground">—</span>
               );

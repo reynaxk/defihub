@@ -55,7 +55,10 @@
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: #2a78d6;
+  /* Signal teal - the one distinctive DeFiHub accent (tailwind teal-600,
+     picked for the ~4.6:1 contrast it holds against white with white
+     text on top, mirroring the weight the previous blue held here). */
+  --primary: #0d9488;
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
@@ -66,17 +69,17 @@
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
-  --ring: #86b6ef;
-  --chart-1: #2a78d6;
-  --chart-2: #eb6834;
-  --chart-3: #1baf7a;
-  --chart-4: #eda100;
-  --chart-5: #e87ba4;
+  --ring: #5eead4;
+  --chart-1: #0d9488;
+  --chart-2: #6366f1;
+  --chart-3: #16a34a;
+  --chart-4: #d97706;
+  --chart-5: #e11d48;
   /* Distinct from --chart-3: that's the categorical mark color (fine at
      low contrast for a chart line/fill), this is for literal readable
      text (APY figures, success messages) which needs real WCAG contrast. */
   --success-text: #006300;
-  --radius: 0.625rem;
+  --radius: 0.5rem;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
@@ -87,39 +90,52 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+/* Dark is the primary, designed-for-first surface (a "terminal", not a
+   toggle afterthought) - light above stays fully maintained for the
+   existing theme toggle, but every density/contrast call in this file
+   was made looking at this block. */
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: #3987e5;
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  /* Near-black graphite, not shadcn's stock dark gray - deliberately a
+     touch darker than a typical dashboard so panels have somewhere to
+     recede to. */
+  --background: oklch(0.11 0 0);
+  --foreground: oklch(0.97 0 0);
+  --card: oklch(0.15 0 0);
+  --card-foreground: oklch(0.97 0 0);
+  --popover: oklch(0.15 0 0);
+  --popover-foreground: oklch(0.97 0 0);
+  /* tailwind teal-400 - bright enough to read as a genuine "signal"
+     against near-black. Paired with a near-black foreground (not white)
+     below: a bright accent with dark text reads as an HUD/terminal
+     action affordance, not a conventional SaaS button. */
+  --primary: #2dd4bf;
+  --primary-foreground: oklch(0.145 0 0);
+  --secondary: oklch(0.19 0 0);
+  --secondary-foreground: oklch(0.97 0 0);
+  --muted: oklch(0.17 0 0);
+  --muted-foreground: oklch(0.65 0 0);
+  --accent: oklch(0.19 0 0);
+  --accent-foreground: oklch(0.97 0 0);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: #184f95;
-  --chart-1: #3987e5;
-  --chart-2: #d95926;
-  --chart-3: #199e70;
-  --chart-4: #c98500;
-  --chart-5: #d55181;
+  /* Hairline, not a visible line - "extremely subtle borders" from the
+     brief, tighter than the previous 10%. */
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: #14b8a6;
+  --chart-1: #2dd4bf;
+  --chart-2: #818cf8;
+  --chart-3: #22c55e;
+  --chart-4: #f59e0b;
+  --chart-5: #f43f5e;
   --success-text: #0ca30c;
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --sidebar: oklch(0.15 0 0);
+  --sidebar-foreground: oklch(0.97 0 0);
+  --sidebar-primary: #2dd4bf;
+  --sidebar-primary-foreground: oklch(0.145 0 0);
+  --sidebar-accent: oklch(0.19 0 0);
+  --sidebar-accent-foreground: oklch(0.97 0 0);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: #14b8a6;
 }
 
 @layer base {

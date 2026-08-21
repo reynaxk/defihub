@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { LineChart } from "lucide-react";
+import { Activity } from "lucide-react";
 import { auth, signOut } from "@/lib/auth/config";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,12 +14,35 @@ import { ThemeToggle } from "@/components/navigation/theme-toggle";
 import { MobileNav } from "@/components/navigation/mobile-nav";
 import { CommandPalette } from "@/components/search/command-palette";
 
-const NAV_LINKS = [
+export interface NavLink {
+  href: string;
+  label: string;
+  // Nav entries the spec asked for that have no backing data/logic yet
+  // (Stablecoins, Bridges, Trade) - the pages exist and are honest about
+  // their own state, but the nav itself flags it up front too, rather
+  // than only revealing "not available" after a click.
+  soon?: boolean;
+}
+
+export const NAV_LINKS: NavLink[] = [
+  { href: "/", label: "Overview" },
   { href: "/protocols", label: "Protocols" },
   { href: "/chains", label: "Chains" },
-  { href: "/yields", label: "Yields" },
   { href: "/tokens", label: "Tokens" },
+  { href: "/yields", label: "Yields" },
+  { href: "/stablecoins", label: "Stablecoins", soon: true },
+  { href: "/bridges", label: "Bridges", soon: true },
+  { href: "/research", label: "Research" },
+  { href: "/trade", label: "Trade", soon: true },
 ];
+
+function SoonTag() {
+  return (
+    <span className="rounded-sm bg-muted px-1 py-px text-[9px] font-medium tracking-wide text-muted-foreground uppercase">
+      Soon
+    </span>
+  );
+}
 
 export async function Navbar() {
   const session = await auth();
@@ -29,25 +52,32 @@ export async function Navbar() {
 
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6">
-        <div className="flex items-center gap-3 sm:gap-6">
+      <div className="mx-auto flex h-14 max-w-[1600px] items-center justify-between px-4 sm:px-6">
+        <div className="flex min-w-0 items-center gap-3 xl:gap-6">
           <MobileNav links={mobileLinks} />
-          <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight">
-            <LineChart className="size-5 text-primary" strokeWidth={2.5} />
-            <span>DeFiHub</span>
+          <Link href="/" className="flex shrink-0 items-center gap-2 font-semibold tracking-tight">
+            <Activity className="size-5 text-primary" strokeWidth={2.5} />
+            <span>
+              DeFi<span className="text-primary">Hub</span>
+            </span>
           </Link>
-          <nav className="hidden items-center gap-5 text-sm text-muted-foreground sm:flex">
+          <nav className="hidden items-center gap-4 text-sm text-muted-foreground xl:flex">
             {NAV_LINKS.map((link) => (
-              <Link key={link.href} href={link.href} className="transition-colors hover:text-foreground">
+              <Link
+                key={link.href}
+                href={link.href}
+                className="flex items-center gap-1.5 whitespace-nowrap transition-colors hover:text-foreground"
+              >
                 {link.label}
+                {link.soon && <SoonTag />}
               </Link>
             ))}
             {session?.user && (
               <>
-                <Link href="/dashboard" className="transition-colors hover:text-foreground">
+                <Link href="/dashboard" className="whitespace-nowrap transition-colors hover:text-foreground">
                   Dashboard
                 </Link>
-                <Link href="/wallet" className="transition-colors hover:text-foreground">
+                <Link href="/wallet" className="whitespace-nowrap transition-colors hover:text-foreground">
                   Wallet
                 </Link>
               </>

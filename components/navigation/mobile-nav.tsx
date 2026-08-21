@@ -9,9 +9,9 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/co
 import { SearchBox } from "@/components/search/search-box";
 
 // The account menu (avatar dropdown) and the sign-in/register buttons
-// already render outside the `hidden sm:flex` nav, so they're reachable on
+// already render outside the `hidden xl:flex` nav, so they're reachable on
 // mobile without this. This just surfaces the browse links that aren't.
-export function MobileNav({ links }: { links: { href: string; label: string }[] }) {
+export function MobileNav({ links }: { links: { href: string; label: string; soon?: boolean }[] }) {
   // Deliberately not SheetClose for the nav items: Base UI's Close
   // primitive sets role="button" on whatever it composes with, which is
   // the wrong accessible role for a real navigational <a href> - screen
@@ -37,7 +37,7 @@ export function MobileNav({ links }: { links: { href: string; label: string }[] 
   return (
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetTrigger
-        render={<Button variant="ghost" size="icon" className="sm:hidden" />}
+        render={<Button variant="ghost" size="icon" className="xl:hidden" />}
         aria-label="Open menu"
       >
         <Menu className="size-5" />
@@ -55,9 +55,14 @@ export function MobileNav({ links }: { links: { href: string; label: string }[] 
               key={link.href}
               href={link.href}
               onClick={() => setOpen(false)}
-              className="rounded-md px-2 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="flex items-center gap-1.5 rounded-md px-2 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
             >
               {link.label}
+              {link.soon && (
+                <span className="rounded-sm bg-muted px-1 py-px text-[9px] font-medium tracking-wide text-muted-foreground uppercase">
+                  Soon
+                </span>
+              )}
             </Link>
           ))}
         </nav>

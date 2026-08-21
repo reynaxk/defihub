@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chainMetrics, chains, protocolMetrics, protocols } from "@/lib/database/schema";
 import { computeTvlChanges } from "./tvl-change";
@@ -60,6 +60,32 @@ export async function getTopChains(): Promise<ChainListItem[]> {
   });
 
   return items.sort((a, b) => (b.tvl ?? 0) - (a.tvl ?? 0));
+}
+
+// Compact recent-TVL series per chain, for the homepage's Market Pulse
+// sparklines. A dedicated query rather than extending ChainListItem/
+// getTopChains, which also backs the public /api/v1/chains and
+// /api/export/chains contracts - those shouldn't gain a new field for a
+// homepage-only visual.
+const SPARKLINE_DAYS = 14;
+
+export async function getChainSparklines(chainIds: string[]): Promise<Map<string, number[]>> {
+  if (chainIds.length === 0) return new Map();
+  const since = new Date(Date.now() - SPARKLINE_DAYS * 24 * 60 * 60 * 1000);
+  const rows = await db
+    .select({ chainId: chainMetrics.chainId, timestamp: chainMetrics.timestamp, tvl: chainMetrics.tvl })
+    .from(chainMetrics)
+    .where(and(inArray(chainMetrics.chainId, chainIds), gte(chainMetrics.timestamp, since)))
+    .orderBy(chainMetrics.timestamp);
+
+  const byChain = new Map<string, number[]>();
+  for (const r of rows) {
+    if (r.tvl == null) continue;
+    const list = byChain.get(r.chainId) ?? [];
+    list.push(Number(r.tvl));
+    byChain.set(r.chainId, list);
+  }
+  return byChain;
 }
 
 export async function getGlobalTvlHistory(): Promise<{ timestamp: Date; tvl: number }[]> {

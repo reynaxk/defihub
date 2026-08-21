@@ -1,25 +1,55 @@
 import Link from "next/link";
-import { ArrowRight, Coins, DollarSign, Layers, Sprout, Wallet } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { StatTile } from "@/components/stats/stat-tile";
-import { PercentChange } from "@/components/shared/percent-change";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { MetricHeader } from "@/components/stats/metric-header";
+import { MetricRow } from "@/components/stats/metric-row";
+import { AnimatedNumber } from "@/components/stats/animated-number";
 import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
+import { MarketPulse } from "@/components/chains/market-pulse";
 import { ProtocolsTable } from "@/components/protocols/protocols-table";
 import { ChainsTable } from "@/components/chains/chains-table";
 import { TopMovers } from "@/components/tokens/top-movers";
-import { getGlobal24hTotals, getProtocolCount, getTopProtocols } from "@/lib/database/queries/protocols";
-import { getGlobalTvlHistory, getTopChains } from "@/lib/database/queries/chains";
+import {
+  getGlobal24hTotals,
+  getGlobalMetricsHistory,
+  getProtocolCount,
+  getTopProtocols,
+} from "@/lib/database/queries/protocols";
+import { getChainSparklines, getGlobalTvlHistory, getTopChains } from "@/lib/database/queries/chains";
 import { getYieldPoolCount } from "@/lib/database/queries/yields";
 import { getTopMovers } from "@/lib/database/queries/tokens";
 import { getWatchedChainIds, getWatchedProtocolIds } from "@/lib/database/queries/watchlist";
 import { computeTvlChanges } from "@/lib/database/queries/tvl-change";
 import { auth } from "@/lib/auth/config";
-import { formatUsd } from "@/lib/format";
+import { formatPercent, formatUsd } from "@/lib/format";
 import { sumKnownValues } from "@/lib/utils/aggregate";
+import { cn } from "@/lib/utils";
 import { SUPPORTED_CHAINS } from "@/lib/config/chains";
 
 export const revalidate = 300;
+
+const MARKET_PULSE_CHAINS = 7;
+
+function ChangeBadge({ value, period }: { value: number | null; period?: string }) {
+  if (value == null || Number.isNaN(value)) {
+    return <span className="text-sm text-muted-foreground">—</span>;
+  }
+  const positive = value >= 0;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md px-2 py-1 text-sm font-medium tabular-nums",
+        positive ? "bg-[var(--success-text)]/10 text-[var(--success-text)]" : "bg-destructive/10 text-destructive",
+      )}
+    >
+      {positive ? <ArrowUp className="size-3.5" /> : <ArrowDown className="size-3.5" />}
+      {formatPercent(value, { signed: true })}
+      {period && <span className="ml-0.5 text-xs font-normal opacity-70">{period}</span>}
+    </span>
+  );
+}
 
 export default async function HomePage() {
   const [
@@ -30,7 +60,8 @@ export default async function HomePage() {
     yieldPoolCount,
     movers24h,
     movers7d,
-    globalHistory,
+    globalTvlHistory,
+    globalMetricsHistory,
     global24h,
   ] = await Promise.all([
     auth(),
@@ -41,112 +72,151 @@ export default async function HomePage() {
     getTopMovers(5, "24h"),
     getTopMovers(5, "7d"),
     getGlobalTvlHistory(),
+    getGlobalMetricsHistory(),
     getGlobal24hTotals(),
   ]);
-  // Derived from the history already fetched above, rather than a second
-  // call to a function that would re-run the same expensive date_trunc/SUM
-  // aggregate query over chain_metrics from scratch.
-  const globalChanges = computeTvlChanges(globalHistory);
+  // Derived from history already fetched above, rather than a second call
+  // that would re-run the same expensive date_trunc/SUM aggregate query.
+  const globalChanges = computeTvlChanges(globalTvlHistory);
 
-  const [watchedProtocolIds, watchedChainIds] = await Promise.all([
+  const pulseChains = topChains.slice(0, MARKET_PULSE_CHAINS);
+  const [watchedProtocolIds, watchedChainIds, sparklines] = await Promise.all([
     getWatchedProtocolIds(session?.user?.id, topProtocols.map((p) => p.id)),
     getWatchedChainIds(session?.user?.id, topChains.map((c) => c.id)),
+    getChainSparklines(pulseChains.map((c) => c.id)),
   ]);
 
   // A chain with no synced history has an unknown TVL, not a zero one - `??
   // 0` here would silently understate the platform's headline number.
   const { total: totalTvl, isPartial: tvlPartial } = sumKnownValues(topChains.map((c) => c.tvl));
 
+  // globalTvlHistory (chain_metrics) and globalMetricsHistory (protocol_metrics)
+  // are two separate day-bucketed queries - both truncate to UTC midnight the
+  // same way, so matching on the ISO day string merges them correctly without
+  // a third query.
+  const metricsByDay = new Map(globalMetricsHistory.map((m) => [m.timestamp.toISOString(), m]));
+  const mergedHistory = globalTvlHistory.map((h) => {
+    const iso = h.timestamp.toISOString();
+    const m = metricsByDay.get(iso);
+    return {
+      timestamp: iso,
+      tvl: h.tvl as number | null,
+      volume24h: m?.volume24h ?? null,
+      fees24h: m?.fees24h ?? null,
+      revenue24h: m?.revenue24h ?? null,
+    };
+  });
+
   return (
-    <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6">
-      <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 flex flex-col items-start gap-4 py-8 duration-700 sm:py-12">
-        <h1 className="max-w-2xl text-4xl font-semibold tracking-tight sm:text-5xl">
-          DeFi intelligence, all in one place.
-        </h1>
-        <p className="max-w-xl text-lg text-muted-foreground">
-          DeFiHub tracks TVL, volume, fees, revenue and yields across {SUPPORTED_CHAINS.length}{" "}
-          chains and thousands of protocols — one clean dashboard for what&apos;s actually happening on-chain.
-        </p>
-        <div className="flex flex-wrap items-center gap-3 pt-2">
+    <div className="mx-auto max-w-[1600px] px-4 py-6 sm:px-6">
+      <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 flex flex-wrap items-center justify-between gap-4 border-b border-border/60 pb-6 duration-700">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">DeFi intelligence, all in one place.</h1>
+          <p className="mt-1 max-w-xl text-sm text-muted-foreground">
+            Tracking TVL, volume, fees, revenue and yields across {SUPPORTED_CHAINS.length} chains and thousands of
+            protocols — grounded in DeFiHub&apos;s own indexed on-chain data.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
           <Button
-            size="lg"
             render={
               <Link href="/protocols">
                 Explore DeFi <ArrowRight className="size-4" />
               </Link>
             }
           />
-          <Button size="lg" variant="outline" render={<Link href="/protocols">Explore protocols</Link>} />
+          <Button variant="outline" render={<Link href="/research">DeFiHub Research</Link>} />
         </div>
       </section>
 
-      {/* 10 tiles - a prior 3/9-column layout left a trailing tile (10
-          doesn't divide evenly by 3 or 9). 5 columns divides evenly (2
-          full rows) at every width from `sm` up - a 10-wide single row was
-          tried at `xl`, but even inside this page's max-w-7xl container
-          that leaves each tile too narrow for its p-4 padding and text-2xl
-          value to stay comfortable, so 5 stays the ceiling rather than
-          widening further (kept as an explicit xl breakpoint, not just
-          relying on the sm:grid-cols-5 cascade, so the intended ceiling is
-          visible at the class level). */}
-      <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 grid grid-cols-2 gap-3 py-6 delay-150 duration-700 sm:grid-cols-5 xl:grid-cols-5">
-        <StatTile
-          label={`Total value locked${tvlPartial ? " (partial)" : ""}`}
-          value={formatUsd(totalTvl)}
-          icon={Wallet}
-          animate={totalTvl != null ? { value: totalTvl, format: "usd" } : undefined}
+      <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 py-6 delay-150 duration-700">
+        <MetricHeader
+          eyebrow="Global DeFi"
+          value={totalTvl != null ? <AnimatedNumber value={totalTvl} format="usd" /> : "—"}
+          label={`Total value locked${tvlPartial ? " (partial — some chains unavailable)" : ""}`}
+          change={<ChangeBadge value={globalChanges.change24h} period="24H" />}
         />
-        <StatTile label="24h TVL change" customValue={<PercentChange value={globalChanges.change24h} />} />
-        <StatTile label="7d TVL change" customValue={<PercentChange value={globalChanges.change7d} />} />
-        <StatTile label="30d TVL change" customValue={<PercentChange value={globalChanges.change30d} />} />
-        <StatTile
-          label="Chains supported"
-          value={String(SUPPORTED_CHAINS.length)}
-          icon={Coins}
-          animate={{ value: SUPPORTED_CHAINS.length, format: "count" }}
-        />
-        <StatTile
-          label="Protocols tracked"
-          icon={Layers}
-          animate={{ value: protocolCount, format: "count" }}
-        />
-        <StatTile
-          label="Yield pools"
-          icon={Sprout}
-          animate={{ value: yieldPoolCount, format: "count" }}
-        />
-        <StatTile
-          label="24h volume"
-          value={formatUsd(global24h.volume24h)}
-          icon={DollarSign}
-          animate={global24h.volume24h != null ? { value: global24h.volume24h, format: "usd" } : undefined}
-        />
-        <StatTile
-          label="24h fees"
-          value={formatUsd(global24h.fees24h)}
-          animate={global24h.fees24h != null ? { value: global24h.fees24h, format: "usd" } : undefined}
-        />
-        <StatTile
-          label="24h revenue"
-          value={formatUsd(global24h.revenue24h)}
-          animate={global24h.revenue24h != null ? { value: global24h.revenue24h, format: "usd" } : undefined}
+        <MetricRow
+          className="mt-6"
+          items={[
+            { label: "7D change", value: <ChangeBadge value={globalChanges.change7d} /> },
+            { label: "30D change", value: <ChangeBadge value={globalChanges.change30d} /> },
+            { label: "24H volume", value: formatUsd(global24h.volume24h) },
+            { label: "24H fees", value: formatUsd(global24h.fees24h) },
+            { label: "24H revenue", value: formatUsd(global24h.revenue24h) },
+            { label: "Chains", value: <AnimatedNumber value={SUPPORTED_CHAINS.length} format="count" /> },
+            { label: "Protocols", value: <AnimatedNumber value={protocolCount} format="count" /> },
+            { label: "Yield pools", value: <AnimatedNumber value={yieldPoolCount} format="count" /> },
+          ]}
         />
       </section>
 
-      <section className="py-8">
-        <h2 className="mb-4 text-xl font-semibold tracking-tight">Total DeFi TVL</h2>
-        <Card className="p-4">
-          <RangedAreaChart
-            data={globalHistory.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))}
-            height={320}
-            defaultRange="90d"
-          />
-        </Card>
+      <section className="py-6">
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+          <Card className="p-4 sm:p-6">
+            <Tabs defaultValue="tvl">
+              <TabsList variant="line">
+                <TabsTrigger value="tvl">TVL</TabsTrigger>
+                <TabsTrigger value="volume">Volume</TabsTrigger>
+                <TabsTrigger value="fees">Fees</TabsTrigger>
+                <TabsTrigger value="revenue">Revenue</TabsTrigger>
+              </TabsList>
+              <TabsContent value="tvl" className="mt-4">
+                <RangedAreaChart
+                  data={mergedHistory.map((h) => ({ timestamp: h.timestamp, value: h.tvl }))}
+                  height={360}
+                  defaultRange="90d"
+                />
+              </TabsContent>
+              <TabsContent value="volume" className="mt-4">
+                <RangedAreaChart
+                  data={mergedHistory.map((h) => ({ timestamp: h.timestamp, value: h.volume24h }))}
+                  height={360}
+                  defaultRange="90d"
+                />
+              </TabsContent>
+              <TabsContent value="fees" className="mt-4">
+                <RangedAreaChart
+                  data={mergedHistory.map((h) => ({ timestamp: h.timestamp, value: h.fees24h }))}
+                  height={360}
+                  defaultRange="90d"
+                />
+              </TabsContent>
+              <TabsContent value="revenue" className="mt-4">
+                <RangedAreaChart
+                  data={mergedHistory.map((h) => ({ timestamp: h.timestamp, value: h.revenue24h }))}
+                  height={360}
+                  defaultRange="90d"
+                />
+              </TabsContent>
+            </Tabs>
+          </Card>
+
+          <Card className="p-4">
+            <h2 className="text-sm font-medium text-foreground">Market Pulse</h2>
+            <p className="mt-0.5 mb-3 text-xs text-muted-foreground">TVL and 24h change by chain</p>
+            {pulseChains.length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">No chains synced yet.</p>
+            ) : (
+              <MarketPulse
+                chains={pulseChains.map((c) => ({
+                  id: c.id,
+                  slug: c.slug,
+                  name: c.name,
+                  logoUrl: c.logoUrl,
+                  tvl: c.tvl,
+                  change24h: c.change24h,
+                  sparkline: sparklines.get(c.id) ?? [],
+                }))}
+              />
+            )}
+          </Card>
+        </div>
       </section>
 
-      <section className="py-8">
+      <section className="py-6">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-xl font-semibold tracking-tight">Top movers</h2>
+          <h2 className="text-xs font-medium tracking-widest text-muted-foreground uppercase">Top movers</h2>
           <Link href="/tokens?sort=priceChange24h" className="text-sm text-primary hover:underline">
             View all
           </Link>
@@ -154,9 +224,9 @@ export default async function HomePage() {
         <TopMovers movers24h={movers24h} movers7d={movers7d} />
       </section>
 
-      <section className="py-8">
+      <section className="py-6">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-xl font-semibold tracking-tight">Top protocols</h2>
+          <h2 className="text-xs font-medium tracking-widest text-muted-foreground uppercase">Top protocols</h2>
           <Link href="/protocols" className="text-sm text-primary hover:underline">
             View all
           </Link>
@@ -168,9 +238,9 @@ export default async function HomePage() {
         />
       </section>
 
-      <section className="py-8">
+      <section className="py-6">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-xl font-semibold tracking-tight">Chains</h2>
+          <h2 className="text-xs font-medium tracking-widest text-muted-foreground uppercase">Chains</h2>
           <Link href="/chains" className="text-sm text-primary hover:underline">
             View all
           </Link>

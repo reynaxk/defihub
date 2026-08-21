@@ -85,8 +85,8 @@ export function CommandPalette({ className }: { className?: string }) {
         }
       >
         <Search className="size-4" />
-        <span className="flex-1 text-left">Search…</span>
-        <kbd className="pointer-events-none rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px]">
+        <span className="flex-1 text-left">Search DeFiHub…</span>
+        <kbd className="pointer-events-none rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
           ⌘K
         </kbd>
       </DialogTrigger>

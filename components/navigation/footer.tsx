@@ -25,7 +25,7 @@ export function Footer() {
           </a>
           .
         </p>
-        <nav className="flex items-center gap-4">
+        <nav className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <Link href="/protocols" className="hover:text-foreground">
             Protocols
           </Link>
@@ -37,6 +37,9 @@ export function Footer() {
           </Link>
           <Link href="/tokens" className="hover:text-foreground">
             Tokens
+          </Link>
+          <Link href="/research" className="hover:text-foreground">
+            Research
           </Link>
           <Link href="/api-docs" className="hover:text-foreground">
             API

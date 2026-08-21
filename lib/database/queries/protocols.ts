@@ -276,6 +276,40 @@ export async function getGlobal24hTotals(): Promise<Global24hTotals> {
   };
 }
 
+export interface GlobalMetricsHistoryPoint {
+  timestamp: Date;
+  volume24h: number | null;
+  fees24h: number | null;
+  revenue24h: number | null;
+}
+
+// Same day-bucketed sum-across-protocols shape as getGlobalTvlHistory
+// (lib/database/queries/chains.ts), just over protocol_metrics' aggregate
+// (chainId is null) rows instead of chain_metrics - real historical
+// volume/fees/revenue for the homepage's market chart, not a fabricated
+// series next to the real TVL one.
+export async function getGlobalMetricsHistory(): Promise<GlobalMetricsHistoryPoint[]> {
+  const dayTrunc = sql`(date_trunc('day', ${protocolMetrics.timestamp} AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')`;
+  const rows = await db
+    .select({
+      day: sql<Date>`${dayTrunc}`.as("day"),
+      volume24h: sql<string | null>`sum(${protocolMetrics.volume24h})`,
+      fees24h: sql<string | null>`sum(${protocolMetrics.fees24h})`,
+      revenue24h: sql<string | null>`sum(${protocolMetrics.revenue24h})`,
+    })
+    .from(protocolMetrics)
+    .where(isNull(protocolMetrics.chainId))
+    .groupBy(dayTrunc)
+    .orderBy(dayTrunc);
+
+  return rows.map((r) => ({
+    timestamp: new Date(r.day),
+    volume24h: r.volume24h != null ? Number(r.volume24h) : null,
+    fees24h: r.fees24h != null ? Number(r.fees24h) : null,
+    revenue24h: r.revenue24h != null ? Number(r.revenue24h) : null,
+  }));
+}
+
 export async function getAllCategories(): Promise<string[]> {
   const rows = await db
     .selectDistinct({ category: protocols.category })

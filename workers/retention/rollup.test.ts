@@ -5,12 +5,12 @@
 // asserts on rows scoped to that row's id, so this is safe to run
 // regardless of whatever else already exists in the database.
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import postgres from "postgres";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
-import { chainMetrics, chains, protocolMetrics, protocols, tokenPrices, tokens } from "@/lib/database/schema";
-import { rollupMetrics } from "./rollup";
+import { chainMetrics, chains, protocolMetrics, protocols, syncRuns, tokenPrices, tokens } from "@/lib/database/schema";
+import { ROLLUP_ADVISORY_LOCK_KEY, rollupMetrics } from "./rollup";
 
 // Timestamps are built from a fixed UTC date/hour rather than
 // `now - N days - offsetMs`, so multiple "same bucket" points are
@@ -196,7 +196,6 @@ describe("rollupMetrics", () => {
   // transaction-scoped function) blocks a second session while the first
   // holds it.
   it("blocks a second session from acquiring the same transaction-scoped advisory lock", async () => {
-    const ROLLUP_ADVISORY_LOCK_KEY = 728140501;
     const connA = postgres(process.env.DATABASE_URL!, { max: 1, prepare: false });
     const connB = postgres(process.env.DATABASE_URL!, { max: 1, prepare: false });
 
@@ -219,6 +218,34 @@ describe("rollupMetrics", () => {
     } finally {
       await connA.end();
       await connB.end();
+    }
+  });
+
+  it("reports a lock-contended run as a null, non-null-distinguishable, partial sync run - not an undifferentiated success", async () => {
+    // Holds the real lock on an independent raw connection (same
+    // reasoning as the test above - the app's own pooled client can't
+    // exercise genuine concurrency), then calls the actual public
+    // rollupMetrics() entry point while it's held.
+    const holder = postgres(process.env.DATABASE_URL!, { max: 1, prepare: false });
+    try {
+      await holder.begin(async (tx) => {
+        const [{ locked }] = await tx`select pg_try_advisory_xact_lock(${ROLLUP_ADVISORY_LOCK_KEY}) as locked`;
+        expect(locked).toBe(true);
+
+        const result = await rollupMetrics();
+        expect(result).toBeNull();
+      });
+
+      const [run] = await db
+        .select()
+        .from(syncRuns)
+        .where(eq(syncRuns.worker, "rollup-metrics"))
+        .orderBy(desc(syncRuns.startedAt))
+        .limit(1);
+      expect(run.status).toBe("partial");
+      expect(run.recordsProcessed).toBe(0);
+    } finally {
+      await holder.end();
     }
   });
 });

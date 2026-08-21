@@ -241,28 +241,46 @@ export async function checkAlerts(): Promise<void> {
             .returning({ id: alerts.id });
           if (claimed.length === 0) continue; // another concurrent run already claimed it
 
-          const sent = await sendEmail({
-            to: userEmail,
-            subject: `DeFiHub alert: ${reading.displayName}`,
-            html: alertEmailHtml({
-              displayName: reading.displayName,
-              current: reading.current,
-              threshold: Number(alert.threshold),
-              condition: alert.condition,
-              appUrl: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
-            }),
-          });
-          if (sent) {
-            triggered++;
-          } else {
-            // Send failed after claiming - revert so the next run's
-            // `fires && !alert.isFiring` check is true again and retries
-            // it, instead of a failed send silently being treated the
-            // same as a delivered one and never being retried.
+          try {
+            const sent = await sendEmail({
+              to: userEmail,
+              subject: `DeFiHub alert: ${reading.displayName}`,
+              html: alertEmailHtml({
+                displayName: reading.displayName,
+                current: reading.current,
+                threshold: Number(alert.threshold),
+                condition: alert.condition,
+                appUrl: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
+              }),
+            });
+            if (sent) {
+              triggered++;
+            } else {
+              // Send failed (resolved false) after claiming - revert so
+              // the next run's `fires && !alert.isFiring` check is true
+              // again and retries it, instead of a failed send silently
+              // being treated the same as a delivered one and never
+              // being retried.
+              await db
+                .update(alerts)
+                .set({ isFiring: false, lastTriggeredAt: alert.lastTriggeredAt })
+                .where(eq(alerts.id, alert.id));
+            }
+          } catch (sendErr) {
+            // sendEmail can also reject rather than resolve false (e.g. a
+            // network-level failure before Resend's API ever responds,
+            // not just an application-level error it catches itself) - the
+            // claim above already committed, and without this the alert
+            // would stay isFiring=true forever with no email ever having
+            // been sent, since later runs only re-check the condition
+            // against the *current* isFiring value, not "did a send
+            // actually happen." Revert the same way as a resolved-false
+            // send, then let the outer catch below log/count the failure.
             await db
               .update(alerts)
               .set({ isFiring: false, lastTriggeredAt: alert.lastTriggeredAt })
               .where(eq(alerts.id, alert.id));
+            throw sendErr;
           }
         } else if (fires !== alert.isFiring) {
           await db.update(alerts).set({ isFiring: fires }).where(eq(alerts.id, alert.id));

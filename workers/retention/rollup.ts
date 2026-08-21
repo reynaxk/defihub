@@ -48,7 +48,17 @@ export async function rollupMetrics(): Promise<RollupStats | null> {
   return withSyncRun("rollup-metrics", async () => {
     const stats = await runRollup();
     if (stats === null) {
-      return { result: null, stats: { recordsProcessed: 0, metadata: { skipped: "already running elsewhere" } } };
+      // Not a successful no-op run - the lock was already held elsewhere,
+      // so this invocation did nothing at all. Without an explicit
+      // outcome, withSyncRun's default ("success") would persist this
+      // indistinguishably from "ran and genuinely found zero rows to
+      // delete," hiding a lock-contended/skipped run from anyone reading
+      // sync_runs.
+      return {
+        result: null,
+        stats: { recordsProcessed: 0, metadata: { skipped: "already running elsewhere" } },
+        outcome: "partial" as const,
+      };
     }
     const totalRemoved =
       stats.chainMetrics.before -
@@ -67,10 +77,10 @@ export async function rollupMetrics(): Promise<RollupStats | null> {
 // on a pooled connection that a later unlock happens not to land back on
 // (postgres.js's pool doesn't guarantee connection affinity across
 // separate top-level queries, only within one transaction).
-const ROLLUP_ADVISORY_LOCK_KEY = 728140501;
+export const ROLLUP_ADVISORY_LOCK_KEY = 728140501;
 
 async function runRollup(): Promise<RollupStats | null> {
-  return db.transaction(async (tx) => {
+  const stats = await db.transaction(async (tx) => {
     const [{ locked }] = await tx.execute<{ locked: boolean }>(
       sql`select pg_try_advisory_xact_lock(${ROLLUP_ADVISORY_LOCK_KEY}) as locked`,
     );
@@ -138,16 +148,27 @@ async function runRollup(): Promise<RollupStats | null> {
       tokenPrices: (await tx.select({ value: count() }).from(tokenPrices))[0]?.value ?? 0,
     };
 
-    const stats: RollupStats = {
+    const result: RollupStats = {
       chainMetrics: { before: before.chainMetrics, after: after.chainMetrics },
       protocolMetrics: { before: before.protocolMetrics, after: after.protocolMetrics },
       tokenPrices: { before: before.tokenPrices, after: after.tokenPrices },
     };
 
-    logger.info("rollup complete", { component: "retention", metadata: stats });
-
-    return stats;
+    return result;
   });
+
+  // Logged only after the transaction promise resolves, meaning COMMIT
+  // actually succeeded - logging "complete" from inside the callback would
+  // fire even if COMMIT itself then failed and rolled back every DELETE,
+  // leaving operators comparing a "complete" log against row counts that
+  // never changed. Guarded against null too - the lock-contended/skipped
+  // path already logs its own "already in progress" warning above and
+  // never ran a rollup at all, so "complete" would be inaccurate there.
+  if (stats) {
+    logger.info("rollup complete", { component: "retention", metadata: stats });
+  }
+
+  return stats;
 }
 
 if (require.main === module) {

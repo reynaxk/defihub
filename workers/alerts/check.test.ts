@@ -3,10 +3,10 @@
 // against real alerts/chains/chain_metrics rows, not mockable behavior. Only
 // the email send and (for the isolation test) condition evaluation are mocked.
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
-import { alerts, chainMetrics, chains, users } from "@/lib/database/schema";
+import { alerts, chainMetrics, chains, syncRuns, users } from "@/lib/database/schema";
 
 const mockSendEmail = vi.fn();
 vi.mock("../../lib/notifications/email", () => ({
@@ -91,6 +91,45 @@ describe("checkAlerts", () => {
     expect(row.isFiring).toBe(true);
   });
 
+  it("reverts the firing claim when sendEmail rejects, so a later run retries instead of suppressing the alert forever", async () => {
+    const { id: userId } = await makeUser();
+    createdUserIds.push(userId);
+    const chain = await makeChainWithTvl(1_000_000);
+    createdChainIds.push(chain.id);
+
+    const [alert] = await db
+      .insert(alerts)
+      .values({
+        userId,
+        type: "chain_tvl",
+        target: chain.slug,
+        condition: "above",
+        threshold: "500000",
+        enabled: true,
+        isFiring: false,
+      })
+      .returning({ id: alerts.id });
+    createdAlertIds.push(alert.id);
+
+    mockEvaluateCondition.mockReturnValue(true);
+    mockSendEmail.mockRejectedValueOnce(new Error("network error before Resend responded"));
+
+    await checkAlerts();
+
+    // The claim must not be left stuck at true - a rejected promise (a
+    // transport-level failure) is not the same as "delivered."
+    const [row] = await db.select().from(alerts).where(eq(alerts.id, alert.id));
+    expect(row.isFiring).toBe(false);
+
+    // A second run with a working sendEmail must actually retry and
+    // deliver, proving the alert isn't permanently suppressed.
+    mockSendEmail.mockResolvedValue(true);
+    await checkAlerts();
+    const [rowAfterRetry] = await db.select().from(alerts).where(eq(alerts.id, alert.id));
+    expect(rowAfterRetry.isFiring).toBe(true);
+    expect(mockSendEmail).toHaveBeenCalledTimes(2);
+  });
+
   it("does not resend once an alert is already firing", async () => {
     const { id: userId } = await makeUser();
     createdUserIds.push(userId);
@@ -168,5 +207,18 @@ describe("checkAlerts", () => {
     const thresholdsSeen = mockEvaluateCondition.mock.calls.map((call) => call[2]);
     expect(thresholdsSeen).toContain(1); // the broken alert was attempted
     expect(thresholdsSeen).toContain(999999999); // and the healthy one still ran after it
+
+    // The failure must be visible in the persisted sync-run record too,
+    // not just inferred from mock call inspection - this is what the
+    // sync-health view and any "runs with errors" operator query actually
+    // read.
+    const [run] = await db
+      .select()
+      .from(syncRuns)
+      .where(eq(syncRuns.worker, "alerts"))
+      .orderBy(desc(syncRuns.startedAt))
+      .limit(1);
+    expect(run.status).toBe("partial");
+    expect(run.errorCount).toBe(1);
   });
 });

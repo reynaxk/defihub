@@ -14,25 +14,40 @@
  * out from its sibling DB-touching module.
  */
 export function getClientIp(request: Request): string {
+  // Vercel's own documentation (vercel.com/docs/headers/request-headers):
+  // "If you are trying to use Vercel behind a proxy, we currently overwrite
+  // the X-Forwarded-For header and do not forward external IPs" - Vercel's
+  // edge sets this directly from the connection it received, it is not a
+  // client-appendable multi-hop chain the way a generic reverse proxy's
+  // would be (a prior version of this function assumed that generic
+  // semantics and parsed it as one - wrong model for this platform, even
+  // though it happened to produce a plausible-looking value). Preferred
+  // first because the same docs note x-forwarded-for "could be overwritten
+  // if you're using a proxy on top of Vercel" (e.g. an additional CDN/WAF
+  // layer this app doesn't control) - x-vercel-forwarded-for stays the
+  // value Vercel's own edge actually saw regardless.
+  const vercelForwardedFor = request.headers.get("x-vercel-forwarded-for");
+  if (vercelForwardedFor) return vercelForwardedFor;
+
+  // Documented as identical to x-forwarded-for on Vercel, and what
+  // Vercel's own official `@vercel/functions` ipAddress() helper reads
+  // (verified against its source - a single Headers.get(), no chain
+  // parsing) - not worth adding that package as a dependency just to call
+  // the one line it wraps.
+  const realIp = request.headers.get("x-real-ip");
+  if (realIp) return realIp;
+
+  // Fallback for non-Vercel deployments (e.g. bare local dev behind a
+  // different reverse proxy) - not a platform-guaranteed-authentic header
+  // here, so treated defensively: if multi-valued, the last entry is
+  // closer to what actually connected to this process than a
+  // client-suppliable first entry would be.
   const forwardedFor = request.headers.get("x-forwarded-for");
   if (forwardedFor) {
-    // Each proxy hop APPENDS the address it received the request from, so
-    // the chain reads client -> proxy1 -> proxy2 -> ... -> last hop before
-    // this server. The FIRST entry is whatever the original client claimed
-    // - fully attacker-controllable on a direct request (Vercel's edge
-    // does not strip or overwrite it) - which previously let every IP-scoped
-    // rate limit in this app (login, registration, forgot-password, the
-    // public API, search, history routes) be bypassed by sending a fresh
-    // random value on every request. The LAST entry is appended by Vercel's
-    // own edge from the connection it actually received, which a client
-    // cannot forge.
     const parts = forwardedFor.split(",").map((p) => p.trim());
     const last = parts[parts.length - 1];
     if (last) return last;
   }
-
-  const realIp = request.headers.get("x-real-ip");
-  if (realIp) return realIp;
 
   return "unknown";
 }

@@ -27,14 +27,29 @@ import { getClientIp } from "./client-ip";
 import { checkRateLimit } from "./rate-limit";
 
 describe("getClientIp", () => {
-  it("prefers x-forwarded-for, using the last address (the one Vercel's own edge appended)", () => {
+  it("prefers x-vercel-forwarded-for - the header Vercel's own edge sets and does not let an extra proxy layer overwrite", () => {
+    const req = new Request("http://localhost", {
+      headers: {
+        "x-vercel-forwarded-for": "203.0.113.5",
+        "x-forwarded-for": "1.2.3.4", // would win if x-vercel-forwarded-for weren't checked first
+      },
+    });
+    expect(getClientIp(req)).toBe("203.0.113.5");
+  });
+
+  it("falls back to x-real-ip - identical to x-forwarded-for on Vercel, and what the official @vercel/functions ipAddress() helper reads", () => {
+    const req = new Request("http://localhost", { headers: { "x-real-ip": "203.0.113.9" } });
+    expect(getClientIp(req)).toBe("203.0.113.9");
+  });
+
+  it("falls back to x-forwarded-for for non-Vercel deployments, using the last address defensively", () => {
     const req = new Request("http://localhost", {
       headers: { "x-forwarded-for": "203.0.113.5, 10.0.0.1" },
     });
     expect(getClientIp(req)).toBe("10.0.0.1");
   });
 
-  it("is not fooled by a client-supplied first entry - only the edge-appended last entry is trusted", () => {
+  it("x-forwarded-for fallback is not fooled by a client-supplied first entry", () => {
     // The first entry is whatever the connecting client claims via its own
     // request header - fully attacker-controlled on a direct request.
     const req = new Request("http://localhost", {
@@ -43,14 +58,9 @@ describe("getClientIp", () => {
     expect(getClientIp(req)).toBe("203.0.113.5");
   });
 
-  it("handles a single-entry x-forwarded-for (no intermediate proxies)", () => {
+  it("handles a single-entry x-forwarded-for fallback (no intermediate proxies)", () => {
     const req = new Request("http://localhost", { headers: { "x-forwarded-for": "203.0.113.5" } });
     expect(getClientIp(req)).toBe("203.0.113.5");
-  });
-
-  it("falls back to x-real-ip", () => {
-    const req = new Request("http://localhost", { headers: { "x-real-ip": "203.0.113.9" } });
-    expect(getClientIp(req)).toBe("203.0.113.9");
   });
 
   it("falls back to unknown with no proxy headers", () => {

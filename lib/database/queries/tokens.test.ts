@@ -196,6 +196,11 @@ describe("tokens queries - LATERAL join correctness", () => {
     const rawClient = db.$client;
     const originalUnsafe = rawClient.unsafe.bind(rawClient);
     let intercepted = false;
+    // Declared alongside `intercepted`, not inside the mockImplementation
+    // closure below, so it's readable from the assertions after
+    // getTokenPriceChange7d() returns - set true only once the delayed
+    // addPrice() promise itself resolves (see inside the .then wrapper).
+    let insertCompleted = false;
     const spy = vi.spyOn(rawClient, "unsafe").mockImplementation((...args: Parameters<typeof originalUnsafe>) => {
       const pending = originalUnsafe(...args);
       if (intercepted) return pending;
@@ -216,19 +221,39 @@ describe("tokens queries - LATERAL join correctness", () => {
       // callback doesn't block a sibling callback from starting).
       // pending.then can end up called more than once on the same query
       // object (e.g. drizzle-orm's tracing span wrapper awaits it
-      // independently of the actual consuming code) - this guard makes
-      // sure the insert itself only ever runs once no matter how many
-      // times that happens, rather than assuming a single call.
-      let insertStarted = false;
+      // independently of the actual consuming code, in addition to
+      // whatever eventually flows back to getTokenPriceChange7d's own
+      // internal await) - a plain "only run the insert on the first call"
+      // boolean guard is not enough by itself: a *second* call would skip
+      // starting a new insert (correct - no duplicate write), but it would
+      // also resolve immediately without waiting for the *first* call's
+      // insert to finish, since they're independent continuations. If that
+      // second call happens to be the one whichever code actually awaits,
+      // getTokenPriceChange7d could regain control before the insert has
+      // really committed - which is exactly the gap that surfaced as
+      // `insertCompleted` being false even though `intercepted` was true.
+      // A single shared promise, awaited by every invocation (not just the
+      // first), closes that: the insert still only ever runs once, but
+      // every caller - however many times .then() gets invoked - genuinely
+      // blocks on the same completion.
+      let insertPromise: Promise<void> | null = null;
       const originalThen = pending.then.bind(pending);
       pending.then = ((onFulfilled?: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
         originalThen(async (value: unknown) => {
-          if (!insertStarted) {
-            insertStarted = true;
-            // A fresh, valid 7d figure 30 hours later - exactly what a
-            // real sync:tokens discovery-sync tick landing here would write.
-            await addPrice(tokenId, new Date(t0.getTime() + 30 * 60 * 60 * 1000), 2, { priceChange7d: "99" });
+          if (!insertPromise) {
+            insertPromise = (async () => {
+              // A fresh, valid 7d figure 30 hours later - exactly what a
+              // real sync:tokens discovery-sync tick landing here would write.
+              await addPrice(tokenId, new Date(t0.getTime() + 30 * 60 * 60 * 1000), 2, { priceChange7d: "99" });
+              // Set only once the delayed insert has actually committed,
+              // not when it merely starts - the whole point of this test
+              // is that the insert must be fully complete before the
+              // caller regains control, so "did it complete" needs its
+              // own signal distinct from "did it start".
+              insertCompleted = true;
+            })();
           }
+          await insertPromise;
           return onFulfilled ? onFulfilled(value) : value;
         }, onRejected)) as typeof pending.then;
 
@@ -237,6 +262,15 @@ describe("tokens queries - LATERAL join correctness", () => {
 
     try {
       const result = await getTokenPriceChange7d(tokenId);
+
+      // Both preconditions the result assertion below depends on to mean
+      // anything: without these, a future change that stops
+      // getTokenPriceChange7d from ever calling db.$client.unsafe (or that
+      // otherwise breaks the interception) could leave `result` correct by
+      // coincidence while this test's actual mechanism never ran at all.
+      expect(intercepted).toBe(true);
+      expect(insertCompleted).toBe(true);
+
       // 42 is the only answer consistent with a read that completed
       // before the insert landed - a correct implementation can't know
       // about a row that didn't exist yet when its snapshot was taken.

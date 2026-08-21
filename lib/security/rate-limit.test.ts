@@ -21,12 +21,25 @@
 // rows are deleted in the top-level afterAll.
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
 import { getClientIp } from "./client-ip";
 import { checkRateLimit } from "./rate-limit";
 
 describe("getClientIp", () => {
+  beforeEach(() => {
+    // Tests below rely on VERCEL/TRUSTED_PROXY_COUNT being unset to
+    // exercise the off-Vercel/no-trusted-proxy paths - without pinning a
+    // known baseline here, that would silently depend on the ambient
+    // environment the test happens to run in (e.g. a real Vercel CI
+    // runner where VERCEL is genuinely set, or a .env.local defining
+    // TRUSTED_PROXY_COUNT for local dev), not on what each test actually
+    // declares. Individual tests override these with their own
+    // vi.stubEnv() call where they need a non-default value.
+    vi.stubEnv("VERCEL", "");
+    vi.stubEnv("TRUSTED_PROXY_COUNT", "0");
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
   });

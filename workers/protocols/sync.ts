@@ -140,15 +140,23 @@ export async function syncProtocols(): Promise<void> {
       await db.insert(protocolChains).values(batch).onConflictDoNothing();
     }
 
+    // RETURNING only yields the rows actually written - onConflictDoNothing
+    // silently skips a re-run inside the same timestamp bucket, so
+    // metricRows.length (the attempted count) would otherwise report a full
+    // batch as "created" even when a rerun wrote zero new rows, making the
+    // persisted sync_runs metric unusable for judging whether a sync
+    // actually wrote anything.
+    let recordsCreated = 0;
     for (const batch of chunk(metricRows, BATCH_SIZE)) {
       if (batch.length === 0) continue;
-      await db.insert(protocolMetrics).values(batch).onConflictDoNothing();
+      const inserted = await db.insert(protocolMetrics).values(batch).onConflictDoNothing().returning({ id: protocolMetrics.id });
+      recordsCreated += inserted.length;
     }
 
     logger.info("sync complete", {
       component: "protocols",
       recordsProcessed: protocolIdBySlug.size,
-      recordsCreated: metricRows.length,
+      recordsCreated,
       chainLinks: chainLinkRows.length,
     });
 
@@ -156,8 +164,8 @@ export async function syncProtocols(): Promise<void> {
       result: undefined,
       stats: {
         recordsProcessed: protocolIdBySlug.size,
-        recordsCreated: metricRows.length,
-        metadata: { chainLinks: chainLinkRows.length },
+        recordsCreated,
+        metadata: { metricRowsAttempted: metricRows.length, chainLinks: chainLinkRows.length },
       },
     };
   });

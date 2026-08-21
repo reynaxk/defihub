@@ -91,6 +91,7 @@ export async function syncTokens(): Promise<void> {
     }
 
     const decimalsByKey = new Map<string, number>();
+    const decimalsChainFailures: string[] = [];
     await Promise.all(
       [...addressesByChainId.entries()].map(async ([chainId, addressSet]) => {
         const slug = chainSlugById.get(chainId);
@@ -102,6 +103,7 @@ export async function syncTokens(): Promise<void> {
           }
         } catch (err) {
           logger.warn("decimals read failed for chain, leaving unknown", { component: "tokens", chain: slug, error: err });
+          decimalsChainFailures.push(slug);
         }
       }),
     );
@@ -186,8 +188,17 @@ export async function syncTokens(): Promise<void> {
       stats: {
         recordsProcessed: marketTokens.length,
         recordsCreated: priceRows.length,
+        errorCount: decimalsChainFailures.length,
+        errorSummary:
+          decimalsChainFailures.length > 0 ? `decimals read failed for: ${decimalsChainFailures.join(", ")}` : undefined,
         metadata: { chainDeployments: deployments.length },
       },
+      // A run where every chain's decimals RPC failed and nothing was
+      // resolved would otherwise persist as an undifferentiated "success" -
+      // the sync-health view would show green while token decimals stayed
+      // silently unknown and app/api/wallet/balances/route.ts kept dropping
+      // those balances as a result.
+      outcome: decimalsChainFailures.length > 0 ? ("partial" as const) : ("success" as const),
     };
   });
 }

@@ -184,74 +184,116 @@ export async function checkAlerts(): Promise<void> {
 
     logger.info("checking enabled alerts", { component: "alerts", recordsProcessed: enabledAlerts.length });
     let triggered = 0;
+    // One alert's read/evaluate/send failing (a bad target, a transient
+    // email-provider error) must not block every alert after it in the
+    // list - each is independent, so a failure here is isolated rather
+    // than aborting the whole 10-minute check for every other user.
+    let failedCount = 0;
 
     for (const { alert, userEmail } of enabledAlerts) {
-      let reading: CurrentAndPrevious | null = null;
-      switch (alert.type) {
-        case "protocol_tvl":
-          reading = await readProtocolTvl(alert.target);
-          break;
-        case "chain_tvl":
-          reading = await readChainTvl(alert.target);
-          break;
-        case "token_price":
-          reading = await readTokenPrice(alert.target);
-          break;
-        case "pool_apy":
-          reading = await readPoolApy(alert.target);
-          break;
-      }
+      try {
+        let reading: CurrentAndPrevious | null = null;
+        switch (alert.type) {
+          case "protocol_tvl":
+            reading = await readProtocolTvl(alert.target);
+            break;
+          case "chain_tvl":
+            reading = await readChainTvl(alert.target);
+            break;
+          case "token_price":
+            reading = await readTokenPrice(alert.target);
+            break;
+          case "pool_apy":
+            reading = await readPoolApy(alert.target);
+            break;
+        }
 
-      await db.update(alerts).set({ lastCheckedAt: new Date() }).where(eq(alerts.id, alert.id));
+        await db.update(alerts).set({ lastCheckedAt: new Date() }).where(eq(alerts.id, alert.id));
 
-      if (!reading) continue;
+        if (!reading) continue;
 
-      const fires = evaluateCondition(
-        alert.condition,
-        reading.current,
-        Number(alert.threshold),
-        reading.previous,
-      );
+        const fires = evaluateCondition(
+          alert.condition,
+          reading.current,
+          Number(alert.threshold),
+          reading.previous,
+        );
 
-      // Only email on a false->true transition, not every 10-minute tick the
-      // condition still holds - an "above $X" alert typically stays above $X
-      // for hours/days once crossed, so without this check every enabled
-      // alert would re-send an email every single run for as long as its
-      // condition remains true. isFiring tracks the condition's state as of
-      // the last check (updated below regardless of outcome) independently of
-      // lastTriggeredAt, which stays "the last time we actually emailed".
-      if (fires && !alert.isFiring) {
-        const sent = await sendEmail({
-          to: userEmail,
-          subject: `DeFiHub alert: ${reading.displayName}`,
-          html: alertEmailHtml({
-            displayName: reading.displayName,
-            current: reading.current,
-            threshold: Number(alert.threshold),
-            condition: alert.condition,
-            appUrl: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
-          }),
-        });
-        // isFiring only flips to true once the email actually sent - if
-        // Resend failed, this alert is left exactly as it was so the next
-        // run's `fires && !alert.isFiring` check is still true and retries
-        // it, instead of a failed send silently being treated the same as a
-        // delivered one and never being retried.
-        if (sent) {
-          await db
+        // Only email on a false->true transition, not every 10-minute tick the
+        // condition still holds - an "above $X" alert typically stays above $X
+        // for hours/days once crossed, so without this check every enabled
+        // alert would re-send an email every single run for as long as its
+        // condition remains true. isFiring tracks the condition's state as of
+        // the last check (updated below regardless of outcome) independently of
+        // lastTriggeredAt, which stays "the last time we actually emailed".
+        if (fires && !alert.isFiring) {
+          // Atomically claim the false->true transition before sending -
+          // the WHERE clause only matches if isFiring is still false at
+          // the moment of the write, so if a duplicate/overlapping cron
+          // invocation is checking this same alert concurrently, only one
+          // of the two actually claims it and sends the email. A plain
+          // read-then-write (the previous shape) could let both
+          // invocations observe isFiring=false and both send.
+          const claimed = await db
             .update(alerts)
             .set({ isFiring: true, lastTriggeredAt: new Date() })
-            .where(eq(alerts.id, alert.id));
-          triggered++;
+            .where(and(eq(alerts.id, alert.id), eq(alerts.isFiring, false)))
+            .returning({ id: alerts.id });
+          if (claimed.length === 0) continue; // another concurrent run already claimed it
+
+          const sent = await sendEmail({
+            to: userEmail,
+            subject: `DeFiHub alert: ${reading.displayName}`,
+            html: alertEmailHtml({
+              displayName: reading.displayName,
+              current: reading.current,
+              threshold: Number(alert.threshold),
+              condition: alert.condition,
+              appUrl: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
+            }),
+          });
+          if (sent) {
+            triggered++;
+          } else {
+            // Send failed after claiming - revert so the next run's
+            // `fires && !alert.isFiring` check is true again and retries
+            // it, instead of a failed send silently being treated the
+            // same as a delivered one and never being retried.
+            await db
+              .update(alerts)
+              .set({ isFiring: false, lastTriggeredAt: alert.lastTriggeredAt })
+              .where(eq(alerts.id, alert.id));
+          }
+        } else if (fires !== alert.isFiring) {
+          await db.update(alerts).set({ isFiring: fires }).where(eq(alerts.id, alert.id));
         }
-      } else if (fires !== alert.isFiring) {
-        await db.update(alerts).set({ isFiring: fires }).where(eq(alerts.id, alert.id));
+      } catch (err) {
+        failedCount++;
+        logger.warn("failed to check alert, continuing with the rest", {
+          component: "alerts",
+          operation: alert.id,
+          error: err,
+        });
       }
     }
 
-    logger.info("check complete", { component: "alerts", recordsProcessed: enabledAlerts.length, triggered });
+    logger.info("check complete", {
+      component: "alerts",
+      recordsProcessed: enabledAlerts.length,
+      triggered,
+      failed: failedCount,
+    });
 
-    return { result: undefined, stats: { recordsProcessed: enabledAlerts.length, metadata: { triggered } } };
+    return {
+      result: undefined,
+      stats: {
+        recordsProcessed: enabledAlerts.length,
+        errorCount: failedCount,
+        errorSummary: failedCount > 0 ? `${failedCount} alert(s) failed to check` : undefined,
+        metadata: { triggered },
+      },
+      outcome: failedCount > 0 ? ("partial" as const) : ("success" as const),
+    };
   });
 }
 

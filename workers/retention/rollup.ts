@@ -44,9 +44,19 @@ export interface RollupStats {
   tokenPrices: { before: number; after: number; deleted: number };
 }
 
-export async function rollupMetrics(): Promise<RollupStats | null> {
+// Test-only synchronization point - not used by the production call site
+// (app/api/cron/rollup-metrics/route.ts calls rollupMetrics() with no
+// arguments, so this is always undefined there). Exists so a test can
+// commit a concurrent write at a moment guaranteed to fall strictly
+// between the "before" counts and the first DELETE, without depending on
+// Promise.all/setTimeout scheduling to land it there.
+export interface RollupTestHooks {
+  afterInitialCounts?: () => Promise<void>;
+}
+
+export async function rollupMetrics(testHooks?: RollupTestHooks): Promise<RollupStats | null> {
   return withSyncRun("rollup-metrics", async () => {
-    const stats = await runRollup();
+    const stats = await runRollup(testHooks);
     if (stats === null) {
       // Not a successful no-op run - the lock was already held elsewhere,
       // so this invocation did nothing at all. Without an explicit
@@ -75,7 +85,7 @@ export async function rollupMetrics(): Promise<RollupStats | null> {
 // separate top-level queries, only within one transaction).
 export const ROLLUP_ADVISORY_LOCK_KEY = 728140501;
 
-async function runRollup(): Promise<RollupStats | null> {
+async function runRollup(testHooks?: RollupTestHooks): Promise<RollupStats | null> {
   const stats = await db.transaction(async (tx) => {
     const [{ locked }] = await tx.execute<{ locked: boolean }>(
       sql`select pg_try_advisory_xact_lock(${ROLLUP_ADVISORY_LOCK_KEY}) as locked`,
@@ -92,6 +102,8 @@ async function runRollup(): Promise<RollupStats | null> {
       protocolMetrics: (await tx.select({ value: count() }).from(protocolMetrics))[0]?.value ?? 0,
       tokenPrices: (await tx.select({ value: count() }).from(tokenPrices))[0]?.value ?? 0,
     };
+
+    await testHooks?.afterInitialCounts?.();
 
     // chain_metrics: keep the latest row per (chain, day) beyond the old tier.
     const chainMetricsResult = await tx.execute(sql`

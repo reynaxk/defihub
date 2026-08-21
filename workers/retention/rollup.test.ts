@@ -200,17 +200,23 @@ describe("rollupMetrics", () => {
 
     // An independent raw connection (not the app's own pooled client,
     // which caps at 1 connection outside production and so can't overlap
-    // with the rollup's own transaction) inserts a brand-new, recent row
-    // concurrently with the rollup running. Under the old before/after
-    // count-delta approach, this insert would land between the "before"
-    // and "after" SELECT COUNT(*) and mask exactly how many rows this run
-    // deleted (before=N, after=N+1-2=N-1, delta=1, not the real 2).
+    // with the rollup's own transaction) inserts a brand-new, recent row.
+    // It's awaited inside rollupMetrics' afterInitialCounts test hook,
+    // which runRollup calls after reading the "before" counts and before
+    // running any DELETE - plain `await` ordering guarantees this insert
+    // commits strictly between those two points, no Promise.all scheduling
+    // race involved. Under the old before/after count-delta approach, an
+    // insert landing here would mask exactly how many rows this run itself
+    // deleted (before=N, after=N+1-2=N-1, delta=1, not the real 2) - this
+    // test pins the insert to precisely the window where that bug would
+    // have fired, and asserts the DELETE-derived count is immune to it.
     const concurrentConn = postgres(process.env.DATABASE_URL!, { max: 1, prepare: false });
     try {
-      const [result] = await Promise.all([
-        rollupMetrics(),
-        concurrentConn`insert into chain_metrics (chain_id, "timestamp", tvl) values (${chainId}, now(), '999.00')`,
-      ]);
+      const result = await rollupMetrics({
+        afterInitialCounts: async () => {
+          await concurrentConn`insert into chain_metrics (chain_id, "timestamp", tvl) values (${chainId}, now(), '999.00')`;
+        },
+      });
 
       expect(result?.chainMetrics.deleted).toBe(2);
     } finally {

@@ -21,13 +21,18 @@
 // rows are deleted in the top-level afterAll.
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
 import { getClientIp } from "./client-ip";
 import { checkRateLimit } from "./rate-limit";
 
 describe("getClientIp", () => {
-  it("prefers x-vercel-forwarded-for - the header Vercel's own edge sets and does not let an extra proxy layer overwrite", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("prefers x-vercel-forwarded-for on Vercel - the header Vercel's own edge sets and does not let an extra proxy layer overwrite", () => {
+    vi.stubEnv("VERCEL", "1");
     const req = new Request("http://localhost", {
       headers: {
         "x-vercel-forwarded-for": "203.0.113.5",
@@ -37,35 +42,86 @@ describe("getClientIp", () => {
     expect(getClientIp(req)).toBe("203.0.113.5");
   });
 
-  it("falls back to x-real-ip - identical to x-forwarded-for on Vercel, and what the official @vercel/functions ipAddress() helper reads", () => {
+  it("falls back to x-real-ip on Vercel - identical to x-forwarded-for on Vercel, and what the official @vercel/functions ipAddress() helper reads", () => {
+    vi.stubEnv("VERCEL", "1");
     const req = new Request("http://localhost", { headers: { "x-real-ip": "203.0.113.9" } });
     expect(getClientIp(req)).toBe("203.0.113.9");
   });
 
-  it("falls back to x-forwarded-for for non-Vercel deployments, using the last address defensively", () => {
+  it("spoofed headers: ignores x-vercel-forwarded-for and x-real-ip when not actually running on Vercel", () => {
+    // VERCEL intentionally left unset - off Vercel, these headers carry no
+    // platform guarantee and are exactly as spoofable as any other header
+    // on a direct request.
     const req = new Request("http://localhost", {
-      headers: { "x-forwarded-for": "203.0.113.5, 10.0.0.1" },
+      headers: {
+        "x-vercel-forwarded-for": "203.0.113.5",
+        "x-real-ip": "203.0.113.9",
+      },
     });
-    expect(getClientIp(req)).toBe("10.0.0.1");
+    expect(getClientIp(req)).toBe("unknown");
   });
 
-  it("x-forwarded-for fallback is not fooled by a client-supplied first entry", () => {
-    // The first entry is whatever the connecting client claims via its own
-    // request header - fully attacker-controlled on a direct request.
+  it("spoofed headers: ignores x-forwarded-for entirely when no trusted proxy count is configured", () => {
+    // VERCEL and TRUSTED_PROXY_COUNT both unset - with no trusted proxy
+    // known to be in front of this process, a caller can set
+    // x-forwarded-for directly to claim to be any address.
     const req = new Request("http://localhost", {
+      headers: { "x-forwarded-for": "203.0.113.5" },
+    });
+    expect(getClientIp(req)).toBe("unknown");
+  });
+
+  it("one proxy: resolves the client, ignoring whatever the client itself claimed", () => {
+    vi.stubEnv("TRUSTED_PROXY_COUNT", "1");
+    const req = new Request("http://localhost", {
+      // "1.2.3.4" is the client's own unverified claim; "203.0.113.5" is
+      // what the trusted proxy actually observed connecting to it.
       headers: { "x-forwarded-for": "1.2.3.4, 203.0.113.5" },
     });
     expect(getClientIp(req)).toBe("203.0.113.5");
   });
 
-  it("handles a single-entry x-forwarded-for fallback (no intermediate proxies)", () => {
+  it("multiple proxies: resolves the actual client rather than an intermediate proxy", () => {
+    vi.stubEnv("TRUSTED_PROXY_COUNT", "2");
+    const req = new Request("http://localhost", {
+      // "1.2.3.4" client-claimed, "203.0.113.5" the real client (appended
+      // by the first trusted proxy), "10.0.0.2" the first trusted proxy's
+      // own address (appended by the second trusted proxy) - must not be
+      // mistaken for the client.
+      headers: { "x-forwarded-for": "1.2.3.4, 203.0.113.5, 10.0.0.2" },
+    });
+    expect(getClientIp(req)).toBe("203.0.113.5");
+  });
+
+  it("spoofed headers: front-padding the chain with extra fake entries does not shift which entry is trusted", () => {
+    vi.stubEnv("TRUSTED_PROXY_COUNT", "1");
+    // Only one real proxy hop occurred, so only the rightmost entry was
+    // actually appended by it - everything to its left, no matter how many
+    // entries, is an attacker's own unverified claim.
+    const req = new Request("http://localhost", {
+      headers: { "x-forwarded-for": "9.9.9.9, 8.8.8.8, 1.2.3.4, 203.0.113.5" },
+    });
+    expect(getClientIp(req)).toBe("203.0.113.5");
+  });
+
+  it("handles a single-entry x-forwarded-for through one trusted proxy (client sent no prior claim)", () => {
+    vi.stubEnv("TRUSTED_PROXY_COUNT", "1");
     const req = new Request("http://localhost", { headers: { "x-forwarded-for": "203.0.113.5" } });
     expect(getClientIp(req)).toBe("203.0.113.5");
   });
 
-  it("skips a trailing empty entry from a trailing comma and returns the last real address", () => {
+  it("skips a trailing empty entry from a trailing comma and still resolves through the trusted proxy", () => {
+    vi.stubEnv("TRUSTED_PROXY_COUNT", "1");
     const req = new Request("http://localhost", { headers: { "x-forwarded-for": "203.0.113.5, " } });
     expect(getClientIp(req)).toBe("203.0.113.5");
+  });
+
+  it("refuses to guess when the chain is shorter than the configured trusted proxy count", () => {
+    vi.stubEnv("TRUSTED_PROXY_COUNT", "2");
+    const req = new Request("http://localhost", {
+      headers: { "x-forwarded-for": "203.0.113.5" },
+    });
+    expect(getClientIp(req)).toBe("unknown");
   });
 
   it("falls back to unknown with no proxy headers", () => {

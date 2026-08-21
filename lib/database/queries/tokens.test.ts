@@ -8,8 +8,8 @@
 // price rows per token (out of insertion order) and assert the *newest* one
 // wins, not an arbitrary one.
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNotNull } from "drizzle-orm";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
 import { chains, tokenPrices, tokens } from "@/lib/database/schema";
 import {
@@ -159,7 +159,7 @@ describe("tokens queries - LATERAL join correctness", () => {
     expect(change).toBe(13.5);
   });
 
-  it("getTokenPriceChange7d does not reproduce the two-separate-reads race an intervening sync:tokens insert used to expose", async () => {
+  it("getTokenPriceChange7d itself is unaffected by an insert landing immediately after its first database read", async () => {
     const chain = await makeChain();
     createdChainIds.push(chain.id);
     const tokenId = await makeToken(chain.id, `RACE${randomUUID().slice(0, 6)}`);
@@ -167,56 +167,87 @@ describe("tokens queries - LATERAL join correctness", () => {
 
     const t0 = new Date();
     await addPrice(tokenId, t0, 1, { priceChange7d: "42" });
+    // All setup above must finish (and stop using the client) before the
+    // spy below goes in - it targets the *next* query the client issues,
+    // and seeding data through the same client would otherwise trip it.
 
-    // Deterministically reproduces the exact shape getTokenPriceChange7d
-    // used before this fix - two independent SELECTs - with the
-    // "intervening sync:tokens insert" landing between them via a plain
-    // sequential await, not a best-effort race. A Promise.all-timed race
-    // was tried first and did not reliably land the insert inside the
-    // narrow window between two fast local-DB round trips (confirmed: it
-    // passed even against the pre-fix two-query code in repeated runs) -
-    // exactly the kind of flakiness CodeRabbit already flagged once in
-    // this repo's rollup.test.ts, so this reproduces the interleaving
-    // directly instead of hoping timing cooperates.
-    const [changeRowBeforeInsert] = await db
-      .select({ priceChange7d: tokenPrices.priceChange7d, timestamp: tokenPrices.timestamp })
-      .from(tokenPrices)
-      .where(and(eq(tokenPrices.tokenId, tokenId), isNotNull(tokenPrices.priceChange7d)))
-      .orderBy(desc(tokenPrices.timestamp))
-      .limit(1);
+    // Every query drizzle-orm's postgres-js driver issues - regardless of
+    // how many separate `db.select(...)` calls the calling function
+    // makes - funnels through this one method (confirmed against
+    // node_modules/drizzle-orm/postgres-js/session.js: `client.unsafe(...)`
+    // is the actual dispatch point). Intercepting it here, rather than
+    // adding a hook parameter to getTokenPriceChange7d itself, exercises
+    // the real production function unmodified: whatever query shape it
+    // actually uses, the very first physical query it sends triggers the
+    // "intervening insert" the instant that query resolves, then every
+    // call (including that first one) proceeds normally.
+    //
+    // This is precisely why it discriminates a fixed implementation from
+    // a reverted one without needing to know which is running:
+    //   - One statement (the fix): that statement has already computed
+    //     its full, consistent result *before* this hook's insert runs -
+    //     the insert lands strictly after the only read completes, so the
+    //     function correctly reports the pre-insert state (42).
+    //   - Two separate statements (the bug): the first (changeRow) has
+    //     already returned when the insert lands, but the second
+    //     (latestRow) hasn't run yet - it fires afterward and sees the
+    //     new row, pairing a stale changeRow with a newer latestRow and
+    //     computing an impossible >24h gap (returns null instead of 42).
+    const rawClient = db.$client;
+    const originalUnsafe = rawClient.unsafe.bind(rawClient);
+    let intercepted = false;
+    const spy = vi.spyOn(rawClient, "unsafe").mockImplementation((...args: Parameters<typeof originalUnsafe>) => {
+      const pending = originalUnsafe(...args);
+      if (intercepted) return pending;
+      intercepted = true;
 
-    // The intervening insert: a fresh, valid 7d figure 30 hours later -
-    // exactly what a real sync:tokens discovery-sync tick landing here
-    // would write.
-    const t1 = new Date(t0.getTime() + 30 * 60 * 60 * 1000);
-    await addPrice(tokenId, t1, 2, { priceChange7d: "99" });
+      // postgres.js's Query class extends Promise; .values()/.raw() just
+      // mutate a flag and `return this` (confirmed against
+      // node_modules/postgres/cjs/src/query.js), so whichever chain
+      // drizzle uses (`client.unsafe(...).values()` or plain
+      // `client.unsafe(...)`), it's still this exact same object by the
+      // time anything awaits it. Overriding `.then` as an own property on
+      // this one instance - not replacing the object itself - intercepts
+      // that eventual await while every other method (.values, .raw,
+      // .execute) stays untouched and fully working, and guarantees the
+      // insert genuinely finishes before whatever called .then() gets
+      // control back (a plain second `.then()` attached to the same
+      // promise would not: callback order is preserved, but an async
+      // callback doesn't block a sibling callback from starting).
+      // pending.then can end up called more than once on the same query
+      // object (e.g. drizzle-orm's tracing span wrapper awaits it
+      // independently of the actual consuming code) - this guard makes
+      // sure the insert itself only ever runs once no matter how many
+      // times that happens, rather than assuming a single call.
+      let insertStarted = false;
+      const originalThen = pending.then.bind(pending);
+      pending.then = ((onFulfilled?: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
+        originalThen(async (value: unknown) => {
+          if (!insertStarted) {
+            insertStarted = true;
+            // A fresh, valid 7d figure 30 hours later - exactly what a
+            // real sync:tokens discovery-sync tick landing here would write.
+            await addPrice(tokenId, new Date(t0.getTime() + 30 * 60 * 60 * 1000), 2, { priceChange7d: "99" });
+          }
+          return onFulfilled ? onFulfilled(value) : value;
+        }, onRejected)) as typeof pending.then;
 
-    const [latestRowAfterInsert] = await db
-      .select({ timestamp: tokenPrices.timestamp })
-      .from(tokenPrices)
-      .where(eq(tokenPrices.tokenId, tokenId))
-      .orderBy(desc(tokenPrices.timestamp))
-      .limit(1);
+      return pending;
+    });
 
-    // This is the bug the fix closes: a changeRow read before the insert,
-    // paired with a latestRow read after it, computes a >24h gap even
-    // though a real, current, non-null answer (99) was available the
-    // whole time - an impossible result no single consistent snapshot of
-    // the data would ever produce.
-    const staleness = latestRowAfterInsert.timestamp.getTime() - changeRowBeforeInsert.timestamp.getTime();
-    expect(staleness).toBeGreaterThan(24 * 60 * 60 * 1000);
-
-    // Sanity close: the actual function, called against this same final
-    // state, returns the current value rather than the impossible one
-    // computed above. This call alone can't re-trigger the race (both
-    // rows are already committed by the time it runs, and the fixed
-    // function no longer has two separate reads for a write to land
-    // between) - the staleness assertion above is what proves the old
-    // pattern's mechanism was unsound; this just confirms the real
-    // function isn't left returning something worse than that for the
-    // same data.
-    const fixedResult = await getTokenPriceChange7d(tokenId);
-    expect(fixedResult).toBe(99);
+    try {
+      const result = await getTokenPriceChange7d(tokenId);
+      // 42 is the only answer consistent with a read that completed
+      // before the insert landed - a correct implementation can't know
+      // about a row that didn't exist yet when its snapshot was taken.
+      // null (what the pre-fix two-query version returns here) is not a
+      // valid answer for either point in time; if this ever regresses
+      // back to two separate reads, this assertion fails.
+      expect(result).not.toBeNull();
+      expect(result).toBe(42);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("getTokensPageList respects sortDir - backs the sortable table header click", async () => {

@@ -276,6 +276,77 @@ export async function getGlobal24hTotals(): Promise<Global24hTotals> {
   };
 }
 
+export interface GlobalMetricsHistoryPoint {
+  timestamp: Date;
+  volume24h: number | null;
+  fees24h: number | null;
+  revenue24h: number | null;
+}
+
+// NOT the same shape as getGlobalTvlHistory (lib/database/queries/chains.ts)
+// despite looking parallel - chain_metrics and protocol_metrics have
+// different write patterns, so a plain "sum every row in the day" is only
+// correct for one of them:
+//   - chain_metrics is a DefiLlama historical *backfill*: syncChains
+//     (workers/chains/sync.ts) re-submits that provider's own history array
+//     every run, deduped by the exact-timestamp unique index, so in
+//     practice there's ~1 row per chain per day regardless of how often the
+//     cron ticks - summing across chains for a day is a correct global
+//     total.
+//   - protocol_metrics' aggregate (chainId is null) rows are a *live
+//     snapshot*: syncProtocols (workers/protocols/sync.ts) writes a brand
+//     new row with `timestamp: new Date()` on every hourly cron tick (see
+//     vercel.json - sync-protocols runs hourly), so one protocol can have
+//     up to ~24 rows on the same day, each carrying that protocol's own
+//     *trailing* 24h volume/fees/revenue as of that hour. Summing every row
+//     in the day would sum ~24 overlapping 24h-trailing windows for the
+//     same protocol - overcounting by roughly that factor, not a real
+//     total. (getGlobal24hTotals avoids this the same way, just for a
+//     single day: it joins against MAX(timestamp) to keep exactly the
+//     latest sync run's one row per protocol - since every protocol in one
+//     syncProtocols() run shares the same `now` value, that's an exact,
+//     not approximate, "one row per protocol" filter.)
+//
+// The fix generalizes that same "one row per protocol" rule across every
+// historical day: DISTINCT ON (protocol, day) ordered by timestamp DESC
+// keeps only the latest sync's row for each protocol on each day, and only
+// *that* row is summed across protocols - the correct global daily total,
+// not an inflated one.
+export async function getGlobalMetricsHistory(): Promise<GlobalMetricsHistoryPoint[]> {
+  const dayTrunc = sql`(date_trunc('day', ${protocolMetrics.timestamp} AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')`;
+
+  const latestPerProtocolPerDay = db
+    .selectDistinctOn([protocolMetrics.protocolId, dayTrunc], {
+      protocolId: protocolMetrics.protocolId,
+      day: sql<Date>`${dayTrunc}`.as("day"),
+      volume24h: protocolMetrics.volume24h,
+      fees24h: protocolMetrics.fees24h,
+      revenue24h: protocolMetrics.revenue24h,
+    })
+    .from(protocolMetrics)
+    .where(isNull(protocolMetrics.chainId))
+    .orderBy(protocolMetrics.protocolId, dayTrunc, desc(protocolMetrics.timestamp))
+    .as("latest_per_protocol_per_day");
+
+  const rows = await db
+    .select({
+      day: latestPerProtocolPerDay.day,
+      volume24h: sql<string | null>`sum(${latestPerProtocolPerDay.volume24h})`,
+      fees24h: sql<string | null>`sum(${latestPerProtocolPerDay.fees24h})`,
+      revenue24h: sql<string | null>`sum(${latestPerProtocolPerDay.revenue24h})`,
+    })
+    .from(latestPerProtocolPerDay)
+    .groupBy(latestPerProtocolPerDay.day)
+    .orderBy(latestPerProtocolPerDay.day);
+
+  return rows.map((r) => ({
+    timestamp: new Date(r.day),
+    volume24h: r.volume24h != null ? Number(r.volume24h) : null,
+    fees24h: r.fees24h != null ? Number(r.fees24h) : null,
+    revenue24h: r.revenue24h != null ? Number(r.revenue24h) : null,
+  }));
+}
+
 export async function getAllCategories(): Promise<string[]> {
   const rows = await db
     .selectDistinct({ category: protocols.category })

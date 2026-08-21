@@ -5,11 +5,12 @@
 // asserts on rows scoped to that row's id, so this is safe to run
 // regardless of whatever else already exists in the database.
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
+import postgres from "postgres";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
-import { chainMetrics, chains, protocolMetrics, protocols, tokenPrices, tokens } from "@/lib/database/schema";
-import { rollupMetrics } from "./rollup";
+import { chainMetrics, chains, protocolMetrics, protocols, syncRuns, tokenPrices, tokens } from "@/lib/database/schema";
+import { ROLLUP_ADVISORY_LOCK_KEY, rollupMetrics } from "./rollup";
 
 // Timestamps are built from a fixed UTC date/hour rather than
 // `now - N days - offsetMs`, so multiple "same bucket" points are
@@ -182,5 +183,112 @@ describe("rollupMetrics", () => {
 
     const rows = await db.select().from(chainMetrics).where(eq(chainMetrics.chainId, chainId));
     expect(rows).toHaveLength(2);
+  });
+
+  it("reports recordsProcessed from actual deleted rows, unaffected by a concurrent insert into the same table", async () => {
+    const chainId = await makeChain();
+    createdChainIds.push(chainId);
+
+    // 3 rows in one old-tier day bucket - exactly 2 must be deleted (the
+    // latest survives). Known, exact expected count, independent of
+    // whatever else is happening in the table concurrently.
+    await db.insert(chainMetrics).values([
+      { chainId, timestamp: oldDayTimestamp(200, 2), tvl: "100.00" },
+      { chainId, timestamp: oldDayTimestamp(200, 10), tvl: "200.00" },
+      { chainId, timestamp: oldDayTimestamp(200, 18), tvl: "300.00" }, // latest - survives
+    ]);
+
+    // An independent raw connection (not the app's own pooled client,
+    // which caps at 1 connection outside production and so can't overlap
+    // with the rollup's own transaction) inserts a brand-new, recent row.
+    // It's awaited inside rollupMetrics' afterInitialCounts test hook,
+    // which runRollup calls after reading the "before" counts and before
+    // running any DELETE - plain `await` ordering guarantees this insert
+    // commits strictly between those two points, no Promise.all scheduling
+    // race involved. Under the old before/after count-delta approach, an
+    // insert landing here would mask exactly how many rows this run itself
+    // deleted (before=N, after=N+1-2=N-1, delta=1, not the real 2) - this
+    // test pins the insert to precisely the window where that bug would
+    // have fired, and asserts the DELETE-derived count is immune to it.
+    const concurrentConn = postgres(process.env.DATABASE_URL!, { max: 1, prepare: false });
+    try {
+      const result = await rollupMetrics({
+        afterInitialCounts: async () => {
+          await concurrentConn`insert into chain_metrics (chain_id, "timestamp", tvl) values (${chainId}, now(), '999.00')`;
+        },
+      });
+
+      expect(result?.chainMetrics.deleted).toBe(2);
+    } finally {
+      await concurrentConn.end();
+    }
+
+    const rows = await db.select().from(chainMetrics).where(eq(chainMetrics.chainId, chainId));
+    // The 1 surviving old-tier row + the 1 concurrently-inserted recent row.
+    expect(rows).toHaveLength(2);
+  });
+
+  // rollupMetrics() itself can't be exercised for genuine concurrency in
+  // this test suite: the app's shared `db` client pools at most 1
+  // connection outside production (lib/database/client.ts), so two
+  // `Promise.all`'d calls through it would simply queue rather than run
+  // concurrently, and the second would find the lock already released by
+  // the time it starts - silently passing without testing anything. This
+  // opens two independent raw connections instead, directly proving the
+  // exact advisory-lock primitive runRollup uses (same key, same
+  // transaction-scoped function) blocks a second session while the first
+  // holds it.
+  it("blocks a second session from acquiring the same transaction-scoped advisory lock", async () => {
+    const connA = postgres(process.env.DATABASE_URL!, { max: 1, prepare: false });
+    const connB = postgres(process.env.DATABASE_URL!, { max: 1, prepare: false });
+
+    try {
+      await connA.begin(async (txA) => {
+        const [{ locked: lockedA }] = await txA`select pg_try_advisory_xact_lock(${ROLLUP_ADVISORY_LOCK_KEY}) as locked`;
+        expect(lockedA).toBe(true);
+
+        // A second, independent session tries for the identical key while
+        // the first still holds it inside an open transaction.
+        const [{ locked: lockedB }] =
+          await connB`select pg_try_advisory_xact_lock(${ROLLUP_ADVISORY_LOCK_KEY}) as locked`;
+        expect(lockedB).toBe(false);
+      });
+
+      // Released on COMMIT - a session acquiring it afterward succeeds.
+      const [{ locked: lockedAfterCommit }] =
+        await connB`select pg_try_advisory_xact_lock(${ROLLUP_ADVISORY_LOCK_KEY}) as locked`;
+      expect(lockedAfterCommit).toBe(true);
+    } finally {
+      await connA.end();
+      await connB.end();
+    }
+  });
+
+  it("reports a lock-contended run as a null, non-null-distinguishable, partial sync run - not an undifferentiated success", async () => {
+    // Holds the real lock on an independent raw connection (same
+    // reasoning as the test above - the app's own pooled client can't
+    // exercise genuine concurrency), then calls the actual public
+    // rollupMetrics() entry point while it's held.
+    const holder = postgres(process.env.DATABASE_URL!, { max: 1, prepare: false });
+    try {
+      await holder.begin(async (tx) => {
+        const [{ locked }] = await tx`select pg_try_advisory_xact_lock(${ROLLUP_ADVISORY_LOCK_KEY}) as locked`;
+        expect(locked).toBe(true);
+
+        const result = await rollupMetrics();
+        expect(result).toBeNull();
+      });
+
+      const [run] = await db
+        .select()
+        .from(syncRuns)
+        .where(eq(syncRuns.worker, "rollup-metrics"))
+        .orderBy(desc(syncRuns.startedAt))
+        .limit(1);
+      expect(run.status).toBe("partial");
+      expect(run.recordsProcessed).toBe(0);
+    } finally {
+      await holder.end();
+    }
   });
 });

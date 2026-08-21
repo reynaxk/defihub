@@ -45,11 +45,10 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
   if (!data) notFound();
 
   const { chain, history, topProtocols, latestTvl, changes } = data;
-  const [watching, chainTokens] = await Promise.all([
+  const [watching, topChainTokens] = await Promise.all([
     isWatchingChain(session?.user?.id, chain.id),
-    getTokensList({ chainSlug: chain.slug, sort: "marketCap" }),
+    getTokensList({ chainSlug: chain.slug, sort: "marketCap", limit: TOP_TOKENS_LIMIT }),
   ]);
-  const topChainTokens = chainTokens.slice(0, TOP_TOKENS_LIMIT);
 
   const [watchedProtocolIds, watchedTokenIds] = await Promise.all([
     getWatchedProtocolIds(session?.user?.id, topProtocols.map((p) => p.id)),
@@ -101,7 +100,7 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
           { id: "tvl", label: "TVL" },
           ...(categoryBreakdown.length > 0 ? [{ id: "category-breakdown", label: "Categories" }] : []),
           { id: "top-protocols", label: "Protocols" },
-          ...(chainTokens.length > 0 ? [{ id: "tokens", label: "Tokens" }] : []),
+          ...(topChainTokens.length > 0 ? [{ id: "tokens", label: "Tokens" }] : []),
         ]}
       />
 
@@ -153,7 +152,7 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
         />
       </div>
 
-      {chainTokens.length > 0 && (
+      {topChainTokens.length > 0 && (
         <div id="tokens" className="mt-8 scroll-mt-28">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-xl font-semibold tracking-tight">Tokens on {chain.name}</h2>

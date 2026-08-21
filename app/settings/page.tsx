@@ -1,14 +1,14 @@
 import type { Metadata } from "next";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SettingsForm } from "@/components/settings/settings-form";
-import { auth } from "@/lib/auth/config";
+import { requireSession } from "@/lib/auth/require-session";
 import { NOINDEX } from "@/lib/seo";
 
 export const metadata: Metadata = { title: "Settings", robots: NOINDEX };
 
 export default async function SettingsPage() {
-  const session = await auth();
-  const user = session!.user;
+  const session = await requireSession();
+  const user = session.user;
 
   return (
     <div className="mx-auto max-w-lg px-4 py-8 sm:px-6">

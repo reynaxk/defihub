@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { DataTable, type DataTableColumn } from "@/components/shared/data-table";
+import { DataTable, type DataTableColumn, type DataTableSort } from "@/components/shared/data-table";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { PercentChange } from "@/components/shared/percent-change";
 import { WatchIconButton } from "@/components/shared/watch-icon-button";
@@ -12,10 +12,12 @@ export function TokensTable({
   tokens,
   isSignedIn = false,
   watchedTokenIds,
+  sort,
 }: {
   tokens: TokenListItem[];
   isSignedIn?: boolean;
   watchedTokenIds?: Set<string>;
+  sort?: DataTableSort;
 }) {
   const columns: DataTableColumn<TokenListItem>[] = [
     {
@@ -50,6 +52,7 @@ export function TokensTable({
       headClassName: "text-right",
       cellClassName: "text-right tabular-nums",
       render: (token) => formatTokenPrice(token.priceUsd),
+      sortKey: "price",
     },
     {
       key: "change24h",
@@ -57,6 +60,7 @@ export function TokensTable({
       headClassName: "text-right",
       cellClassName: "text-right tabular-nums",
       render: (token) => <PercentChange value={token.priceChange24h} />,
+      sortKey: "priceChange24h",
     },
     {
       key: "marketCap",
@@ -64,6 +68,7 @@ export function TokensTable({
       headClassName: "text-right",
       cellClassName: "text-right tabular-nums",
       render: (token) => formatUsd(token.marketCap),
+      sortKey: "marketCap",
     },
     {
       key: "volume24h",
@@ -71,6 +76,7 @@ export function TokensTable({
       headClassName: "text-right",
       cellClassName: "text-right tabular-nums",
       render: (token) => formatUsd(token.volume24h),
+      sortKey: "volume24h",
     },
   ];
 
@@ -80,6 +86,7 @@ export function TokensTable({
       rows={tokens}
       rowKey={(token) => token.id}
       emptyMessage="No tokens match these filters."
+      sort={sort}
       watchColumn={
         watchedTokenIds
           ? (token) => (

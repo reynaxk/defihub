@@ -6,6 +6,7 @@ import { getNativeTokenPrice, getTokensForBalanceCheck } from "@/lib/database/qu
 import { EVM_CHAINS } from "@/lib/chains/rpc-client";
 import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { aggregateUsdValues, computeValueUsd } from "@/lib/wallet/valuation";
+import { logger } from "@/lib/observability/logger";
 import type { ChainBalanceResult, ChainResult, TokenBalance, WalletBalancesResponse } from "@/lib/wallet/types";
 
 // Each request fans out to 7 chains' RPC endpoints (1 native balance + 1
@@ -169,7 +170,7 @@ export async function GET(request: Request) {
   // harder to diagnose than it needed to be.
   const chains: ChainResult[] = settled.map((result, i) => {
     if (result.status === "fulfilled") return result.value;
-    console.error(`[wallet-balances] ${EVM_CHAINS[i].slug} failed:`, result.reason);
+    logger.error("chain read failed", { component: "wallet-balances", chain: EVM_CHAINS[i].slug, error: result.reason });
     return { chainSlug: EVM_CHAINS[i].slug, chainName: EVM_CHAINS[i].name, error: "Couldn't reach this chain" };
   });
 

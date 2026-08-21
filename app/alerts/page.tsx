@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { desc, eq } from "drizzle-orm";
-import { auth } from "@/lib/auth/config";
+import { requireSession } from "@/lib/auth/require-session";
 import { db } from "@/lib/database/client";
 import { alerts } from "@/lib/database/schema";
 import { AlertsManager } from "@/components/alerts/alerts-manager";
@@ -9,8 +9,8 @@ import { NOINDEX } from "@/lib/seo";
 export const metadata: Metadata = { title: "Alerts", robots: NOINDEX };
 
 export default async function AlertsPage() {
-  const session = await auth();
-  const userId = session!.user.id;
+  const session = await requireSession();
+  const userId = session.user.id;
 
   const rows = await db
     .select()

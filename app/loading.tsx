@@ -15,7 +15,7 @@ export default function Loading() {
       </div>
 
       <div className="py-6">
-        <StatTilesSkeleton count={9} />
+        <StatTilesSkeleton count={10} gridClassName="sm:grid-cols-5 xl:grid-cols-5" />
       </div>
 
       <Skeleton className="h-80 w-full rounded-lg" />

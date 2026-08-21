@@ -91,17 +91,35 @@ export async function syncTokens(): Promise<void> {
     }
 
     const decimalsByKey = new Map<string, number>();
+    const decimalsChainFailures: string[] = [];
+    // Distinct from a whole-chain failure below: a multicall can succeed
+    // as a batch while individual addresses within it come back as failed
+    // results (e.g. a non-standard token missing decimals()) -
+    // resolveDecimals reports those in `failed` rather than silently
+    // omitting them, so a partial-multicall failure is counted instead of
+    // this run reporting "success" while some tokens' decimals stayed
+    // unknown for no recorded reason.
+    let decimalsAddressFailures = 0;
     await Promise.all(
       [...addressesByChainId.entries()].map(async ([chainId, addressSet]) => {
         const slug = chainSlugById.get(chainId);
         if (!slug) return;
         try {
-          const resolved = await fetchOnchainDecimals(slug, [...addressSet]);
+          const { resolved, failed } = await fetchOnchainDecimals(slug, [...addressSet]);
           for (const [address, decimals] of resolved) {
             decimalsByKey.set(`${chainId}|${address}`, decimals);
           }
+          if (failed.length > 0) {
+            decimalsAddressFailures += failed.length;
+            logger.warn("decimals read failed for some addresses, leaving them unknown", {
+              component: "tokens",
+              chain: slug,
+              recordsProcessed: failed.length,
+            });
+          }
         } catch (err) {
           logger.warn("decimals read failed for chain, leaving unknown", { component: "tokens", chain: slug, error: err });
+          decimalsChainFailures.push(slug);
         }
       }),
     );
@@ -181,13 +199,29 @@ export async function syncTokens(): Promise<void> {
       metadata: { chainDeployments: deployments.length },
     });
 
+    const decimalsFailureCount = decimalsChainFailures.length + decimalsAddressFailures;
+    const errorSummaryParts = [
+      decimalsChainFailures.length > 0 ? `decimals read failed for chains: ${decimalsChainFailures.join(", ")}` : null,
+      decimalsAddressFailures > 0 ? `${decimalsAddressFailures} address(es) failed within an otherwise-successful multicall` : null,
+    ].filter((p): p is string => p !== null);
+
     return {
       result: undefined,
       stats: {
         recordsProcessed: marketTokens.length,
         recordsCreated: priceRows.length,
+        errorCount: decimalsFailureCount,
+        errorSummary: errorSummaryParts.length > 0 ? errorSummaryParts.join("; ") : undefined,
         metadata: { chainDeployments: deployments.length },
       },
+      // A run where every chain's decimals RPC failed and nothing was
+      // resolved, or where some addresses failed within an otherwise-
+      // successful multicall, would otherwise persist as an
+      // undifferentiated "success" - the sync-health view would show
+      // green while some tokens' decimals stayed silently unknown and
+      // app/api/wallet/balances/route.ts kept dropping those balances as
+      // a result.
+      outcome: decimalsFailureCount > 0 ? ("partial" as const) : ("success" as const),
     };
   });
 }

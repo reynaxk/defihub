@@ -74,6 +74,21 @@ export default async function ProtocolsPage({
     return qs ? `/protocols?${qs}` : "/protocols";
   }
 
+  // Same param convention as ProtocolFilters' own sort <Select> - a header
+  // click and the dropdown both land on the identical URL shape. Sorting
+  // also invalidates the current page, same as buildHref's own pagination
+  // links do for a filter change.
+  function buildSortHref(sortKey: string, dir: "asc" | "desc") {
+    const query = new URLSearchParams();
+    if (params.category) query.set("category", params.category);
+    if (params.chain) query.set("chain", params.chain);
+    if (params.q) query.set("q", params.q);
+    if (sortKey !== "tvl") query.set("sort", sortKey);
+    if (dir === "asc") query.set("dir", dir);
+    const qs = query.toString();
+    return qs ? `/protocols?${qs}` : "/protocols";
+  }
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
       <h1 className="text-2xl font-semibold tracking-tight">Protocols</h1>
@@ -94,6 +109,7 @@ export default async function ProtocolsPage({
           rankOffset={(result.page - 1) * result.pageSize}
           isSignedIn={Boolean(session?.user)}
           watchedProtocolIds={watchedProtocolIds}
+          sort={{ key: sortBy, dir: sortDir, hrefFor: buildSortHref }}
         />
       </div>
 

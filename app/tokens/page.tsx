@@ -27,15 +27,16 @@ const SORT_DESCRIPTIONS: Record<TokenSort, string> = {
 export default async function TokensPage({
   searchParams,
 }: {
-  searchParams: Promise<{ chain?: string; sort?: string; page?: string }>;
+  searchParams: Promise<{ chain?: string; sort?: string; dir?: string; page?: string }>;
 }) {
   const params = await searchParams;
   const sort = VALID_SORTS.includes(params.sort as TokenSort) ? (params.sort as TokenSort) : "marketCap";
+  const sortDir = params.dir === "asc" ? "asc" : "desc";
   const page = Math.max(1, Number(params.page) || 1);
 
   const [session, result, chains] = await Promise.all([
     auth(),
-    getTokensPageList({ chainSlug: params.chain, sort, page }),
+    getTokensPageList({ chainSlug: params.chain, sort, sortDir, page }),
     getAllChains(),
   ]);
   const watchedTokenIds = await getWatchedTokenIds(
@@ -54,7 +55,17 @@ export default async function TokensPage({
     const query = new URLSearchParams();
     if (params.chain) query.set("chain", params.chain);
     if (params.sort) query.set("sort", params.sort);
+    if (params.dir) query.set("dir", params.dir);
     if (targetPage > 1) query.set("page", String(targetPage));
+    const qs = query.toString();
+    return qs ? `/tokens?${qs}` : "/tokens";
+  }
+
+  function buildSortHref(sortKey: string, dir: "asc" | "desc") {
+    const query = new URLSearchParams();
+    if (params.chain) query.set("chain", params.chain);
+    if (sortKey !== "marketCap") query.set("sort", sortKey);
+    if (dir === "asc") query.set("dir", dir);
     const qs = query.toString();
     return qs ? `/tokens?${qs}` : "/tokens";
   }
@@ -78,6 +89,7 @@ export default async function TokensPage({
           tokens={result.items}
           isSignedIn={Boolean(session?.user)}
           watchedTokenIds={watchedTokenIds}
+          sort={{ key: sort, dir: sortDir, hrefFor: buildSortHref }}
         />
       </div>
 

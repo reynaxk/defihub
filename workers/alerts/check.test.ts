@@ -1,0 +1,265 @@
+// Real-Postgres integration test, same reasoning as workers/chains/sync.test.ts:
+// the actual thing under test is concurrency-safety and per-alert isolation
+// against real alerts/chains/chain_metrics rows, not mockable behavior. Only
+// the email send and (for the isolation test) condition evaluation are mocked.
+import { randomUUID } from "node:crypto";
+import { desc, eq } from "drizzle-orm";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { closeDb, db } from "@/lib/database/client";
+import { alerts, chainMetrics, chains, syncRuns, users } from "@/lib/database/schema";
+
+const mockSendEmail = vi.fn();
+vi.mock("../../lib/notifications/email", () => ({
+  sendEmail: (...args: unknown[]) => mockSendEmail(...args),
+}));
+
+const mockEvaluateCondition = vi.fn();
+vi.mock("../../lib/alerts/evaluate", () => ({
+  evaluateCondition: (...args: unknown[]) => mockEvaluateCondition(...args),
+}));
+
+const { checkAlerts } = await import("./check");
+
+async function makeUser() {
+  const email = `test-${randomUUID()}@example.com`;
+  const [user] = await db.insert(users).values({ email }).returning({ id: users.id });
+  return { id: user.id, email };
+}
+
+async function makeChainWithTvl(tvl: number) {
+  const [chain] = await db
+    .insert(chains)
+    .values({ name: `Test ${randomUUID()}`, slug: `test-${randomUUID()}`, nativeToken: "TST" })
+    .returning({ id: chains.id, slug: chains.slug });
+  await db.insert(chainMetrics).values({ chainId: chain.id, timestamp: new Date(), tvl: tvl.toString() });
+  return chain;
+}
+
+describe("checkAlerts", () => {
+  const createdUserIds: string[] = [];
+  const createdChainIds: string[] = [];
+  const createdAlertIds: string[] = [];
+
+  beforeEach(() => {
+    mockSendEmail.mockReset().mockResolvedValue(true);
+    mockEvaluateCondition.mockReset();
+  });
+
+  afterEach(async () => {
+    for (const id of createdAlertIds.splice(0)) await db.delete(alerts).where(eq(alerts.id, id));
+    for (const id of createdChainIds.splice(0)) {
+      await db.delete(chainMetrics).where(eq(chainMetrics.chainId, id));
+      await db.delete(chains).where(eq(chains.id, id));
+    }
+    for (const id of createdUserIds.splice(0)) await db.delete(users).where(eq(users.id, id));
+  });
+
+  afterAll(async () => {
+    await closeDb();
+  });
+
+  it("sends exactly one email when two overlapping runs race on the same firing alert", async () => {
+    const { id: userId, email: userEmail } = await makeUser();
+    createdUserIds.push(userId);
+    const chain = await makeChainWithTvl(1_000_000);
+    createdChainIds.push(chain.id);
+
+    const [alert] = await db
+      .insert(alerts)
+      .values({
+        userId,
+        type: "chain_tvl",
+        target: chain.slug,
+        condition: "above",
+        threshold: "500000",
+        enabled: true,
+        isFiring: false,
+      })
+      .returning({ id: alerts.id });
+    createdAlertIds.push(alert.id);
+
+    mockEvaluateCondition.mockReturnValue(true);
+
+    await Promise.all([checkAlerts(), checkAlerts()]);
+
+    // Scoped to this test's own user - this runs against a real, possibly
+    // non-empty alerts table, so other enabled/firing alerts could exist
+    // and also legitimately send mail during the same two runs.
+    const emailsToThisUser = mockSendEmail.mock.calls.filter((call) => call[0].to === userEmail);
+    expect(emailsToThisUser).toHaveLength(1);
+    const [row] = await db.select().from(alerts).where(eq(alerts.id, alert.id));
+    expect(row.isFiring).toBe(true);
+  });
+
+  it("reverts the firing claim when sendEmail rejects, so a later run retries instead of suppressing the alert forever", async () => {
+    const { id: userId } = await makeUser();
+    createdUserIds.push(userId);
+    const chain = await makeChainWithTvl(1_000_000);
+    createdChainIds.push(chain.id);
+
+    const [alert] = await db
+      .insert(alerts)
+      .values({
+        userId,
+        type: "chain_tvl",
+        target: chain.slug,
+        condition: "above",
+        threshold: "500000",
+        enabled: true,
+        isFiring: false,
+      })
+      .returning({ id: alerts.id });
+    createdAlertIds.push(alert.id);
+
+    mockEvaluateCondition.mockReturnValue(true);
+    mockSendEmail.mockRejectedValueOnce(new Error("network error before Resend responded"));
+
+    await checkAlerts();
+
+    // The claim must not be left stuck at true - a rejected promise (a
+    // transport-level failure) is not the same as "delivered."
+    const [row] = await db.select().from(alerts).where(eq(alerts.id, alert.id));
+    expect(row.isFiring).toBe(false);
+
+    // A second run with a working sendEmail must actually retry and
+    // deliver, proving the alert isn't permanently suppressed.
+    mockSendEmail.mockResolvedValue(true);
+    await checkAlerts();
+    const [rowAfterRetry] = await db.select().from(alerts).where(eq(alerts.id, alert.id));
+    expect(rowAfterRetry.isFiring).toBe(true);
+    expect(mockSendEmail).toHaveBeenCalledTimes(2);
+  });
+
+  it("counts a resolved-false send as a failure and persists a partial sync run with errorCount 1", async () => {
+    const { id: userId } = await makeUser();
+    createdUserIds.push(userId);
+    const chain = await makeChainWithTvl(1_000_000);
+    createdChainIds.push(chain.id);
+
+    const [alert] = await db
+      .insert(alerts)
+      .values({
+        userId,
+        type: "chain_tvl",
+        target: chain.slug,
+        condition: "above",
+        threshold: "500000",
+        enabled: true,
+        isFiring: false,
+      })
+      .returning({ id: alerts.id });
+    createdAlertIds.push(alert.id);
+
+    mockEvaluateCondition.mockReturnValue(true);
+    mockSendEmail.mockResolvedValueOnce(false);
+
+    await checkAlerts();
+
+    // The claim reverts (already covered by the reject case above) - this
+    // test's own point is that the failure is actually counted, not just
+    // silently reverted.
+    const [row] = await db.select().from(alerts).where(eq(alerts.id, alert.id));
+    expect(row.isFiring).toBe(false);
+
+    const [run] = await db
+      .select()
+      .from(syncRuns)
+      .where(eq(syncRuns.worker, "alerts"))
+      .orderBy(desc(syncRuns.startedAt))
+      .limit(1);
+    expect(run.status).toBe("partial");
+    expect(run.errorCount).toBe(1);
+  });
+
+  it("does not resend once an alert is already firing", async () => {
+    const { id: userId } = await makeUser();
+    createdUserIds.push(userId);
+    const chain = await makeChainWithTvl(1_000_000);
+    createdChainIds.push(chain.id);
+
+    const [alert] = await db
+      .insert(alerts)
+      .values({
+        userId,
+        type: "chain_tvl",
+        target: chain.slug,
+        condition: "above",
+        threshold: "500000",
+        enabled: true,
+        isFiring: true,
+      })
+      .returning({ id: alerts.id });
+    createdAlertIds.push(alert.id);
+
+    mockEvaluateCondition.mockReturnValue(true);
+
+    await checkAlerts();
+
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+
+  it("isolates a failure evaluating one alert so other alerts still get checked, and reports a partial run", async () => {
+    const { id: userId } = await makeUser();
+    createdUserIds.push(userId);
+    const brokenChain = await makeChainWithTvl(1_000_000);
+    const okChain = await makeChainWithTvl(1_000_000);
+    createdChainIds.push(brokenChain.id, okChain.id);
+
+    const [brokenAlert] = await db
+      .insert(alerts)
+      .values({
+        userId,
+        type: "chain_tvl",
+        target: brokenChain.slug,
+        condition: "above",
+        threshold: "1",
+        enabled: true,
+        isFiring: false,
+      })
+      .returning({ id: alerts.id });
+    const [okAlert] = await db
+      .insert(alerts)
+      .values({
+        userId,
+        type: "chain_tvl",
+        target: okChain.slug,
+        condition: "above",
+        threshold: "999999999",
+        enabled: true,
+        isFiring: false,
+      })
+      .returning({ id: alerts.id });
+    createdAlertIds.push(brokenAlert.id, okAlert.id);
+
+    mockEvaluateCondition.mockImplementation((_condition: string, _current: number, threshold: number) => {
+      if (threshold === 1) throw new Error("evaluation exploded");
+      return false;
+    });
+
+    await checkAlerts();
+
+    // The broken alert's failure didn't stop the healthy one from being
+    // checked (lastCheckedAt updated) and evaluated. Scoped to these two
+    // alerts' own distinctive thresholds rather than a total call count -
+    // this runs against a real, possibly non-empty alerts table, so other
+    // enabled alerts may exist and get evaluated too.
+    const [okRow] = await db.select().from(alerts).where(eq(alerts.id, okAlert.id));
+    expect(okRow.lastCheckedAt).not.toBeNull();
+    const thresholdsSeen = mockEvaluateCondition.mock.calls.map((call) => call[2]);
+    expect(thresholdsSeen).toContain(1); // the broken alert was attempted
+    expect(thresholdsSeen).toContain(999999999); // and the healthy one still ran after it
+
+    // The failure must be visible in the persisted sync-run record too,
+    // not just inferred from mock call inspection - this is what the
+    // sync-health view and any "runs with errors" operator query actually
+    // read.
+    const [run] = await db
+      .select()
+      .from(syncRuns)
+      .where(eq(syncRuns.worker, "alerts"))
+      .orderBy(desc(syncRuns.startedAt))
+      .limit(1);
+    expect(run.status).toBe("partial");
+    expect(run.errorCount).toBe(1);
+  });
+});

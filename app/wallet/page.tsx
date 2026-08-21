@@ -1,11 +1,14 @@
 import type { Metadata } from "next";
 import { Wallet } from "lucide-react";
 import { WalletDashboard } from "@/components/wallet/wallet-dashboard";
+import { requireSession } from "@/lib/auth/require-session";
 import { NOINDEX } from "@/lib/seo";
 
 export const metadata: Metadata = { title: "Wallet", robots: NOINDEX };
 
-export default function WalletPage() {
+export default async function WalletPage() {
+  await requireSession();
+
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
       <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">

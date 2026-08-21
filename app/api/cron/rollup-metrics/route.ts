@@ -11,7 +11,12 @@ export async function GET(request: Request) {
 
   try {
     const stats = await rollupMetrics();
-    return NextResponse.json({ ok: true, stats });
+    // stats is null specifically when another invocation already held the
+    // advisory lock (see rollup.ts) - an explicit `skipped` flag makes
+    // that unambiguous to a caller/monitor reading the response, rather
+    // than relying on inferring "skipped" from the absence of a stats
+    // payload.
+    return NextResponse.json({ ok: true, skipped: stats === null, stats });
   } catch (err) {
     logger.error("rollup failed", { component: "cron", operation: "rollup-metrics", error: err });
     return NextResponse.json({ ok: false, error: "Rollup failed - see server logs" }, { status: 500 });

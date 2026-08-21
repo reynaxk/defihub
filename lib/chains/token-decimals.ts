@@ -10,26 +10,52 @@ export interface DecimalsCallResult {
 // Injected rather than constructed internally, so the batching/failure-
 // handling logic below is testable without a real RPC client - production
 // code passes a real multicall closure (fetchOnchainDecimals), tests pass a
-// fake one. A failed read for a given address is simply absent from the
-// returned map - callers must treat "not present" as unknown and never
-// substitute an assumed value (e.g. 18).
+// fake one. A failed read for a given address is absent from `resolved` -
+// callers must treat "not present" as unknown and never substitute an
+// assumed value (e.g. 18) - but it IS still reported in `failed`, so a
+// partial failure within an otherwise-successful multicall (some
+// addresses failed, others didn't) is visible to the caller rather than
+// indistinguishable from "every address happened to resolve."
 export type MulticallDecimals = (addresses: string[]) => Promise<DecimalsCallResult[]>;
+
+export interface ResolveDecimalsResult {
+  resolved: Map<string, number>;
+  failed: string[];
+}
 
 export async function resolveDecimals(
   addresses: string[],
   multicall: MulticallDecimals,
-): Promise<Map<string, number>> {
-  const byAddress = new Map<string, number>();
-  if (addresses.length === 0) return byAddress;
+): Promise<ResolveDecimalsResult> {
+  const resolved = new Map<string, number>();
+  const failed: string[] = [];
+  if (addresses.length === 0) return { resolved, failed };
 
   const results = await multicall(addresses);
   for (let i = 0; i < addresses.length; i++) {
     const r = results[i];
-    if (r && r.status === "success" && typeof r.result === "number") {
-      byAddress.set(addresses[i], r.result);
+    // ERC-20 decimals() returns a uint8 - a bare `typeof === "number"`
+    // check accepts anything numeric, including negatives, fractions,
+    // NaN, Infinity, and values above 255, none of which are a valid
+    // uint8. workers/tokens/sync.ts persists whatever comes out of here
+    // straight into tokens.decimals, which every balance display then
+    // scales by - a malformed value here would corrupt that scaling (or
+    // fail the upsert outright for something like NaN/Infinity, which
+    // Postgres's numeric/integer columns reject).
+    if (
+      r &&
+      r.status === "success" &&
+      typeof r.result === "number" &&
+      Number.isInteger(r.result) &&
+      r.result >= 0 &&
+      r.result <= 255
+    ) {
+      resolved.set(addresses[i], r.result);
+    } else {
+      failed.push(addresses[i]);
     }
   }
-  return byAddress;
+  return { resolved, failed };
 }
 
 // One multicall batching every address's decimals() read for a single
@@ -44,9 +70,11 @@ export async function resolveDecimals(
 export async function fetchOnchainDecimals(
   chainSlug: string,
   addresses: string[],
-): Promise<Map<string, number>> {
-  if (addresses.length === 0) return new Map();
-  if (!VIEM_CHAIN_BY_SLUG.has(chainSlug)) return new Map();
+): Promise<ResolveDecimalsResult> {
+  if (addresses.length === 0) return { resolved: new Map(), failed: [] };
+  // Non-EVM chains aren't a per-address failure - there's no RPC to have
+  // failed against, so nothing goes in `failed` here either.
+  if (!VIEM_CHAIN_BY_SLUG.has(chainSlug)) return { resolved: new Map(), failed: [] };
 
   return resolveDecimals(addresses, (addrs) =>
     withResilientClient(chainSlug, async (client) => {

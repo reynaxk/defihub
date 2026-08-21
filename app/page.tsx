@@ -80,7 +80,16 @@ export default async function HomePage() {
         </div>
       </section>
 
-      <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 grid grid-cols-2 gap-3 py-6 delay-150 duration-700 sm:grid-cols-3 lg:grid-cols-5">
+      {/* 10 tiles - a prior 3/9-column layout left a trailing tile (10
+          doesn't divide evenly by 3 or 9). 5 columns divides evenly (2
+          full rows) at every width from `sm` up - a 10-wide single row was
+          tried at `xl`, but even inside this page's max-w-7xl container
+          that leaves each tile too narrow for its p-4 padding and text-2xl
+          value to stay comfortable, so 5 stays the ceiling rather than
+          widening further (kept as an explicit xl breakpoint, not just
+          relying on the sm:grid-cols-5 cascade, so the intended ceiling is
+          visible at the class level). */}
+      <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 grid grid-cols-2 gap-3 py-6 delay-150 duration-700 sm:grid-cols-5 xl:grid-cols-5">
         <StatTile
           label={`Total value locked${tvlPartial ? " (partial)" : ""}`}
           value={formatUsd(totalTvl)}

@@ -80,7 +80,11 @@ export default async function HomePage() {
         </div>
       </section>
 
-      <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 grid grid-cols-2 gap-3 py-6 delay-150 duration-700 sm:grid-cols-3 lg:grid-cols-5">
+      {/* 9 tiles - grid-cols-5 at `lg` left an unbalanced trailing row of 4.
+          3 columns divides evenly (3 full rows) at every width up to `xl`,
+          where there's enough room to lay all 9 out as a single dense
+          ticker strip instead. */}
+      <section className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 grid grid-cols-2 gap-3 py-6 delay-150 duration-700 sm:grid-cols-3 xl:grid-cols-9">
         <StatTile
           label={`Total value locked${tvlPartial ? " (partial)" : ""}`}
           value={formatUsd(totalTvl)}

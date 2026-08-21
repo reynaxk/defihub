@@ -112,7 +112,7 @@ function normalizeTokenRows<T extends { priceUsd: string | null; marketCap: stri
 const TOKENS_MAX_ROWS = 5000;
 
 export async function getTokensList(
-  opts: { chainSlug?: string; sort?: TokenSort } = {},
+  opts: { chainSlug?: string; sort?: TokenSort; limit?: number } = {},
 ): Promise<TokenListItem[]> {
   const conditions = opts.chainSlug ? [eq(chains.slug, opts.chainSlug)] : [];
   const latest = latestPriceLateral();
@@ -125,7 +125,10 @@ export async function getTokensList(
     .innerJoinLateral(latest, sql`true`)
     .where(conditions.length ? and(...conditions) : undefined)
     .orderBy(sql`${orderColumn} desc nulls last`)
-    .limit(TOKENS_MAX_ROWS);
+    // A caller wanting only a small top-N slice (e.g. a chain page's "top
+    // tokens" widget) can push that limit down into SQL instead of
+    // fetching up to TOKENS_MAX_ROWS and slicing in JS.
+    .limit(opts.limit ?? TOKENS_MAX_ROWS);
 
   return normalizeTokenRows(rows);
 }
@@ -139,7 +142,7 @@ export interface PaginatedTokens {
 }
 
 export async function getTokensPageList(
-  opts: { chainSlug?: string; sort?: TokenSort; page?: number; pageSize?: number } = {},
+  opts: { chainSlug?: string; sort?: TokenSort; sortDir?: "asc" | "desc"; page?: number; pageSize?: number } = {},
 ): Promise<PaginatedTokens> {
   const { page, pageSize } = normalizePagination(opts);
   const conditions = opts.chainSlug ? [eq(chains.slug, opts.chainSlug)] : [];
@@ -160,6 +163,7 @@ export async function getTokensPageList(
 
   const latest = latestPriceLateral();
   const orderColumn = tokenSortColumn(latest, opts.sort);
+  const dir = opts.sortDir === "asc" ? sql`asc` : sql`desc`;
   const rows = await db
     .select(tokenListColumns(latest))
     .from(tokens)
@@ -170,7 +174,7 @@ export async function getTokensPageList(
     // priceChange24h tie frequently (many tokens sit at null or 0), and
     // Postgres doesn't guarantee tie order across separate LIMIT/OFFSET
     // calls without one.
-    .orderBy(sql`${orderColumn} desc nulls last`, tokens.id)
+    .orderBy(sql`${orderColumn} ${dir} nulls last`, tokens.id)
     .limit(pageSize)
     .offset((clampedPage - 1) * pageSize);
 

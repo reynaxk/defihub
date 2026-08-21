@@ -83,6 +83,20 @@ export default async function YieldsPage({
     return qs ? `/yields?${qs}` : "/yields";
   }
 
+  function buildSortHref(sortKey: string, dir: "asc" | "desc") {
+    const query = new URLSearchParams();
+    if (params.chain) query.set("chain", params.chain);
+    if (params.category) query.set("category", params.category);
+    if (params.risk) query.set("risk", params.risk);
+    if (params.stable) query.set("stable", params.stable);
+    if (params.q) query.set("q", params.q);
+    if (params.minTvl) query.set("minTvl", params.minTvl);
+    if (sortKey !== "apy") query.set("sort", sortKey);
+    if (dir === "asc") query.set("dir", dir);
+    const qs = query.toString();
+    return qs ? `/yields?${qs}` : "/yields";
+  }
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
       <h1 className="text-2xl font-semibold tracking-tight">Yields</h1>
@@ -103,7 +117,12 @@ export default async function YieldsPage({
       </div>
 
       <div className="mt-4">
-        <YieldsTable pools={result.items} isSignedIn={Boolean(session?.user)} watchedPoolIds={watchedPoolIds} />
+        <YieldsTable
+          pools={result.items}
+          isSignedIn={Boolean(session?.user)}
+          watchedPoolIds={watchedPoolIds}
+          sort={{ key: sortBy, dir: sortDir, hrefFor: buildSortHref }}
+        />
       </div>
 
       <Pagination page={result.page} totalPages={result.totalPages} buildHref={buildHref} />

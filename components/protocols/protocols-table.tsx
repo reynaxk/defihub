@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
-import { DataTable, type DataTableColumn } from "@/components/shared/data-table";
+import { DataTable, type DataTableColumn, type DataTableSort } from "@/components/shared/data-table";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { PercentChange } from "@/components/shared/percent-change";
 import { WatchIconButton } from "@/components/shared/watch-icon-button";
@@ -12,11 +12,13 @@ export function ProtocolsTable({
   rankOffset = 0,
   isSignedIn = false,
   watchedProtocolIds,
+  sort,
 }: {
   protocols: ProtocolListItem[];
   rankOffset?: number;
   isSignedIn?: boolean;
   watchedProtocolIds?: Set<string>;
+  sort?: DataTableSort;
 }) {
   const columns: DataTableColumn<ProtocolListItem>[] = [
     {
@@ -49,6 +51,7 @@ export function ProtocolsTable({
       headClassName: "text-right",
       cellClassName: "text-right tabular-nums",
       render: (protocol) => formatUsd(protocol.tvl),
+      sortKey: "tvl",
     },
     {
       key: "change24h",
@@ -56,6 +59,7 @@ export function ProtocolsTable({
       headClassName: "hidden text-right sm:table-cell",
       cellClassName: "hidden text-right tabular-nums sm:table-cell",
       render: (protocol) => <PercentChange value={protocol.tvlChange1d} />,
+      sortKey: "change1d",
     },
     {
       key: "change7d",
@@ -63,6 +67,7 @@ export function ProtocolsTable({
       headClassName: "hidden text-right md:table-cell",
       cellClassName: "hidden text-right tabular-nums md:table-cell",
       render: (protocol) => <PercentChange value={protocol.tvlChange7d} />,
+      sortKey: "change7d",
     },
     {
       key: "volume24h",
@@ -70,6 +75,7 @@ export function ProtocolsTable({
       headClassName: "hidden text-right md:table-cell",
       cellClassName: "hidden text-right tabular-nums text-muted-foreground md:table-cell",
       render: (protocol) => formatUsd(protocol.volume24h),
+      sortKey: "volume",
     },
     {
       key: "fees24h",
@@ -77,6 +83,7 @@ export function ProtocolsTable({
       headClassName: "hidden text-right lg:table-cell",
       cellClassName: "hidden text-right tabular-nums text-muted-foreground lg:table-cell",
       render: (protocol) => formatUsd(protocol.fees24h),
+      sortKey: "fees",
     },
     {
       key: "revenue24h",
@@ -84,6 +91,7 @@ export function ProtocolsTable({
       headClassName: "hidden text-right lg:table-cell",
       cellClassName: "hidden text-right tabular-nums text-muted-foreground lg:table-cell",
       render: (protocol) => formatUsd(protocol.revenue24h),
+      sortKey: "revenue",
     },
   ];
 
@@ -93,6 +101,7 @@ export function ProtocolsTable({
       rows={protocols}
       rowKey={(protocol) => protocol.id}
       emptyMessage="No protocols match these filters yet."
+      sort={sort}
       watchColumn={
         watchedProtocolIds
           ? (protocol) => (

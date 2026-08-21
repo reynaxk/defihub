@@ -16,6 +16,7 @@ import {
   getNativeTokenPrice,
   getTokensForBalanceCheck,
   getTokensList,
+  getTokensPageList,
   getTopMovers,
 } from "./tokens";
 
@@ -121,5 +122,23 @@ describe("tokens queries - LATERAL join correctness", () => {
 
     const nativePrice = await getNativeTokenPrice(chain.slug);
     expect(nativePrice).toBe(3000);
+  });
+
+  it("getTokensPageList respects sortDir - backs the sortable table header click", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const lowId = await makeToken(chain.id, `LOW${randomUUID().slice(0, 6)}`);
+    const highId = await makeToken(chain.id, `HIGH${randomUUID().slice(0, 6)}`);
+    createdTokenIds.push(lowId, highId);
+
+    const now = new Date();
+    await addPrice(lowId, now, 1, { marketCap: "1000" });
+    await addPrice(highId, now, 1, { marketCap: "9000" });
+
+    const desc = await getTokensPageList({ chainSlug: chain.slug, sort: "marketCap", sortDir: "desc" });
+    expect(desc.items[0]?.id).toBe(highId);
+
+    const asc = await getTokensPageList({ chainSlug: chain.slug, sort: "marketCap", sortDir: "asc" });
+    expect(asc.items[0]?.id).toBe(lowId);
   });
 });

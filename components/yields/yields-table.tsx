@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { DataTable, type DataTableColumn } from "@/components/shared/data-table";
+import { DataTable, type DataTableColumn, type DataTableSort } from "@/components/shared/data-table";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchIconButton } from "@/components/shared/watch-icon-button";
 import { cn } from "@/lib/utils";
@@ -51,10 +51,12 @@ export function YieldsTable({
   pools,
   isSignedIn = false,
   watchedPoolIds,
+  sort,
 }: {
   pools: YieldPool[];
   isSignedIn?: boolean;
   watchedPoolIds?: Set<string>;
+  sort?: DataTableSort;
 }) {
   const columns: DataTableColumn<YieldPool>[] = [
     {
@@ -101,6 +103,7 @@ export function YieldsTable({
       headClassName: "text-right",
       cellClassName: "text-right tabular-nums",
       render: (pool) => formatUsd(pool.tvlUsd),
+      sortKey: "tvl",
     },
     {
       key: "apyBase",
@@ -122,6 +125,7 @@ export function YieldsTable({
       headClassName: "text-right",
       cellClassName: "text-right tabular-nums",
       render: (pool) => <ApyCell apy={pool.apy} />,
+      sortKey: "apy",
     },
     {
       key: "risk",
@@ -145,6 +149,7 @@ export function YieldsTable({
       rows={pools}
       rowKey={(pool) => pool.id}
       emptyMessage="No pools match these filters."
+      sort={sort}
       watchColumn={
         watchedPoolIds
           ? (pool) => (

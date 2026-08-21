@@ -109,8 +109,14 @@ export function DataTable<T>({
         </TableHeader>
         <TableBody>
           {rows.map((row, index) => (
-            <TableRow key={rowKey(row)}>
-              {watchColumn && <TableCell>{watchColumn(row, index)}</TableCell>}
+            // `relative` gives a row-navigation link the stretched-link
+            // treatment room to work (its after:absolute after:inset-0
+            // needs a positioned ancestor to stretch against) - harmless
+            // for tables/columns that don't use it.
+            <TableRow key={rowKey(row)} className="relative">
+              {watchColumn && (
+                <TableCell className="relative z-10">{watchColumn(row, index)}</TableCell>
+              )}
               {columns.map((column) => (
                 <TableCell key={column.key} className={column.cellClassName}>
                   {column.render(row, index)}

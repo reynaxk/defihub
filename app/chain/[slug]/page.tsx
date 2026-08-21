@@ -3,11 +3,13 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchlistButton } from "@/components/shared/watchlist-button";
-import { StatTile } from "@/components/stats/stat-tile";
+import { MetricHeader } from "@/components/stats/metric-header";
+import { MetricRow } from "@/components/stats/metric-row";
+import { ChangeBadge } from "@/components/shared/change-badge";
+import { AnimatedNumber } from "@/components/stats/animated-number";
 import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
 import { ProtocolsTable } from "@/components/protocols/protocols-table";
 import { TokensTable } from "@/components/tokens/tokens-table";
-import { PercentChange } from "@/components/shared/percent-change";
 import { SectionNav } from "@/components/shared/section-nav";
 import { DistributionBarList } from "@/components/shared/distribution-bar-list";
 import { Card } from "@/components/ui/card";
@@ -19,7 +21,6 @@ import {
   isWatchingChain,
 } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
-import { formatUsd } from "@/lib/format";
 
 const TOP_TOKENS_LIMIT = 8;
 
@@ -68,7 +69,7 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border/60 pb-6">
         <div className="flex items-center gap-3">
           <EntityLogo src={chain.logoUrl} name={chain.name} size={40} />
           <div>
@@ -104,22 +105,24 @@ export default async function ChainDetailPage({ params }: { params: Promise<{ sl
         ]}
       />
 
-      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <StatTile
-          label="TVL"
-          value={formatUsd(latestTvl)}
-          animate={latestTvl != null ? { value: latestTvl, format: "usd" } : undefined}
+      <div className="mt-6">
+        <MetricHeader
+          value={latestTvl != null ? <AnimatedNumber value={latestTvl} format="usd" /> : "—"}
+          label="Total value locked"
+          change={<ChangeBadge value={changes.change24h} period="24H" />}
         />
-        <StatTile label="24h change" customValue={<PercentChange value={changes.change24h} />} />
-        <StatTile label="7d change" customValue={<PercentChange value={changes.change7d} />} />
-        <StatTile label="30d change" customValue={<PercentChange value={changes.change30d} />} />
-        <StatTile
-          label="Protocols"
-          value={String(topProtocols.length)}
-          animate={{ value: topProtocols.length, format: "count" }}
+        <MetricRow
+          className="mt-6"
+          items={[
+            { label: "7D change", value: <ChangeBadge value={changes.change7d} /> },
+            { label: "30D change", value: <ChangeBadge value={changes.change30d} /> },
+            { label: "Protocols", value: <AnimatedNumber value={topProtocols.length} format="count" /> },
+            // Chain ID is an identifier, not a magnitude - shown as plain
+            // text rather than through AnimatedNumber, which would
+            // misleadingly imply it's counting up to a real quantity.
+            { label: "Chain ID", value: chain.chainId != null ? String(chain.chainId) : "—" },
+          ]}
         />
-        {/* Chain ID is an identifier, not a magnitude - counting up to it would misleadingly imply it's loading a real quantity */}
-        <StatTile label="Chain ID" value={chain.chainId != null ? String(chain.chainId) : "—"} />
       </div>
 
       <Card id="tvl" className="mt-8 scroll-mt-28 p-4">

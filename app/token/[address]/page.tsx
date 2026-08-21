@@ -5,12 +5,19 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchlistButton } from "@/components/shared/watchlist-button";
-import { StatTile } from "@/components/stats/stat-tile";
+import { MetricHeader } from "@/components/stats/metric-header";
+import { MetricRow } from "@/components/stats/metric-row";
+import { ChangeBadge } from "@/components/shared/change-badge";
+import { AnimatedNumber } from "@/components/stats/animated-number";
 import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
-import { getTokenByAddress, getTokenChainPresence } from "@/lib/database/queries/tokens";
+import {
+  getTokenByAddress,
+  getTokenChainPresence,
+  getTokenPriceChange7d,
+} from "@/lib/database/queries/tokens";
 import { isWatchingToken } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
-import { formatPercent, formatTokenPrice, formatUsd } from "@/lib/format";
+import { formatUsd } from "@/lib/format";
 
 export const revalidate = 300;
 
@@ -40,9 +47,10 @@ export default async function TokenDetailPage({
   if (!data) notFound();
 
   const { token, chain, history, latest } = data;
-  const [watching, otherChains] = await Promise.all([
+  const [watching, otherChains, priceChange7d] = await Promise.all([
     isWatchingToken(session?.user?.id, token.id),
     getTokenChainPresence(token.coingeckoId, token.id),
+    getTokenPriceChange7d(token.id),
   ]);
 
   const priceHistory = history.map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.priceUsd }));
@@ -51,7 +59,7 @@ export default async function TokenDetailPage({
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border/60 pb-6">
         <div className="flex items-center gap-3">
           <EntityLogo src={token.logoUrl} name={token.symbol} size={40} />
           <div>
@@ -94,35 +102,19 @@ export default async function TokenDetailPage({
         </p>
       )}
 
-      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <StatTile
+      <div className="mt-6">
+        <MetricHeader
+          value={latest?.priceUsd != null ? <AnimatedNumber value={latest.priceUsd} format="tokenPrice" /> : "—"}
           label="Price"
-          value={formatTokenPrice(latest?.priceUsd)}
-          animate={latest?.priceUsd != null ? { value: latest.priceUsd, format: "tokenPrice" } : undefined}
+          change={<ChangeBadge value={latest?.priceChange24h} period="24H" />}
         />
-        <StatTile
-          label="24h change"
-          value={formatPercent(latest?.priceChange24h, { signed: true })}
-          animate={
-            latest?.priceChange24h != null ? { value: latest.priceChange24h, format: "percent" } : undefined
-          }
-          valueClassName={
-            latest?.priceChange24h == null
-              ? undefined
-              : latest.priceChange24h >= 0
-                ? "text-[var(--success-text)]"
-                : "text-destructive"
-          }
-        />
-        <StatTile
-          label="Market cap"
-          value={formatUsd(latest?.marketCap)}
-          animate={latest?.marketCap != null ? { value: latest.marketCap, format: "usd" } : undefined}
-        />
-        <StatTile
-          label="24h volume"
-          value={formatUsd(latest?.volume24h)}
-          animate={latest?.volume24h != null ? { value: latest.volume24h, format: "usd" } : undefined}
+        <MetricRow
+          className="mt-6"
+          items={[
+            { label: "7D change", value: <ChangeBadge value={priceChange7d} /> },
+            { label: "Market cap", value: formatUsd(latest?.marketCap) },
+            { label: "24H volume", value: formatUsd(latest?.volume24h) },
+          ]}
         />
       </div>
 

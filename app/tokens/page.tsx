@@ -72,12 +72,15 @@ export default async function TokensPage({
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-      <h1 className="text-2xl font-semibold tracking-tight">Tokens</h1>
-      <p className="mt-1 text-muted-foreground">
-        {result.total === 0
-          ? "No tokens match these filters"
-          : `Showing ${firstRow.toLocaleString("en-US")}–${lastRow.toLocaleString("en-US")} of ${result.total.toLocaleString("en-US")} tokens, ranked by ${SORT_DESCRIPTIONS[sort]}`}
-      </p>
+      <div className="border-b border-border/60 pb-6">
+        <p className="text-xs font-medium tracking-[0.15em] text-muted-foreground uppercase">DeFi Markets</p>
+        <h1 className="mt-1.5 text-2xl font-semibold tracking-tight">Tokens</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {result.total === 0
+            ? "No tokens match these filters"
+            : `Showing ${firstRow.toLocaleString("en-US")}–${lastRow.toLocaleString("en-US")} of ${result.total.toLocaleString("en-US")} tokens, ranked by ${SORT_DESCRIPTIONS[sort]}`}
+        </p>
+      </div>
 
       <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <TokenFilters chains={chains} />

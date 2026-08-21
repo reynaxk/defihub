@@ -80,8 +80,12 @@ export default async function DashboardPage() {
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
-      <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
-      <p className="mt-1 text-muted-foreground">Welcome back{session?.user.name ? `, ${session.user.name}` : ""}.</p>
+      <div className="border-b border-border/60 pb-6">
+        <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Welcome back{session?.user.name ? `, ${session.user.name}` : ""}.
+        </p>
+      </div>
 
       <div className="mt-6 grid grid-cols-3 gap-3">
         <StatTile label="Watching" icon={Star} animate={{ value: watchlist.length, format: "count" }} />

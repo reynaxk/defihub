@@ -45,6 +45,21 @@ function latestNon7dChangeLateral() {
     .as("latest_7d_change");
 }
 
+// The token detail page's 7d-change figure - reuses the same "most recent
+// non-null priceChange7d row" lookback as the movers query above, since
+// getTokenHistory's plain "latest row" wouldn't reliably have one (see
+// latestNon7dChangeLateral's own comment).
+export async function getTokenPriceChange7d(tokenId: string): Promise<number | null> {
+  const latest7d = latestNon7dChangeLateral();
+  const [row] = await db
+    .select({ priceChange7d: latest7d.priceChange7d })
+    .from(tokens)
+    .innerJoinLateral(latest7d, sql`true`)
+    .where(eq(tokens.id, tokenId))
+    .limit(1);
+  return row?.priceChange7d != null ? Number(row.priceChange7d) : null;
+}
+
 export interface TokenListItem {
   id: string;
   address: string;

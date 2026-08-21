@@ -27,7 +27,7 @@ export function TokensTable({
       render: (token) => (
         <Link
           href={`/token/${token.address}?chain=${token.chainSlug}`}
-          className="flex items-center gap-2 hover:text-foreground"
+          className="flex items-center gap-2 hover:text-foreground after:absolute after:inset-0"
         >
           <EntityLogo src={token.logoUrl} name={token.symbol} size={22} />
           <div>
@@ -41,7 +41,10 @@ export function TokensTable({
       key: "chain",
       header: "Chain",
       render: (token) => (
-        <Link href={`/chain/${token.chainSlug}`} className="text-muted-foreground hover:text-foreground">
+        <Link
+          href={`/chain/${token.chainSlug}`}
+          className="relative z-10 text-muted-foreground hover:text-foreground"
+        >
           {token.chainName}
         </Link>
       ),

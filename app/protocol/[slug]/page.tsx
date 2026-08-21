@@ -8,6 +8,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchlistButton } from "@/components/shared/watchlist-button";
 import { StatTile } from "@/components/stats/stat-tile";
+import { MetricHeader } from "@/components/stats/metric-header";
+import { MetricRow } from "@/components/stats/metric-row";
+import { ChangeBadge } from "@/components/shared/change-badge";
+import { AnimatedNumber } from "@/components/stats/animated-number";
 import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
 import { AiSummaryCard } from "@/components/protocols/ai-summary-card";
 import { OnchainVerificationCard } from "@/components/protocols/onchain-verification-card";
@@ -99,7 +103,7 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border/60 pb-6">
         <div className="flex items-center gap-3">
           <EntityLogo src={protocol.logoUrl} name={protocol.name} size={40} />
           <div>
@@ -135,28 +139,20 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
 
       {protocol.description && <p className="mt-4 max-w-3xl text-muted-foreground">{protocol.description}</p>}
 
-      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <StatTile
-          label="TVL"
-          value={formatUsd(latest?.tvl)}
-          animate={latest?.tvl != null ? { value: latest.tvl, format: "usd" } : undefined}
+      <div className="mt-6">
+        <MetricHeader
+          value={latest?.tvl != null ? <AnimatedNumber value={latest.tvl} format="usd" /> : "—"}
+          label="Total value locked"
+          change={<ChangeBadge value={latest?.tvlChange1d} period="24H" />}
         />
-        <StatTile label="24h change" customValue={<PercentChange value={latest?.tvlChange1d} />} />
-        <StatTile label="7d change" customValue={<PercentChange value={latest?.tvlChange7d} />} />
-        <StatTile
-          label="24h Volume"
-          value={formatUsd(latest?.volume24h)}
-          animate={latest?.volume24h != null ? { value: latest.volume24h, format: "usd" } : undefined}
-        />
-        <StatTile
-          label="24h Fees"
-          value={formatUsd(latest?.fees24h)}
-          animate={latest?.fees24h != null ? { value: latest.fees24h, format: "usd" } : undefined}
-        />
-        <StatTile
-          label="24h Revenue"
-          value={formatUsd(latest?.revenue24h)}
-          animate={latest?.revenue24h != null ? { value: latest.revenue24h, format: "usd" } : undefined}
+        <MetricRow
+          className="mt-6"
+          items={[
+            { label: "7D change", value: <ChangeBadge value={latest?.tvlChange7d} /> },
+            { label: "24H volume", value: formatUsd(latest?.volume24h) },
+            { label: "24H fees", value: formatUsd(latest?.fees24h) },
+            { label: "24H revenue", value: formatUsd(latest?.revenue24h) },
+          ]}
         />
       </div>
 
@@ -184,6 +180,12 @@ export default async function ProtocolDetailPage({ params }: { params: Promise<{
             <h2 className="mb-2 text-sm font-medium text-muted-foreground">Total value locked</h2>
             <RangedAreaChart data={tvlHistory} fetchEndpoint={historyEndpoint} valueField="tvl" />
           </Card>
+          {chainBreakdown.length > 0 && (
+            <Card className="mt-6 p-4">
+              <h2 className="mb-3 text-sm font-medium text-muted-foreground">TVL by chain</h2>
+              <ChainDistribution chains={chainBreakdown} />
+            </Card>
+          )}
           <OnchainVerificationCard verifications={verifications} />
           <AiSummaryCard
             slug={protocol.slug}

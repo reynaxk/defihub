@@ -99,17 +99,20 @@ export default async function YieldsPage({
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
-      <h1 className="text-2xl font-semibold tracking-tight">Yields</h1>
-      <p className="mt-1 text-muted-foreground">
-        {result.total === 0
-          ? "No pools match these filters"
-          : `Showing ${firstRow.toLocaleString("en-US")}–${lastRow.toLocaleString("en-US")} of ${result.total.toLocaleString("en-US")} pools with at least $10K TVL`}
-      </p>
-      <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
-        APY is a snapshot, not a guaranteed or historical return - it moves with pool activity and reward-token
-        prices, and very high APYs shown in amber/red usually reflect emissions or thin liquidity rather than
-        sustainable yield.
-      </p>
+      <div className="border-b border-border/60 pb-6">
+        <p className="text-xs font-medium tracking-[0.15em] text-muted-foreground uppercase">DeFi Markets</p>
+        <h1 className="mt-1.5 text-2xl font-semibold tracking-tight">Yields</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {result.total === 0
+            ? "No pools match these filters"
+            : `Showing ${firstRow.toLocaleString("en-US")}–${lastRow.toLocaleString("en-US")} of ${result.total.toLocaleString("en-US")} pools with at least $10K TVL`}
+        </p>
+        <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
+          APY is a snapshot, not a guaranteed or historical return - it moves with pool activity and reward-token
+          prices, and very high APYs shown in amber/red usually reflect emissions or thin liquidity rather than
+          sustainable yield.
+        </p>
+      </div>
 
       <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <YieldFilters chains={chains} categories={categories} />

@@ -63,6 +63,11 @@ describe("getClientIp", () => {
     expect(getClientIp(req)).toBe("203.0.113.5");
   });
 
+  it("skips a trailing empty entry from a trailing comma and returns the last real address", () => {
+    const req = new Request("http://localhost", { headers: { "x-forwarded-for": "203.0.113.5, " } });
+    expect(getClientIp(req)).toBe("203.0.113.5");
+  });
+
   it("falls back to unknown with no proxy headers", () => {
     const req = new Request("http://localhost");
     expect(getClientIp(req)).toBe("unknown");

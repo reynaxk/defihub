@@ -44,9 +44,15 @@ export function getClientIp(request: Request): string {
   // client-suppliable first entry would be.
   const forwardedFor = request.headers.get("x-forwarded-for");
   if (forwardedFor) {
+    // Scan from the end for the first non-empty entry, rather than only
+    // checking the last split segment - a trailing separator (e.g.
+    // "203.0.113.5, ", which some proxies do produce) makes the literal
+    // last segment an empty string after trimming, which would otherwise
+    // discard a perfectly valid address one position earlier.
     const parts = forwardedFor.split(",").map((p) => p.trim());
-    const last = parts[parts.length - 1];
-    if (last) return last;
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (parts[i]) return parts[i];
+    }
   }
 
   return "unknown";

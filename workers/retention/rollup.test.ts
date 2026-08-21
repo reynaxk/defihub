@@ -185,6 +185,43 @@ describe("rollupMetrics", () => {
     expect(rows).toHaveLength(2);
   });
 
+  it("reports recordsProcessed from actual deleted rows, unaffected by a concurrent insert into the same table", async () => {
+    const chainId = await makeChain();
+    createdChainIds.push(chainId);
+
+    // 3 rows in one old-tier day bucket - exactly 2 must be deleted (the
+    // latest survives). Known, exact expected count, independent of
+    // whatever else is happening in the table concurrently.
+    await db.insert(chainMetrics).values([
+      { chainId, timestamp: oldDayTimestamp(200, 2), tvl: "100.00" },
+      { chainId, timestamp: oldDayTimestamp(200, 10), tvl: "200.00" },
+      { chainId, timestamp: oldDayTimestamp(200, 18), tvl: "300.00" }, // latest - survives
+    ]);
+
+    // An independent raw connection (not the app's own pooled client,
+    // which caps at 1 connection outside production and so can't overlap
+    // with the rollup's own transaction) inserts a brand-new, recent row
+    // concurrently with the rollup running. Under the old before/after
+    // count-delta approach, this insert would land between the "before"
+    // and "after" SELECT COUNT(*) and mask exactly how many rows this run
+    // deleted (before=N, after=N+1-2=N-1, delta=1, not the real 2).
+    const concurrentConn = postgres(process.env.DATABASE_URL!, { max: 1, prepare: false });
+    try {
+      const [result] = await Promise.all([
+        rollupMetrics(),
+        concurrentConn`insert into chain_metrics (chain_id, "timestamp", tvl) values (${chainId}, now(), '999.00')`,
+      ]);
+
+      expect(result?.chainMetrics.deleted).toBe(2);
+    } finally {
+      await concurrentConn.end();
+    }
+
+    const rows = await db.select().from(chainMetrics).where(eq(chainMetrics.chainId, chainId));
+    // The 1 surviving old-tier row + the 1 concurrently-inserted recent row.
+    expect(rows).toHaveLength(2);
+  });
+
   // rollupMetrics() itself can't be exercised for genuine concurrency in
   // this test suite: the app's shared `db` client pools at most 1
   // connection outside production (lib/database/client.ts), so two

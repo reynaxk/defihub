@@ -260,11 +260,21 @@ export async function checkAlerts(): Promise<void> {
               // the next run's `fires && !alert.isFiring` check is true
               // again and retries it, instead of a failed send silently
               // being treated the same as a delivered one and never
-              // being retried.
+              // being retried. Must also count as a failure here, not
+              // just revert silently - without this, a resolved-false
+              // send (Resend's own application-level error handling,
+              // distinct from the rejected-promise case caught below)
+              // left the sync run reporting "success" with errorCount: 0
+              // even though an alert email was never delivered.
               await db
                 .update(alerts)
                 .set({ isFiring: false, lastTriggeredAt: alert.lastTriggeredAt })
                 .where(eq(alerts.id, alert.id));
+              failedCount++;
+              logger.warn("alert email delivery failed, will retry next run", {
+                component: "alerts",
+                operation: alert.id,
+              });
             }
           } catch (sendErr) {
             // sendEmail can also reject rather than resolve false (e.g. a

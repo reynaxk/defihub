@@ -60,4 +60,32 @@ describe("resolveDecimals", () => {
     expect(result.resolved.size).toBe(0);
     expect(result.failed).toEqual(["0xa", "0xb"]);
   });
+
+  // ERC-20 decimals() is a uint8 - none of these are a valid value, even
+  // though a bare `typeof result === "number"` check would have accepted
+  // every one of them.
+  it.each([
+    ["negative", -1],
+    ["fractional", 1.5],
+    ["NaN", NaN],
+    ["above the uint8 range", 256],
+  ])("treats a %s decimals value as a failed address, not a resolved one", async (_label, value) => {
+    const addresses = ["0xinvalid"];
+    const multicall = fakeMulticall([{ status: "success", result: value }]);
+    const result = await resolveDecimals(addresses, multicall);
+    expect(result.resolved.has("0xinvalid")).toBe(false);
+    expect(result.failed).toEqual(["0xinvalid"]);
+  });
+
+  it("still accepts the uint8 boundary values 0 and 255", async () => {
+    const addresses = ["0xzero", "0xmax"];
+    const multicall = fakeMulticall([
+      { status: "success", result: 0 },
+      { status: "success", result: 255 },
+    ]);
+    const result = await resolveDecimals(addresses, multicall);
+    expect(result.resolved.get("0xzero")).toBe(0);
+    expect(result.resolved.get("0xmax")).toBe(255);
+    expect(result.failed).toEqual([]);
+  });
 });

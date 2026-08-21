@@ -39,9 +39,9 @@ const MID_TIER_DAYS = 30;
 const OLD_TIER_DAYS = 180;
 
 export interface RollupStats {
-  chainMetrics: { before: number; after: number };
-  protocolMetrics: { before: number; after: number };
-  tokenPrices: { before: number; after: number };
+  chainMetrics: { before: number; after: number; deleted: number };
+  protocolMetrics: { before: number; after: number; deleted: number };
+  tokenPrices: { before: number; after: number; deleted: number };
 }
 
 export async function rollupMetrics(): Promise<RollupStats | null> {
@@ -60,11 +60,7 @@ export async function rollupMetrics(): Promise<RollupStats | null> {
         outcome: "partial" as const,
       };
     }
-    const totalRemoved =
-      stats.chainMetrics.before -
-      stats.chainMetrics.after +
-      (stats.protocolMetrics.before - stats.protocolMetrics.after) +
-      (stats.tokenPrices.before - stats.tokenPrices.after);
+    const totalRemoved = stats.chainMetrics.deleted + stats.protocolMetrics.deleted + stats.tokenPrices.deleted;
     return { result: stats, stats: { recordsProcessed: totalRemoved, metadata: { ...stats } } };
   });
 }
@@ -98,7 +94,7 @@ async function runRollup(): Promise<RollupStats | null> {
     };
 
     // chain_metrics: keep the latest row per (chain, day) beyond the old tier.
-    await tx.execute(sql`
+    const chainMetricsResult = await tx.execute(sql`
       delete from chain_metrics a using chain_metrics b
       where a.chain_id = b.chain_id
         and date_trunc('day', a.timestamp at time zone 'utc') = date_trunc('day', b.timestamp at time zone 'utc')
@@ -110,7 +106,7 @@ async function runRollup(): Promise<RollupStats | null> {
     // the bucket join needs IS NOT DISTINCT FROM rather than plain equality -
     // NULL = NULL is never true in SQL, which would otherwise treat every
     // pair of aggregate rows as belonging to different buckets.
-    await tx.execute(sql`
+    const protocolMetricsResult = await tx.execute(sql`
       delete from protocol_metrics a using protocol_metrics b
       where a.protocol_id = b.protocol_id
         and a.chain_id is not distinct from b.chain_id
@@ -122,7 +118,7 @@ async function runRollup(): Promise<RollupStats | null> {
     // token_prices, mid tier: keep the latest row per (token, hour) strictly
     // within the 30-180 day window. Bounded on both sides so this pass never
     // touches rows the daily tier below is responsible for.
-    await tx.execute(sql`
+    const tokenPricesMidTierResult = await tx.execute(sql`
       delete from token_prices a using token_prices b
       where a.token_id = b.token_id
         and date_trunc('hour', a.timestamp at time zone 'utc') = date_trunc('hour', b.timestamp at time zone 'utc')
@@ -134,7 +130,7 @@ async function runRollup(): Promise<RollupStats | null> {
     // token_prices, old tier: keep the latest row per (token, day) beyond 180
     // days - applies whether or not the mid tier already ran on these rows in
     // a prior invocation.
-    await tx.execute(sql`
+    const tokenPricesOldTierResult = await tx.execute(sql`
       delete from token_prices a using token_prices b
       where a.token_id = b.token_id
         and date_trunc('day', a.timestamp at time zone 'utc') = date_trunc('day', b.timestamp at time zone 'utc')
@@ -148,10 +144,31 @@ async function runRollup(): Promise<RollupStats | null> {
       tokenPrices: (await tx.select({ value: count() }).from(tokenPrices))[0]?.value ?? 0,
     };
 
+    // recordsProcessed (via `deleted` below) comes from each DELETE's own
+    // affected-row count (postgres.js attaches this as `.count` on the
+    // result of a non-SELECT statement), not from the before/after count
+    // deltas above - those deltas only hold under an isolation level that
+    // guarantees no concurrent writer touched these tables mid-transaction,
+    // which Postgres's default READ COMMITTED does not: chain/protocol/
+    // token sync workers write to these same tables without taking
+    // ROLLUP_ADVISORY_LOCK_KEY (that lock only ever needed to serialize
+    // against another rollup, not every writer), so a concurrent insert
+    // between the before/after counts could mask exactly how many rows
+    // this run itself removed. before/after are kept for observability
+    // (they still show the table's overall size trend), just no longer
+    // used to compute the reported count.
     const result: RollupStats = {
-      chainMetrics: { before: before.chainMetrics, after: after.chainMetrics },
-      protocolMetrics: { before: before.protocolMetrics, after: after.protocolMetrics },
-      tokenPrices: { before: before.tokenPrices, after: after.tokenPrices },
+      chainMetrics: { before: before.chainMetrics, after: after.chainMetrics, deleted: chainMetricsResult.count ?? 0 },
+      protocolMetrics: {
+        before: before.protocolMetrics,
+        after: after.protocolMetrics,
+        deleted: protocolMetricsResult.count ?? 0,
+      },
+      tokenPrices: {
+        before: before.tokenPrices,
+        after: after.tokenPrices,
+        deleted: (tokenPricesMidTierResult.count ?? 0) + (tokenPricesOldTierResult.count ?? 0),
+      },
     };
 
     return result;

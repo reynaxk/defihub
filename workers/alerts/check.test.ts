@@ -130,6 +130,47 @@ describe("checkAlerts", () => {
     expect(mockSendEmail).toHaveBeenCalledTimes(2);
   });
 
+  it("counts a resolved-false send as a failure and persists a partial sync run with errorCount 1", async () => {
+    const { id: userId } = await makeUser();
+    createdUserIds.push(userId);
+    const chain = await makeChainWithTvl(1_000_000);
+    createdChainIds.push(chain.id);
+
+    const [alert] = await db
+      .insert(alerts)
+      .values({
+        userId,
+        type: "chain_tvl",
+        target: chain.slug,
+        condition: "above",
+        threshold: "500000",
+        enabled: true,
+        isFiring: false,
+      })
+      .returning({ id: alerts.id });
+    createdAlertIds.push(alert.id);
+
+    mockEvaluateCondition.mockReturnValue(true);
+    mockSendEmail.mockResolvedValueOnce(false);
+
+    await checkAlerts();
+
+    // The claim reverts (already covered by the reject case above) - this
+    // test's own point is that the failure is actually counted, not just
+    // silently reverted.
+    const [row] = await db.select().from(alerts).where(eq(alerts.id, alert.id));
+    expect(row.isFiring).toBe(false);
+
+    const [run] = await db
+      .select()
+      .from(syncRuns)
+      .where(eq(syncRuns.worker, "alerts"))
+      .orderBy(desc(syncRuns.startedAt))
+      .limit(1);
+    expect(run.status).toBe("partial");
+    expect(run.errorCount).toBe(1);
+  });
+
   it("does not resend once an alert is already firing", async () => {
     const { id: userId } = await makeUser();
     createdUserIds.push(userId);

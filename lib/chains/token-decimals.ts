@@ -34,7 +34,22 @@ export async function resolveDecimals(
   const results = await multicall(addresses);
   for (let i = 0; i < addresses.length; i++) {
     const r = results[i];
-    if (r && r.status === "success" && typeof r.result === "number") {
+    // ERC-20 decimals() returns a uint8 - a bare `typeof === "number"`
+    // check accepts anything numeric, including negatives, fractions,
+    // NaN, Infinity, and values above 255, none of which are a valid
+    // uint8. workers/tokens/sync.ts persists whatever comes out of here
+    // straight into tokens.decimals, which every balance display then
+    // scales by - a malformed value here would corrupt that scaling (or
+    // fail the upsert outright for something like NaN/Infinity, which
+    // Postgres's numeric/integer columns reject).
+    if (
+      r &&
+      r.status === "success" &&
+      typeof r.result === "number" &&
+      Number.isInteger(r.result) &&
+      r.result >= 0 &&
+      r.result <= 255
+    ) {
       resolved.set(addresses[i], r.result);
     } else {
       failed.push(addresses[i]);

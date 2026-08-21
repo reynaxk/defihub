@@ -55,10 +55,12 @@
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  /* Signal teal - the one distinctive DeFiHub accent (tailwind teal-600,
-     picked for the ~4.6:1 contrast it holds against white with white
-     text on top, mirroring the weight the previous blue held here). */
-  --primary: #0d9488;
+  /* Signal teal - the one distinctive DeFiHub accent. tailwind teal-600
+     (#0d9488) was the first pick here, but it only holds ~3.75:1 contrast
+     with white text on top - measured directly (WCAG relative-luminance
+     formula against the actual hex values), not assumed, after CodeRabbit
+     flagged it - below the 4.5:1 AA text minimum. teal-700 clears ~5.5:1. */
+  --primary: #0f766e;
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
@@ -69,8 +71,16 @@
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
-  --ring: #5eead4;
-  --chart-1: #0d9488;
+  /* teal-300 (#5eead4) measured at only ~1.48:1 against white before the
+     ring-ring/50 opacity utility even applies - effectively invisible as a
+     keyboard focus indicator. A ring rendered at 50% opacity can only ever
+     reach so much contrast against a light background regardless of hue
+     (even pure black tops out around ~4:1 at 50%), so this needs to start
+     much darker than a typical accent tint - teal-950 measured at ~3.1:1
+     against white *after* blending at 50%, clearing the 3:1 WCAG
+     non-text-contrast minimum for focus indicators. */
+  --ring: #042f2e;
+  --chart-1: #0f766e;
   --chart-2: #6366f1;
   --chart-3: #16a34a;
   --chart-4: #d97706;

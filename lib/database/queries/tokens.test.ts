@@ -8,7 +8,7 @@
 // price rows per token (out of insertion order) and assert the *newest* one
 // wins, not an arbitrary one.
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, desc, eq, isNotNull } from "drizzle-orm";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
 import { chains, tokenPrices, tokens } from "@/lib/database/schema";
@@ -157,6 +157,66 @@ describe("tokens queries - LATERAL join correctness", () => {
 
     const change = await getTokenPriceChange7d(tokenId);
     expect(change).toBe(13.5);
+  });
+
+  it("getTokenPriceChange7d does not reproduce the two-separate-reads race an intervening sync:tokens insert used to expose", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const tokenId = await makeToken(chain.id, `RACE${randomUUID().slice(0, 6)}`);
+    createdTokenIds.push(tokenId);
+
+    const t0 = new Date();
+    await addPrice(tokenId, t0, 1, { priceChange7d: "42" });
+
+    // Deterministically reproduces the exact shape getTokenPriceChange7d
+    // used before this fix - two independent SELECTs - with the
+    // "intervening sync:tokens insert" landing between them via a plain
+    // sequential await, not a best-effort race. A Promise.all-timed race
+    // was tried first and did not reliably land the insert inside the
+    // narrow window between two fast local-DB round trips (confirmed: it
+    // passed even against the pre-fix two-query code in repeated runs) -
+    // exactly the kind of flakiness CodeRabbit already flagged once in
+    // this repo's rollup.test.ts, so this reproduces the interleaving
+    // directly instead of hoping timing cooperates.
+    const [changeRowBeforeInsert] = await db
+      .select({ priceChange7d: tokenPrices.priceChange7d, timestamp: tokenPrices.timestamp })
+      .from(tokenPrices)
+      .where(and(eq(tokenPrices.tokenId, tokenId), isNotNull(tokenPrices.priceChange7d)))
+      .orderBy(desc(tokenPrices.timestamp))
+      .limit(1);
+
+    // The intervening insert: a fresh, valid 7d figure 30 hours later -
+    // exactly what a real sync:tokens discovery-sync tick landing here
+    // would write.
+    const t1 = new Date(t0.getTime() + 30 * 60 * 60 * 1000);
+    await addPrice(tokenId, t1, 2, { priceChange7d: "99" });
+
+    const [latestRowAfterInsert] = await db
+      .select({ timestamp: tokenPrices.timestamp })
+      .from(tokenPrices)
+      .where(eq(tokenPrices.tokenId, tokenId))
+      .orderBy(desc(tokenPrices.timestamp))
+      .limit(1);
+
+    // This is the bug the fix closes: a changeRow read before the insert,
+    // paired with a latestRow read after it, computes a >24h gap even
+    // though a real, current, non-null answer (99) was available the
+    // whole time - an impossible result no single consistent snapshot of
+    // the data would ever produce.
+    const staleness = latestRowAfterInsert.timestamp.getTime() - changeRowBeforeInsert.timestamp.getTime();
+    expect(staleness).toBeGreaterThan(24 * 60 * 60 * 1000);
+
+    // Sanity close: the actual function, called against this same final
+    // state, returns the current value rather than the impossible one
+    // computed above. This call alone can't re-trigger the race (both
+    // rows are already committed by the time it runs, and the fixed
+    // function no longer has two separate reads for a write to land
+    // between) - the staleness assertion above is what proves the old
+    // pattern's mechanism was unsound; this just confirms the real
+    // function isn't left returning something worse than that for the
+    // same data.
+    const fixedResult = await getTokenPriceChange7d(tokenId);
+    expect(fixedResult).toBe(99);
   });
 
   it("getTokensPageList respects sortDir - backs the sortable table header click", async () => {

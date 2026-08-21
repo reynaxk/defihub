@@ -63,27 +63,50 @@ const PRICE_CHANGE_7D_FRESHNESS_MS = 24 * 60 * 60 * 1000;
 // "the last time this token happened to get a 7d figure, days ago" -
 // pairing an old 7d change with today's price would misrepresent it as a
 // current 7-day return.
+//
+// Both halves are read as one statement, not two separate round trips.
+// Under READ COMMITTED (Postgres's default, unchanged elsewhere in this
+// app - see lib/database/client.ts), each independent statement gets its
+// own fresh snapshot - a sync:tokens insert landing between two separate
+// SELECTs could shift what "the latest row" means between them, pairing a
+// changeRow read before the insert with a latestRow read after it, which
+// doesn't correspond to any single real point in time. A single SQL
+// statement (even with multiple sub-selects/joins inside it) always sees
+// one consistent snapshot for its entire execution, so composing both
+// lookups as one query - rather than reaching for an explicit
+// transaction, which this simple a read doesn't need - closes that gap.
 export async function getTokenPriceChange7d(tokenId: string): Promise<number | null> {
-  const [changeRow] = await db
-    .select({ priceChange7d: tokenPrices.priceChange7d, timestamp: tokenPrices.timestamp })
+  const changeRow = db
+    .select({ priceChange7d: tokenPrices.priceChange7d, changeTimestamp: tokenPrices.timestamp })
     .from(tokenPrices)
     .where(and(eq(tokenPrices.tokenId, tokenId), isNotNull(tokenPrices.priceChange7d)))
     .orderBy(desc(tokenPrices.timestamp))
-    .limit(1);
-  if (!changeRow?.priceChange7d) return null;
+    .limit(1)
+    .as("change_row");
 
-  const [latestRow] = await db
-    .select({ timestamp: tokenPrices.timestamp })
+  const latestRow = db
+    .select({ latestTimestamp: tokenPrices.timestamp })
     .from(tokenPrices)
     .where(eq(tokenPrices.tokenId, tokenId))
     .orderBy(desc(tokenPrices.timestamp))
-    .limit(1);
-  if (!latestRow) return null;
+    .limit(1)
+    .as("latest_row");
 
-  const staleness = latestRow.timestamp.getTime() - changeRow.timestamp.getTime();
+  const [row] = await db
+    .select({
+      priceChange7d: changeRow.priceChange7d,
+      changeTimestamp: changeRow.changeTimestamp,
+      latestTimestamp: latestRow.latestTimestamp,
+    })
+    .from(changeRow)
+    .innerJoin(latestRow, sql`true`);
+
+  if (!row?.priceChange7d) return null;
+
+  const staleness = row.latestTimestamp.getTime() - row.changeTimestamp.getTime();
   if (staleness > PRICE_CHANGE_7D_FRESHNESS_MS) return null;
 
-  return Number(changeRow.priceChange7d);
+  return Number(row.priceChange7d);
 }
 
 export interface TokenListItem {

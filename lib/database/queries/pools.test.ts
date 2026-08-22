@@ -7,7 +7,8 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
-import { chains, historicalObservations, pools } from "@/lib/database/schema";
+import { chains, historicalObservations, pools, type HistoricalObservationCalculationInput } from "@/lib/database/schema";
+import { computePoolTvl, type PoolTvlToken } from "@/lib/onchain/verify-pool";
 import { getPoolObservationCount, getPoolTvlHistory, getVerifiedPools } from "./pools";
 
 const PIVOT = new Date("2026-02-01T00:00:00.000Z");
@@ -105,6 +106,95 @@ describe("pool TVL query functions", () => {
       expect(row.blockNumber).toBe(18000000);
       expect(row.source).toBe("onchain-verification");
       expect(row.calculationVersion).toBe("pool-balance-sum-v1");
+    });
+
+    it("preserves a sub-cent value through insertion and read-back, never rounding it to $0.00", async () => {
+      // historical_observations.value is numeric(32,8) specifically so a
+      // real sub-cent TVL contribution survives - regression test for the
+      // bug where the same 2-decimal string written to onchain_verifications
+      // was also reused here, silently flooring anything under a cent to
+      // "0.00" before it ever reached this higher-precision column.
+      const { chainId, poolId } = await makeChainAndPool();
+      const subCentValue = 0.0000005;
+      await db.insert(historicalObservations).values([
+        {
+          chainId,
+          entityType: "pool",
+          entityId: poolId,
+          metric: "tvl_usd",
+          value: subCentValue.toFixed(8),
+          timestamp: PIVOT,
+          source: "onchain-verification",
+        },
+      ]);
+
+      const [row] = await getPoolTvlHistory(poolId, null);
+      expect(row.value).toBe(subCentValue);
+      expect(row.value).not.toBe(0);
+    });
+
+    it("round-trips block hash and price provenance, and the stored calculation inputs replay to the same value", async () => {
+      const { chainId, poolId } = await makeChainAndPool();
+
+      const calculationInputs: HistoricalObservationCalculationInput[] = [
+        { symbol: "USDC", coingeckoId: "usd-coin", decimals: 6, balanceRaw: "2500000000", priceUsd: 1.001 },
+        { symbol: "WETH", coingeckoId: "weth", decimals: 18, balanceRaw: "750000000000000000", priceUsd: 3200.5 },
+      ];
+      const priceRetrievedAt = new Date("2026-01-15T12:00:00.000Z");
+      const blockHash = "0x" + "ab".repeat(32);
+
+      await db.insert(historicalObservations).values([
+        {
+          chainId,
+          entityType: "pool",
+          entityId: poolId,
+          metric: "tvl_usd",
+          value: "4902.87500000",
+          timestamp: PIVOT,
+          blockNumber: "18000000",
+          blockHash,
+          priceSource: "coingecko",
+          priceRetrievedAt,
+          calculationInputs,
+          source: "onchain-verification",
+          calculationVersion: "pool-balance-sum-v1",
+        },
+      ]);
+
+      const [row] = await getPoolTvlHistory(poolId, null);
+      expect(row.blockHash).toBe(blockHash);
+      expect(row.priceSource).toBe("coingecko");
+      expect(row.priceRetrievedAt?.getTime()).toBe(priceRetrievedAt.getTime());
+      expect(row.calculationInputs).toEqual(calculationInputs);
+
+      // The actual replay: feed the round-tripped snapshot straight back
+      // into computePoolTvl and confirm it reproduces the stored value -
+      // proving these columns capture enough to redo the calculation, not
+      // just descriptive metadata.
+      const tokens: PoolTvlToken[] = row.calculationInputs!.map((i) => ({
+        symbol: i.symbol,
+        decimals: i.decimals,
+        coingeckoId: i.coingeckoId,
+      }));
+      const balances = row.calculationInputs!.map((i) => BigInt(i.balanceRaw));
+      const priceById = new Map(row.calculationInputs!.map((i) => [i.coingeckoId, i.priceUsd]));
+      const replayed = computePoolTvl(tokens, balances, priceById);
+
+      expect(replayed.ok).toBe(true);
+      expect(replayed.ok && replayed.tvlUsd).toBe(row.value);
+    });
+
+    it("leaves block hash, price provenance, and calculation inputs null for an observation that never had them, rather than fabricating values", async () => {
+      const { chainId, poolId } = await makeChainAndPool();
+      await db.insert(historicalObservations).values([
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "100", timestamp: PIVOT, source: "onchain-verification" },
+      ]);
+
+      const [row] = await getPoolTvlHistory(poolId, null);
+      expect(row.blockHash).toBeNull();
+      expect(row.priceSource).toBeNull();
+      expect(row.priceRetrievedAt).toBeNull();
+      expect(row.calculationInputs).toBeNull();
     });
   });
 

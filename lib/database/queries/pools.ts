@@ -1,6 +1,13 @@
-import { and, count, eq, gte } from "drizzle-orm";
+import { and, count, eq, gte, min } from "drizzle-orm";
 import { db } from "@/lib/database/client";
-import { chains, historicalObservations, onchainVerifications, pools, protocols } from "@/lib/database/schema";
+import {
+  chains,
+  historicalObservations,
+  onchainVerifications,
+  pools,
+  protocols,
+  type HistoricalObservationCalculationInput,
+} from "@/lib/database/schema";
 
 // Phase 4's "DeFiHub internal data interface" for pool TVL - see
 // docs/native-data.md for why this is scoped to pools specifically rather
@@ -67,6 +74,12 @@ export interface PoolTvlObservation {
   timestamp: Date;
   value: number;
   blockNumber: number | null;
+  // All four null for any observation recorded before this provenance was
+  // captured (or whose source never had it) - never backfilled or guessed.
+  blockHash: string | null;
+  priceSource: string | null;
+  priceRetrievedAt: Date | null;
+  calculationInputs: HistoricalObservationCalculationInput[] | null;
   source: string;
   calculationVersion: string | null;
 }
@@ -88,6 +101,10 @@ export async function getPoolTvlHistory(poolId: string, since: Date | null): Pro
       timestamp: historicalObservations.timestamp,
       value: historicalObservations.value,
       blockNumber: historicalObservations.blockNumber,
+      blockHash: historicalObservations.blockHash,
+      priceSource: historicalObservations.priceSource,
+      priceRetrievedAt: historicalObservations.priceRetrievedAt,
+      calculationInputs: historicalObservations.calculationInputs,
       source: historicalObservations.source,
       calculationVersion: historicalObservations.calculationVersion,
     })
@@ -99,6 +116,10 @@ export async function getPoolTvlHistory(poolId: string, since: Date | null): Pro
     timestamp: r.timestamp,
     value: Number(r.value),
     blockNumber: r.blockNumber != null ? Number(r.blockNumber) : null,
+    blockHash: r.blockHash,
+    priceSource: r.priceSource,
+    priceRetrievedAt: r.priceRetrievedAt,
+    calculationInputs: r.calculationInputs,
     source: r.source,
     calculationVersion: r.calculationVersion,
   }));
@@ -108,21 +129,21 @@ export async function getPoolTvlHistory(poolId: string, since: Date | null): Pro
 // UI to show "N observations tracked since <date>" (proving real history
 // accumulates over time) without pulling every row just to count them.
 export async function getPoolObservationCount(poolId: string): Promise<{ count: number; earliestAt: Date | null }> {
-  const conditions = and(
-    eq(historicalObservations.entityType, "pool"),
-    eq(historicalObservations.entityId, poolId),
-    eq(historicalObservations.metric, "tvl_usd"),
-  );
+  // A single aggregate query, not a count() and a separate ORDER BY/LIMIT 1
+  // query - COUNT and MIN over the same WHERE clause happen in one pass,
+  // and an aggregate query with no GROUP BY always returns exactly one row
+  // (count: 0, earliest: null for zero matches), never zero rows, so this
+  // stays correct for a pool with no observations without special-casing it.
+  const [row] = await db
+    .select({ count: count(), earliest: min(historicalObservations.timestamp) })
+    .from(historicalObservations)
+    .where(
+      and(
+        eq(historicalObservations.entityType, "pool"),
+        eq(historicalObservations.entityId, poolId),
+        eq(historicalObservations.metric, "tvl_usd"),
+      ),
+    );
 
-  const [countRow, earliestRow] = await Promise.all([
-    db.select({ value: count() }).from(historicalObservations).where(conditions),
-    db
-      .select({ timestamp: historicalObservations.timestamp })
-      .from(historicalObservations)
-      .where(conditions)
-      .orderBy(historicalObservations.timestamp)
-      .limit(1),
-  ]);
-
-  return { count: countRow[0]?.value ?? 0, earliestAt: earliestRow[0]?.timestamp ?? null };
+  return { count: row?.count ?? 0, earliestAt: row?.earliest ?? null };
 }

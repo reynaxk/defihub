@@ -10,6 +10,7 @@
 // same convention as lib/indexing/events.ts (BigInt(2000)), since this
 // project's TS target doesn't support BigInt literal syntax.
 import { describe, expect, it } from "vitest";
+import type { HistoricalObservationCalculationInput } from "@/lib/database/schema";
 import { computePoolTvl, type PoolTvlToken } from "./verify-pool";
 
 function pow10(exponent: number): bigint {
@@ -113,5 +114,104 @@ describe("computePoolTvl", () => {
   it("an empty token list is a valid $0 pool, not an error", () => {
     const result = computePoolTvl([], [], new Map());
     expect(result).toEqual({ ok: true, tvlUsd: 0 });
+  });
+
+  it("accumulates many small per-token contributions exactly, where naive sequential number addition would silently drop them", () => {
+    // Classic floating-point summation pitfall: once a running total is
+    // large enough, its ULP (gap between adjacent representable doubles)
+    // exceeds a small addend, so `runningTotal += small` rounds right
+    // back down to `runningTotal` - the addition is a complete no-op.
+    // At 1e16 the ULP is exactly 2, so adding 0.5 one token at a time
+    // (as the old `tvlUsd += usdValue` loop would) loses every single
+    // one of them. Accumulating in BigInt space first and converting to
+    // a number only once at the very end doesn't have this failure mode:
+    // the *sum* of the 100 small contributions (=$50) is comfortably
+    // above the ULP even though no single $0.50 contribution is.
+    const LARGE_CONTRIBUTION = 10_000_000_000_000_000; // 1e16, ULP = 2 here
+    const SMALL_CONTRIBUTION = 0.5; // below the ULP - lost if added directly to the running total
+    const SMALL_TOKEN_COUNT = 100; // exact sum = $50, well above the ULP
+
+    const tokens: PoolTvlToken[] = [
+      { symbol: "LARGE", decimals: 0, coingeckoId: "large" },
+      ...Array.from({ length: SMALL_TOKEN_COUNT }, (_, i) => ({
+        symbol: `S${i}`,
+        decimals: 0,
+        coingeckoId: `small-${i}`,
+      })),
+    ];
+    const balances = [BigInt(LARGE_CONTRIBUTION), ...Array.from({ length: SMALL_TOKEN_COUNT }, () => BigInt(1))];
+    const priceById = new Map<string, number>([
+      ["large", 1],
+      ...Array.from({ length: SMALL_TOKEN_COUNT }, (_, i) => [`small-${i}`, SMALL_CONTRIBUTION] as const),
+    ]);
+
+    const result = computePoolTvl(tokens, balances, priceById);
+    if (!result.ok) throw new Error("expected computation to succeed");
+
+    const expectedTotal = LARGE_CONTRIBUTION + SMALL_TOKEN_COUNT * SMALL_CONTRIBUTION;
+    expect(result.tvlUsd).toBe(expectedTotal);
+
+    // The old, since-removed implementation's shape - a plain JS-number
+    // running total updated one token at a time - proves this test
+    // actually distinguishes the fix from the bug: fed the exact same
+    // inputs in the exact same order, it silently drops all $50.
+    let legacyTotal = 0;
+    for (let i = 0; i < tokens.length; i++) {
+      const price = priceById.get(tokens[i].coingeckoId)!;
+      const normalizedAmount = Number(balances[i]) / 10 ** tokens[i].decimals;
+      legacyTotal += normalizedAmount * price;
+    }
+    expect(legacyTotal).toBe(LARGE_CONTRIBUTION);
+    expect(legacyTotal).not.toBe(expectedTotal);
+  });
+
+  it("preserves sub-cent precision through multiple tokens without floating-point drift", () => {
+    const tokens: PoolTvlToken[] = [
+      { symbol: "USDC", decimals: 6, coingeckoId: "usd-coin" },
+      { symbol: "WETH", decimals: 18, coingeckoId: "weth" },
+    ];
+    // Deliberately irregular (non-round) balances and prices - the kind of
+    // input where naive floating-point accumulation across two tokens
+    // tends to drift in the last few digits. Kept comfortably below
+    // Number.MAX_SAFE_INTEGER in raw form (unlike the large-balance test
+    // above) specifically so this test's own "expected" value, computed
+    // with plain JS arithmetic below, isn't itself corrupted by the same
+    // precision issue it's trying to check for.
+    const balances = [BigInt("123456789"), BigInt("4321098765432")];
+    const priceById = new Map([
+      ["usd-coin", 1.000123],
+      ["weth", 3123.456789],
+    ]);
+
+    const result = computePoolTvl(tokens, balances, priceById);
+    expect(result.ok).toBe(true);
+
+    const usdcValue = (123456789 / 10 ** 6) * 1.000123;
+    const wethValue = (4321098765432 / 10 ** 18) * 3123.456789;
+    expect(result.ok && result.tvlUsd).toBeCloseTo(usdcValue + wethValue, 8);
+  });
+
+  it("replays a persisted calculation-inputs snapshot and reproduces the exact same TVL", () => {
+    // historical_observations.calculation_inputs stores exactly this shape
+    // per token (see verifyPoolsOnChain, where it's built from the same
+    // tokens/balances/priceById this test reconstructs from). This is the
+    // concrete meaning of "replayable": these stored fields alone, fed
+    // straight back into computePoolTvl, must reproduce the persisted
+    // value - not just be plausible-looking metadata.
+    const storedInputs: HistoricalObservationCalculationInput[] = [
+      { symbol: "USDC", coingeckoId: "usd-coin", decimals: 6, balanceRaw: "1000000000", priceUsd: 1 },
+      { symbol: "WETH", coingeckoId: "weth", decimals: 18, balanceRaw: "500000000000000000", priceUsd: 3000 },
+    ];
+
+    const tokens: PoolTvlToken[] = storedInputs.map((i) => ({
+      symbol: i.symbol,
+      decimals: i.decimals,
+      coingeckoId: i.coingeckoId,
+    }));
+    const balances = storedInputs.map((i) => BigInt(i.balanceRaw));
+    const priceById = new Map(storedInputs.map((i) => [i.coingeckoId, i.priceUsd]));
+
+    const replayed = computePoolTvl(tokens, balances, priceById);
+    expect(replayed).toEqual({ ok: true, tvlUsd: 1000 + 1500 });
   });
 });

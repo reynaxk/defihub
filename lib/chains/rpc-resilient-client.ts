@@ -67,10 +67,12 @@ function sleep(ms: number): Promise<void> {
 // "send anything" escape hatch, so reusing this wrapper for a future write
 // path would require a conscious, separate decision rather than an
 // accidental one. getLogs was added alongside the event-ingestion
-// primitives (lib/indexing/events.ts) - still strictly a read.
+// primitives (lib/indexing/events.ts) - still strictly a read. getBlock was
+// added so a pinned block's hash (not just its number) can be captured for
+// provenance - see verify-pool.ts.
 export type ReadClient = Pick<
   PublicClient,
-  "readContract" | "multicall" | "getBalance" | "getBlockNumber" | "getLogs"
+  "readContract" | "multicall" | "getBalance" | "getBlockNumber" | "getLogs" | "getBlock"
 >;
 
 // Runs `fn` against each configured RPC provider for `chainSlug` in order

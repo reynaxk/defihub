@@ -86,6 +86,12 @@ export interface NormalizedPrice {
  * Token price data. Implemented by `coingecko.ts` today.
  */
 export interface PriceProvider {
+  // Stable identifier for the concrete provider instance (e.g.
+  // "coingecko") - lets a caller that needs to record where a price came
+  // from (historical_observations' provenance columns) do so honestly,
+  // without hardcoding a provider name that would silently go stale if
+  // this instance were ever swapped for a different implementation.
+  readonly name: string;
   getPrices(coingeckoIds: string[]): Promise<NormalizedPrice[]>;
 }
 

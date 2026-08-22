@@ -4,9 +4,14 @@ For nearly every metric in the app, DeFiHub doesn't compute TVL, fees,
 revenue, volume, or APY itself — it displays each provider's own numbers,
 normalized into a common shape. If a figure looks wrong, the question is
 usually "does DefiLlama/CoinGecko show the same number," not "did DeFiHub's
-math go wrong." The one deliberate exception is a small set of on-chain
-AMM pool TVL figures DeFiHub computes directly from a live RPC read — see
-[native-data.md](./native-data.md); those are clearly labeled as
+math go wrong." The deliberate exception is on-chain verification
+(`lib/onchain/`) — a small, hand-curated set of figures DeFiHub computes or
+reads directly from a live RPC call, in two forms: AMM pool TVL (summed
+directly from a pool contract's own ERC-20 balances) and single-figure
+protocol accounting (a value some protocols already expose as one
+dedicated view function on their own core contract, e.g. Lido's
+`getTotalPooledEther()`) — see [native-data.md](./native-data.md) for both.
+Neither replaces DefiLlama's protocol-wide TVL; both are clearly labeled as
 independently verified wherever they appear, never presented as if they
 were the provider's own number.
 

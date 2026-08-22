@@ -64,12 +64,19 @@ probably already exists.
    the config.
 2. **`historical_observations` table** — a generic, append-only time series
    (`chainId`, `entityType`, `entityId`, `metric`, `value`, `timestamp`,
-   `blockNumber`, `source`, `calculationVersion`). `onchain_verifications`
+   `blockNumber`, `blockHash`, `priceSource`, `priceRetrievedAt`,
+   `calculationInputs`, `source`, `calculationVersion`). `onchain_verifications`
    (pre-existing) stays as the fast "latest value" lookup the protocol
    page's `OnchainVerificationCard` already reads — a single upserted row
    per pool, no history. `historical_observations` is the durable history
    that upsert was previously discarding on every overwrite.
    `verifyAllPools()` now writes to both on every successful verification.
+   `onchain_verifications.tvl_usd` stays fixed at its existing 2-decimal
+   contract; `historical_observations.value` (`numeric(32,8)`) is rounded
+   independently from the same underlying figure, so a real sub-cent pool
+   TVL contribution doesn't get floored to `$0.00` before it ever reaches
+   the higher-precision column. See [Provenance & replay](#provenance--replay)
+   below for the four new columns.
 3. **`computePoolTvl`** (`lib/onchain/verify-pool.ts`) — the actual
    "balance → normalized amount → USD value → pool TVL" math, extracted
    into a pure, directly-testable function (see
@@ -83,7 +90,7 @@ probably already exists.
 
 ## Canonical data model
 
-```
+```text
 chains ──┬──< pools >──── protocols (optional)
          │      │
          │      └──< pool_tokens
@@ -104,7 +111,10 @@ chains ──┬──< pools >──── protocols (optional)
   needing a new history table. `entityType` + `entityId` is a plain pair,
   not a polymorphic foreign key (Postgres has no clean native support for
   that) — a consumer that knows `entityType === "pool"` joins back to
-  `pools` itself.
+  `pools` itself. `blockHash`, `priceSource`, `priceRetrievedAt`, and
+  `calculationInputs` are all nullable — real for every row written by the
+  current `verifyAllPools()` flow, `null` for anything recorded before
+  those columns existed. Nothing is ever backfilled into them.
 - **No separate `contracts` table.** `pools.address` / `pool_tokens.address`
   are plain address strings. A generic contract registry (ABI storage,
   multi-purpose tracking) is a reasonable next step once there's a second
@@ -114,7 +124,7 @@ chains ──┬──< pools >──── protocols (optional)
 
 ## Native TVL calculation
 
-```
+```text
 Pool contract's own ERC-20 balanceOf() for each held token   [on-chain, native]
         × (10 ** -decimals)                                   [normalization]
         × USD price                                           [external input - CoinGecko]
@@ -161,7 +171,7 @@ coverage grows.
 
 ## Price provider abstraction
 
-```
+```text
 PriceProvider (lib/providers/types.ts)
  └── implemented today by CoinGeckoProvider (lib/providers/coingecko.ts)
 ```
@@ -178,6 +188,50 @@ robust enough to trust over a free aggregator API is a substantially
 harder problem than reading a contract's own token balance, and out of
 scope for a foundation phase (see the spec's own "do not build a
 decentralized oracle network").
+
+## Provenance & replay
+
+Every successful `verifyAllPools()` observation now carries enough to
+answer "what exactly produced this number, and can it be reproduced?"
+without guessing:
+
+- **`blockHash`** — the pinned block's own hash, not just its number,
+  captured via `client.getBlock({ blockNumber })` in the same
+  `withResilientClient` call (and against the same provider) as the
+  multicall it's paired with. A block *number* alone doesn't identify
+  which chain history it belonged to if that height was later reorged onto
+  a different canonical block; the hash does.
+- **`priceSource`** — the concrete `PriceProvider`'s own `name` (e.g.
+  `"coingecko"`), read from the provider instance itself
+  (`lib/providers/types.ts`'s `PriceProvider.name`) rather than
+  hardcoded — stays correct automatically if the constructed provider is
+  ever swapped.
+- **`priceRetrievedAt`** — one timestamp captured the moment
+  `priceProvider.getPrices()` actually returns, shared by every pool in
+  that run (matching `historical_observations.timestamp`'s own
+  one-timestamp-per-run convention).
+- **`calculationInputs`** — the exact per-token snapshot `computePoolTvl`
+  used: `symbol`, `coingeckoId`, `decimals`, `balanceRaw` (the raw on-chain
+  integer, as a string), and `priceUsd`. This is what makes an observation
+  *replayable*: feeding these fields straight back into `computePoolTvl`
+  reproduces the stored `value` exactly, not just approximately — see
+  `verify-pool.test.ts`'s "replays a persisted calculation-inputs
+  snapshot" test and `lib/database/queries/pools.test.ts`'s DB round-trip
+  version of the same check.
+
+**Reorg detection.** `lib/onchain/reorg.ts`'s `checkBlockHashStillCanonical`
+compares a stored `blockHash` against what that same block number resolves
+to right now, via an injected reader (so it's unit-testable without a live
+RPC call — see `reorg.test.ts`). It returns one of three states, not a
+boolean — `"confirmed"`, `"reorged"`, or `"unknown"` (a transient read
+failure is never reported as a confirmed reorg). `readBlockHashOnChain` is
+the real, RPC-backed reader for production use. **Not yet wired into the
+verification cron or any scheduled check** — it exists as a tested,
+ready-to-use primitive, consistent with this codebase's "primitives first,
+one concrete example, no speculative scheduling" pattern elsewhere (e.g.
+`lib/indexing/events.ts`). Actually re-checking historical observations on
+a schedule is a reasonable next step, not something this change invents a
+cron for.
 
 ## Historical TVL bug (audit, root cause, fix)
 
@@ -268,6 +322,9 @@ being treated as done.
 - **Reorg safety:** every on-chain read in `verify-pool.ts` pins to
   `head - confirmationsFor(chainSlug)`, not the raw chain head, using the
   pre-existing per-chain confirmation depths in `lib/chains/confirmations.ts`.
+  Each observation also persists the pinned block's hash (not just its
+  number), and `lib/onchain/reorg.ts` can check whether that hash is still
+  canonical after the fact — see [Provenance & replay](#provenance--replay).
 - **Never-fabricated values:** a failed balance read or missing price fails
   that pool's whole computation (`computePoolTvl` returns an explicit
   error) rather than substituting zero or a guessed price; `pool_tokens.decimals`
@@ -338,3 +395,7 @@ happens when a shape gets force-fit into the wrong category (a
   single contract balance or a single accounting call) remain explicitly
   out of scope — see `lib/onchain/config.ts`'s own category boundary
   discussion.
+- `checkBlockHashStillCanonical` (see [Provenance & replay](#provenance--replay))
+  is a tested, standalone utility, not an automated check — nothing
+  currently re-verifies an old observation's pinned block against the
+  chain's current state on a schedule.

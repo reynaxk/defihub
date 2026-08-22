@@ -365,6 +365,19 @@ export const poolTokens = pgTable(
 // pick which one (currently only "pool", referencing pools.id).
 // ---------------------------------------------------------------------------
 
+// The per-token snapshot an on-chain calculation actually used - enough to
+// mechanically redo the same calculation later (e.g. computePoolTvl) and
+// confirm it reproduces `value`, without needing anything not already
+// captured at calculation time. Never populated with placeholder/derived
+// values for a token whose real balance or price wasn't actually read.
+export interface HistoricalObservationCalculationInput {
+  symbol: string;
+  coingeckoId: string;
+  decimals: number;
+  balanceRaw: string; // exact on-chain integer balance, as a string (too large for a JS number in general)
+  priceUsd: number;
+}
+
 export const historicalObservations = pgTable(
   "historical_observations",
   {
@@ -380,6 +393,20 @@ export const historicalObservations = pgTable(
     value: numeric("value", { precision: 32, scale: 8 }).notNull(),
     timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
     blockNumber: numeric("block_number", { precision: 20, scale: 0 }),
+    // The pinned block's own hash, not just its number - a block number
+    // alone doesn't identify *which* chain history it belonged to if that
+    // height was later reorged onto a different canonical block. Null for
+    // any observation whose source never had a block to pin (or predates
+    // this column) - never backfilled or guessed.
+    blockHash: varchar("block_hash", { length: 128 }),
+    // Which price provider produced the price(s) baked into `value`, and
+    // when they were fetched - both null for an observation with no
+    // external price input (or that predates this column). Together with
+    // calculationInputs below, this is what makes a native calculation
+    // replayable: the exact inputs, and where/when they came from.
+    priceSource: varchar("price_source", { length: 64 }),
+    priceRetrievedAt: timestamp("price_retrieved_at", { withTimezone: true }),
+    calculationInputs: jsonb("calculation_inputs").$type<HistoricalObservationCalculationInput[]>(),
     // e.g. "onchain-verification" - which subsystem computed this, for the
     // native-vs-external provenance distinction (never label externally-
     // sourced data as DeFiHub-native, or vice versa).

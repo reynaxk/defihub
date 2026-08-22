@@ -12,6 +12,9 @@ export function RangedAreaChart({
   defaultRange = "30d",
   fetchEndpoint,
   valueField,
+  range: controlledRange,
+  onRangeChange,
+  showRangePicker = true,
 }: {
   data: TvlPoint[];
   height?: number;
@@ -30,8 +33,25 @@ export function RangedAreaChart({
   // routes return the full metrics row, not a pre-mapped {timestamp,value}
   // point.
   valueField?: string;
+  // Optional controlled mode - omitted, this behaves exactly as before
+  // (its own internal range state). Passed (e.g. by a synchronized
+  // multi-chart comparison view driving several charts from one shared
+  // control), the chart defers to the caller's state instead.
+  range?: ChartRangeKey;
+  onRangeChange?: (range: ChartRangeKey) => void;
+  // Hides this instance's own picker UI - for a controlled chart whose
+  // range is already being chosen by one shared external control.
+  showRangePicker?: boolean;
 }) {
-  const [range, setRange] = useState<ChartRangeKey>(defaultRange);
+  const [internalRange, setInternalRange] = useState<ChartRangeKey>(defaultRange);
+  const range = controlledRange ?? internalRange;
+  const setRange = onRangeChange ?? setInternalRange;
+  // A controlled `range` without `onRangeChange` is a caller mistake: clicks
+  // would update the unused `internalRange` while `range` (pinned to
+  // `controlledRange`) never changes, so the picker would look interactive
+  // but silently do nothing. Hide it in that case instead - matches
+  // `showRangePicker={false}`'s own read-only-controlled usage.
+  const isReadOnlyControlled = controlledRange !== undefined && onRangeChange === undefined;
   // Tracks which range `fetchedData` was fetched for, rather than resetting
   // it to null when the user switches back to `defaultRange` - avoids
   // calling setState synchronously on that early-return path (flagged by
@@ -139,24 +159,26 @@ export function RangedAreaChart({
 
   return (
     <div>
-      <div role="group" aria-label="Chart time range" className="mb-3 flex items-center justify-end gap-1">
-        {CHART_RANGES.map((r) => (
-          <button
-            key={r.key}
-            type="button"
-            aria-pressed={range === r.key}
-            onClick={() => setRange(r.key)}
-            className={cn(
-              "rounded-md px-2 py-1 text-xs font-medium transition-colors duration-150",
-              range === r.key
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground",
-            )}
-          >
-            {r.label}
-          </button>
-        ))}
-      </div>
+      {showRangePicker && !isReadOnlyControlled && (
+        <div role="group" aria-label="Chart time range" className="mb-3 flex items-center justify-end gap-1">
+          {CHART_RANGES.map((r) => (
+            <button
+              key={r.key}
+              type="button"
+              aria-pressed={range === r.key}
+              onClick={() => setRange(r.key)}
+              className={cn(
+                "rounded-md px-2 py-1 text-xs font-medium transition-colors duration-150",
+                range === r.key
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+      )}
       {fetchError && (
         <p className="mb-2 flex items-center justify-end gap-2 text-right text-xs text-muted-foreground">
           Couldn&apos;t load this range.

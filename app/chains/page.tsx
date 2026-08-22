@@ -1,9 +1,44 @@
 import type { Metadata } from "next";
+import { unstable_cache } from "next/cache";
 import { ChainsTable } from "@/components/chains/chains-table";
+import { ChainComparisonChart } from "@/components/chains/chain-comparison";
 import { ExportCsvButton } from "@/components/shared/export-csv-button";
-import { getChainProtocolCounts, getChainSparklines, getTopChains } from "@/lib/database/queries/chains";
+import { getChainHistory, getChainProtocolCounts, getChainSparklines, getTopChains } from "@/lib/database/queries/chains";
 import { getWatchedChainIds } from "@/lib/database/queries/watchlist";
 import { auth } from "@/lib/auth/config";
+
+// Matches RangedAreaChart's default 30d range plus its own lookback margin
+// (see the identical constant in queries/chains.ts) - the comparison charts
+// default to 30d too, so this covers that render without a fetch.
+const COMPARISON_HISTORY_DAYS = 35;
+// A representative, well-known spread across L1s and L2s - not a ranking
+// claim. Falls back gracefully (fewer tiles, or the section omitted
+// entirely) if any of these ever isn't tracked, rather than guessing at a
+// replacement.
+const COMPARISON_CHAIN_SLUGS = ["ethereum", "solana", "arbitrum", "base"];
+const COMPARISON_CACHE_REVALIDATE_SECONDS = 300;
+
+// This page calls auth() and reads searchParams, which makes the whole
+// route dynamic in Next.js 16 - `export const revalidate` below has no
+// effect on it, so without this, the comparison charts' history queries
+// (public, session-independent data) would re-run on every single request.
+// unstable_cache keys on its arguments, so `since` is bucketed to the same
+// revalidate window instead of a fresh Date.now() every call - otherwise
+// every request would compute an ever-so-slightly newer cutoff and never
+// hit the cache at all. `next/cache`'s cache scope also can't see
+// headers/cookies (per its own docs) - this only takes chain ids + a
+// bucketed timestamp as arguments, no auth/session data.
+function comparisonSinceBucketed(days: number): Date {
+  const bucketMs = COMPARISON_CACHE_REVALIDATE_SECONDS * 1000;
+  const bucketedNow = Math.floor(Date.now() / bucketMs) * bucketMs;
+  return new Date(bucketedNow - days * 24 * 60 * 60 * 1000);
+}
+
+const getCachedComparisonHistories = unstable_cache(
+  async (chainIds: string[], sinceMs: number) => Promise.all(chainIds.map((id) => getChainHistory(id, new Date(sinceMs)))),
+  ["chain-comparison-histories"],
+  { revalidate: COMPARISON_CACHE_REVALIDATE_SECONDS },
+);
 
 export const metadata: Metadata = {
   title: "Chains",
@@ -55,6 +90,23 @@ export default async function ChainsPage({
     getChainSparklines(chains.map((c) => c.id)),
   ]);
 
+  const comparisonChains = COMPARISON_CHAIN_SLUGS.map((slug) => chains.find((c) => c.slug === slug)).filter(
+    (c): c is (typeof chains)[number] => c != null,
+  );
+  const comparisonSince = comparisonSinceBucketed(COMPARISON_HISTORY_DAYS);
+  const comparisonHistories = await getCachedComparisonHistories(
+    comparisonChains.map((c) => c.id),
+    comparisonSince.getTime(),
+  );
+  const comparisonEntries = comparisonChains.map((c, i) => ({
+    slug: c.slug,
+    name: c.name,
+    logoUrl: c.logoUrl,
+    tvl: c.tvl,
+    change24h: c.change24h,
+    history: comparisonHistories[i].map((h) => ({ timestamp: h.timestamp.toISOString(), value: h.tvl })),
+  }));
+
   function buildSortHref(sortKey: string, dir: "asc" | "desc") {
     const query = new URLSearchParams();
     if (sortKey !== "tvl") query.set("sort", sortKey);
@@ -73,7 +125,17 @@ export default async function ChainsPage({
         </div>
         <ExportCsvButton endpoint="/api/export/chains" />
       </div>
-      <div className="mt-6">
+
+      {comparisonEntries.length >= 2 && (
+        <div className="mt-6">
+          <h2 className="mb-3 text-xs font-medium tracking-widest text-muted-foreground uppercase">
+            Chain comparison
+          </h2>
+          <ChainComparisonChart chains={comparisonEntries} />
+        </div>
+      )}
+
+      <div className="mt-8">
         <ChainsTable
           chains={sorted}
           isSignedIn={Boolean(session?.user)}

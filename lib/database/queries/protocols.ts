@@ -64,6 +64,12 @@ export type ProtocolSort = "tvl" | "change1d" | "change7d" | "fees" | "revenue" 
 
 export interface ProtocolFilters {
   category?: string;
+  // Distinct from `category` (a single exact match, driven by the
+  // /protocols page's own filter dropdown) - lets a caller match any of
+  // several real DefiLlama categories at once, e.g. the bridges page
+  // combining "Bridge"/"Canonical Bridge"/"Cross Chain Bridge"/"Bridge
+  // Aggregator" into one honest "bridge protocols" list.
+  categories?: string[];
   chainSlug?: string;
   search?: string;
   sortBy?: ProtocolSort;
@@ -102,6 +108,7 @@ export async function getProtocolsList(filters: ProtocolFilters = {}): Promise<P
 
   const conditions = [isNull(protocolMetrics.chainId)];
   if (filters.category) conditions.push(eq(protocols.category, filters.category));
+  if (filters.categories && filters.categories.length > 0) conditions.push(inArray(protocols.category, filters.categories));
   if (filters.search) conditions.push(ilike(protocols.name, `%${escapeLikePattern(filters.search)}%`));
 
   let itemsQuery = db

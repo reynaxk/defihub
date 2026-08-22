@@ -30,8 +30,8 @@ export const NAV_LINKS: NavLink[] = [
   { href: "/chains", label: "Chains" },
   { href: "/tokens", label: "Tokens" },
   { href: "/yields", label: "Yields" },
-  { href: "/stablecoins", label: "Stablecoins", soon: true },
-  { href: "/bridges", label: "Bridges", soon: true },
+  { href: "/stablecoins", label: "Stablecoins" },
+  { href: "/bridges", label: "Bridges" },
   { href: "/research", label: "Research" },
   { href: "/trade", label: "Trade", soon: true },
 ];

@@ -6,16 +6,10 @@ import { EntityLogo } from "@/components/shared/entity-logo";
 import { WatchIconButton } from "@/components/shared/watch-icon-button";
 import { cn } from "@/lib/utils";
 import { formatApy, formatUsd } from "@/lib/format";
+import { CAUTION_APY, HIGH_RISK_APY } from "@/lib/yields/risk-thresholds";
 import type { getYieldPools } from "@/lib/database/queries/yields";
 
 type YieldPool = Awaited<ReturnType<typeof getYieldPools>>[number];
-
-// Not a judgment about whether a given pool is legitimate - many high APYs
-// are real, just typically driven by reward-token emissions or thin
-// liquidity rather than organic yield. The threshold only decides when to
-// surface that context, not to hide or flag the pool as bad.
-const CAUTION_APY = 100;
-const HIGH_RISK_APY = 1000;
 
 function ApyCell({ apy }: { apy: number | null }) {
   if (apy == null) return <span className="text-muted-foreground">—</span>;

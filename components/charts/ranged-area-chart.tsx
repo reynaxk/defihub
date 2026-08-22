@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import { CHART_RANGES, type ChartRangeKey } from "@/lib/charts/ranges";
+import { computeChartDisplayState } from "@/lib/charts/chart-display-state";
 import { TvlAreaChart, type ChartValueKind, type TvlPoint } from "./tvl-area-chart";
 
 export function RangedAreaChart({
@@ -107,10 +108,13 @@ export function RangedAreaChart({
         setErroredRange(null);
       })
       .catch(() => {
-        // Deliberately does not touch fetchedData/fetchedRange - the chart
-        // keeps showing the last known-good data (falls back to `data`
-        // below) instead of going blank on a transient network error, and
-        // the retry control re-runs this same effect for the same range.
+        // Deliberately does not touch fetchedData/fetchedRange - a retry
+        // (or switching to a range that already loaded successfully) must
+        // still be able to fall back to that still-good cached data.
+        // computeChartDisplayState is what actually decides what's shown
+        // for the *current* range - see its doc comment for why a fetch
+        // error there renders an explicit failure state, not silently
+        // reused data from a different range.
         if (!cancelled) setErroredRange(range);
       });
     return () => {
@@ -118,42 +122,10 @@ export function RangedAreaChart({
     };
   }, [fetchEndpoint, range, defaultRange, valueField, retryToken]);
 
-  const { filtered, isPartial } = useMemo(() => {
-    if (fetchEndpoint) {
-      const activeData = fetchedRange === range && fetchedData ? fetchedData : data;
-      if (fetchedRange === range && fetchedData) {
-        // Bounded server-side to exactly the selected range already.
-        // isPartial comes from the cutoff the server actually applied, not
-        // recomputed from the returned data's own latest timestamp.
-        if (fetchedSince == null || activeData.length === 0) return { filtered: activeData, isPartial: false };
-        const cutoff = new Date(fetchedSince).getTime();
-        const earliestTime = Math.min(...activeData.map((d) => new Date(d.timestamp).getTime()));
-        return { filtered: activeData, isPartial: earliestTime > cutoff };
-      }
-      // Not yet fetched for this range (still pending, or the fetch
-      // failed) - showing the last known-good data rather than guessing at
-      // partial-ness for a range that hasn't actually loaded.
-      return { filtered: activeData, isPartial: false };
-    }
-
-    const active = CHART_RANGES.find((r) => r.key === range);
-    if (!active || active.days == null || data.length === 0) return { filtered: data, isPartial: false };
-    // Anchored to the data's own latest point, not wall-clock time - if the
-    // last sync is a few hours stale, "24H" should still include it instead
-    // of excluding it because Date.now() has already moved past its cutoff.
-    const timestamps = data.map((d) => new Date(d.timestamp).getTime());
-    const latestTime = Math.max(...timestamps);
-    const earliestTime = Math.min(...timestamps);
-    const cutoff = latestTime - active.days * 24 * 60 * 60 * 1000;
-    const filtered = data.filter((d) => new Date(d.timestamp).getTime() >= cutoff);
-    // True when the requested window reaches further back than any data
-    // actually available - i.e. this isn't a gap in an otherwise-full
-    // range, history genuinely doesn't go back that far yet. Silently
-    // showing fewer days than the button implies without saying so reads
-    // as a data bug rather than the expected "still early" state it is.
-    const isPartial = earliestTime > cutoff;
-    return { filtered, isPartial };
-  }, [data, range, fetchEndpoint, fetchedData, fetchedRange, fetchedSince]);
+  const { filtered, isPartial, showError } = useMemo(
+    () => computeChartDisplayState({ fetchEndpoint, range, data, fetchedData, fetchedRange, fetchedSince, fetchError }),
+    [data, range, fetchEndpoint, fetchedData, fetchedRange, fetchedSince, fetchError],
+  );
 
   const activeLabel = CHART_RANGES.find((r) => r.key === range)?.label;
 
@@ -179,9 +151,17 @@ export function RangedAreaChart({
           ))}
         </div>
       )}
-      {fetchError && (
-        <p className="mb-2 flex items-center justify-end gap-2 text-right text-xs text-muted-foreground">
-          Couldn&apos;t load this range.
+      {showError ? (
+        // Replaces the plot entirely rather than sitting as a small caption
+        // above a different range's data - see computeChartDisplayState's
+        // doc comment for the bug this fixes (a failed fetch used to leave
+        // the *previous* range's chart on screen under the newly-selected
+        // range's button, silently misrepresenting which period it covers).
+        <div
+          className="flex flex-col items-center justify-center gap-2 text-sm text-muted-foreground"
+          style={{ height: height ?? 280 }}
+        >
+          <p>Couldn&apos;t load this range.</p>
           <button
             type="button"
             onClick={() => setRetryToken((n) => n + 1)}
@@ -189,16 +169,19 @@ export function RangedAreaChart({
           >
             Retry
           </button>
-        </p>
+        </div>
+      ) : (
+        <>
+          {isPartial && (
+            <p className="mb-2 text-right text-xs text-muted-foreground">
+              Showing all available history — not enough data yet for the full {activeLabel} range.
+            </p>
+          )}
+          <div className={cn(isPending && "motion-safe:opacity-60 motion-safe:transition-opacity")}>
+            <TvlAreaChart data={filtered} height={height} valueKind={valueKind} />
+          </div>
+        </>
       )}
-      {!fetchError && isPartial && (
-        <p className="mb-2 text-right text-xs text-muted-foreground">
-          Showing all available history — not enough data yet for the full {activeLabel} range.
-        </p>
-      )}
-      <div className={cn(isPending && "motion-safe:opacity-60 motion-safe:transition-opacity")}>
-        <TvlAreaChart data={filtered} height={height} valueKind={valueKind} />
-      </div>
     </div>
   );
 }

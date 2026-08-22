@@ -6,9 +6,13 @@ import { isChartRangeKey, sinceForRange } from "@/lib/charts/ranges";
 // Internal, app-only endpoint (not part of the documented /api/v1/* public
 // API) - powers RangedAreaChart's range switcher on the protocol detail
 // page's TVL/Fees/Revenue/Volume tabs. One response carries every metric so
-// switching tabs never needs a second request. Generous limit since a user
-// clicking through several tabs x ranges in quick succession is normal use.
-const HISTORY_LIMIT = { limit: 60, windowMs: 60 * 1000 };
+// switching tabs never needs a second request. 180/min (raised from 60
+// during the Phase 4 historical-TVL audit): 60/min was not actually
+// generous enough - confirmed live that browsing a handful of protocol
+// pages and switching ranges/tabs in one session can exhaust it, and a
+// fetch failure here is exactly the trigger for the "chart shows the
+// wrong range's data" bug fixed in computeChartDisplayState.
+const HISTORY_LIMIT = { limit: 180, windowMs: 60 * 1000 };
 
 export async function GET(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const ip = getClientIp(request);

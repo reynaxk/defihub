@@ -71,7 +71,12 @@ export default async function TokenDetailPage({
     // allocation data this app doesn't have), just which real pools
     // actually involve this token. Sorted by TVL (see
     // RELEVANT_POOLS_DISPLAY_LIMIT above) rather than the default APY sort.
-    getYieldPools({ underlyingTokenAddress: token.address, sortBy: "tvl" }),
+    // Scoped to the token's resolved chain (`chain.slug`, not the raw
+    // `?chain=` param, so it's correct even when the URL omits it) - a
+    // contract address is only unique per-chain (see getTokenByAddress's
+    // own comment), so without this a pool on an unrelated chain that
+    // happens to reuse the same address would show up as "relevant".
+    getYieldPools({ underlyingTokenAddress: token.address, chainSlug: chain.slug, sortBy: "tvl" }),
   ]);
   const displayedPools = relevantPools.slice(0, RELEVANT_POOLS_DISPLAY_LIMIT);
   const watchedPoolIds = await getWatchedPoolIds(

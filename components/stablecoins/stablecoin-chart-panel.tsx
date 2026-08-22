@@ -5,15 +5,16 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RangedAreaChart } from "@/components/charts/ranged-area-chart";
 import type { StablecoinListItem } from "@/lib/database/queries/stablecoins";
 
-export interface StablecoinSupplyHistory {
+export interface StablecoinMarketCapHistory {
   symbol: string;
   data: { timestamp: string; value: number | null }[];
 }
 
 // Reuses the exact per-token history route/chart already proven on the
-// token detail page (fetchEndpoint + valueField="marketCap") - a
-// stablecoin's marketCap *is* its circulating supply, so no new API or
-// chart primitive is needed to show "supply history". `histories` carries
+// token detail page (fetchEndpoint + valueField="marketCap") - this shows
+// market cap, not circulating supply (the two only agree while an asset
+// holds its $1 peg exactly, and this app has no circulating-supply data
+// source), so no new API or chart primitive is needed. `histories` carries
 // each symbol's real server-fetched default-range data - RangedAreaChart
 // only calls fetchEndpoint when the user switches *away* from the default
 // range, so the initially-rendered range still needs real data passed in
@@ -23,7 +24,7 @@ export function StablecoinChartPanel({
   histories,
 }: {
   stablecoins: StablecoinListItem[];
-  histories: StablecoinSupplyHistory[];
+  histories: StablecoinMarketCapHistory[];
 }) {
   const [symbol, setSymbol] = useState(stablecoins[0]?.symbol);
   if (stablecoins.length === 0) return null;

@@ -8,12 +8,30 @@ import { latestPriceLateral } from "./tokens";
 // through the ordinary token-discovery pipeline, since they're top-market-
 // cap assets on every chain. Confirmed live against the real database
 // before building this: USDT/USDC/DAI/USDS/USDe/TUSD/FDUSD/PYUSD are all
-// already present with real price/market-cap history. Curated by symbol
-// rather than a stored "is stablecoin" flag, because `tokens` has no such
-// column - this list is deliberately small and named, not a heuristic
-// (e.g. "price near $1"), so it can't misclassify a depegging or volatile
-// asset as a stablecoin.
-export const KNOWN_STABLECOIN_SYMBOLS = ["USDT", "USDC", "DAI", "USDS", "USDE", "TUSD", "FDUSD", "PYUSD"] as const;
+// already present with real price/market-cap history.
+//
+// Identified by CoinGecko id, not by ticker symbol: a symbol like "USDT" is
+// just a label a token's own contract metadata reports and isn't guaranteed
+// unique - an unrelated or fake token that the discovery pipeline ever
+// picked up under the same ticker on some chain would otherwise get merged
+// into the real asset's row. coingeckoId is the canonical identity the
+// discovery pipeline itself resolves from CoinGecko (the same field
+// getTokenChainPresence already uses elsewhere in this codebase for "is
+// this the same real asset on another chain"), so it isn't spoofable by a
+// same-ticker impersonator the way a bare symbol match is. Verified live:
+// every one of these 8 symbols currently maps to exactly one coingeckoId in
+// the tracked data, so this is a defensive identity fix, not a behavior
+// change against today's real data.
+export const KNOWN_STABLECOIN_IDS = [
+  "tether",
+  "usd-coin",
+  "dai",
+  "usds",
+  "ethena-usde",
+  "true-usd",
+  "first-digital-usd",
+  "paypal-usd",
+] as const;
 
 export interface StablecoinChainPresence {
   chainSlug: string;
@@ -26,10 +44,12 @@ export interface StablecoinListItem {
   symbol: string;
   name: string | null;
   logoUrl: string | null;
-  // A representative token id/address (arbitrarily the first chain
-  // encountered) - used only to source a real history chart via the
-  // existing per-token history route, never displayed as if it were a
-  // single-chain balance.
+  // A representative token id/address - prefers a chain deployment that
+  // actually has price data (see getStablecoins below) so an unpriced
+  // deployment never blanks out an asset that has real data on another
+  // chain. Used only to source a real history chart via the existing
+  // per-token history route, never displayed as if it were a single-chain
+  // balance.
   representativeTokenId: string;
   representativeAddress: string;
   representativeChainSlug: string;
@@ -40,21 +60,25 @@ export interface StablecoinListItem {
   // per-chain breakdown (checked USDC's 7 tracked chains - identical
   // figure on all of them). Using it as "market cap" (the accurate,
   // intended meaning of the field) rather than implying it's an amount
-  // held on any one specific chain.
+  // held on any one specific chain, or that it equals circulating supply -
+  // those only agree when the asset is exactly at its $1 peg.
   marketCap: number | null;
   chains: StablecoinChainPresence[];
 }
 
-// Per-symbol: every chain's own row for this stablecoin, plus each row's
-// latest price snapshot (already deduplicated to "latest per token" via
-// the existing per-token history/price pattern used throughout tokens.ts -
-// here done with a plain latest-timestamp join since this only runs for a
-// small, fixed set of ~8 symbols, not the full token table).
+// Per-asset: every chain's own row for this stablecoin, plus each row's
+// latest price snapshot where one exists. A left join (not inner) so a
+// chain deployment discovered but not yet priced still shows up in
+// `chains` instead of silently vanishing from the asset's chain-presence
+// list - the price-refresh sync and the token-discovery sync run on
+// different schedules, so a brand-new deployment can briefly have no
+// token_prices row at all.
 export async function getStablecoins(): Promise<StablecoinListItem[]> {
   const latest = latestPriceLateral();
   const rows = await db
     .select({
       tokenId: tokens.id,
+      coingeckoId: tokens.coingeckoId,
       symbol: tokens.symbol,
       name: tokens.name,
       logoUrl: tokens.logoUrl,
@@ -68,36 +92,54 @@ export async function getStablecoins(): Promise<StablecoinListItem[]> {
     })
     .from(tokens)
     .innerJoin(chains, eq(chains.id, tokens.chainId))
-    .innerJoinLateral(latest, sql`true`)
-    .where(inArray(tokens.symbol, [...KNOWN_STABLECOIN_SYMBOLS]))
+    .leftJoinLateral(latest, sql`true`)
+    .where(inArray(tokens.coingeckoId, [...KNOWN_STABLECOIN_IDS]))
     .orderBy(tokens.symbol, chains.slug);
 
-  const bySymbol = new Map<string, StablecoinListItem>();
+  const byId = new Map<string, StablecoinListItem>();
+  const hasPricedRepresentative = new Set<string>();
   for (const r of rows) {
-    const existing = bySymbol.get(r.symbol);
+    // Guaranteed non-null: the WHERE clause above only matches rows whose
+    // coingeckoId is one of KNOWN_STABLECOIN_IDS.
+    const key = r.coingeckoId as string;
     const chainEntry: StablecoinChainPresence = {
       chainSlug: r.chainSlug,
       chainName: r.chainName,
       chainLogoUrl: r.chainLogoUrl,
       address: r.address,
     };
+    const priceUsd = r.priceUsd != null ? Number(r.priceUsd) : null;
+    const priceChange24h = r.priceChange24h != null ? Number(r.priceChange24h) : null;
+    const marketCap = r.marketCap != null ? Number(r.marketCap) : null;
+
+    const existing = byId.get(key);
     if (!existing) {
-      bySymbol.set(r.symbol, {
+      byId.set(key, {
         symbol: r.symbol,
         name: r.name,
         logoUrl: r.logoUrl,
         representativeTokenId: r.tokenId,
         representativeAddress: r.address,
         representativeChainSlug: r.chainSlug,
-        priceUsd: r.priceUsd != null ? Number(r.priceUsd) : null,
-        priceChange24h: r.priceChange24h != null ? Number(r.priceChange24h) : null,
-        marketCap: r.marketCap != null ? Number(r.marketCap) : null,
+        priceUsd,
+        priceChange24h,
+        marketCap,
         chains: [chainEntry],
       });
+      if (priceUsd != null) hasPricedRepresentative.add(key);
     } else {
       existing.chains.push(chainEntry);
+      if (!hasPricedRepresentative.has(key) && priceUsd != null) {
+        existing.representativeTokenId = r.tokenId;
+        existing.representativeAddress = r.address;
+        existing.representativeChainSlug = r.chainSlug;
+        existing.priceUsd = priceUsd;
+        existing.priceChange24h = priceChange24h;
+        existing.marketCap = marketCap;
+        hasPricedRepresentative.add(key);
+      }
     }
   }
 
-  return [...bySymbol.values()].sort((a, b) => (b.marketCap ?? 0) - (a.marketCap ?? 0));
+  return [...byId.values()].sort((a, b) => (b.marketCap ?? 0) - (a.marketCap ?? 0));
 }

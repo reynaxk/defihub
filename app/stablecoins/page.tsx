@@ -11,7 +11,7 @@ import { EntityBadges } from "@/components/shared/entity-badges";
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table";
 import { DistributionBarList } from "@/components/shared/distribution-bar-list";
 import { FlowVisualization } from "@/components/shared/flow-visualization";
-import { StablecoinChartPanel, type StablecoinSupplyHistory } from "@/components/stablecoins/stablecoin-chart-panel";
+import { StablecoinChartPanel, type StablecoinMarketCapHistory } from "@/components/stablecoins/stablecoin-chart-panel";
 import { getStablecoins, type StablecoinListItem } from "@/lib/database/queries/stablecoins";
 import { getTokenHistory } from "@/lib/database/queries/tokens";
 import { formatTokenPrice, formatUsd } from "@/lib/format";
@@ -19,7 +19,7 @@ import { sumKnownValues } from "@/lib/utils/aggregate";
 
 export const metadata: Metadata = {
   title: "Stablecoins",
-  description: "Stablecoin supply, market share and cross-chain presence across tracked assets.",
+  description: "Stablecoin market cap, market share and cross-chain presence across tracked assets.",
 };
 
 export const revalidate = 300;
@@ -38,11 +38,11 @@ function daysAgo(days: number): Date {
 export default async function StablecoinsPage() {
   const stablecoins = await getStablecoins();
 
-  const { total: totalSupply, isPartial } = sumKnownValues(stablecoins.map((s) => s.marketCap));
+  const { total: totalMarketCap, isPartial } = sumKnownValues(stablecoins.map((s) => s.marketCap));
 
   const since = daysAgo(HISTORY_DAYS);
   const chartCoins = stablecoins.slice(0, CHART_TAB_LIMIT);
-  const histories: StablecoinSupplyHistory[] = await Promise.all(
+  const histories: StablecoinMarketCapHistory[] = await Promise.all(
     chartCoins.map(async (s) => {
       const history = await getTokenHistory(s.representativeTokenId, since);
       return {
@@ -91,8 +91,8 @@ export default async function StablecoinsPage() {
       headClassName: "hidden text-right sm:table-cell",
       cellClassName: "hidden text-right tabular-nums text-muted-foreground sm:table-cell",
       render: (s) =>
-        s.marketCap != null && totalSupply != null && totalSupply > 0
-          ? `${((s.marketCap / totalSupply) * 100).toFixed(1)}%`
+        s.marketCap != null && totalMarketCap != null && totalMarketCap > 0
+          ? `${((s.marketCap / totalMarketCap) * 100).toFixed(1)}%`
           : "—",
     },
     {
@@ -101,7 +101,10 @@ export default async function StablecoinsPage() {
       headClassName: "hidden md:table-cell",
       cellClassName: "hidden md:table-cell",
       render: (s) => (
-        <EntityBadges items={s.chains.map((c) => ({ key: c.chainSlug, name: c.chainName, logoUrl: c.chainLogoUrl }))} />
+        <EntityBadges
+          items={s.chains.map((c) => ({ key: c.chainSlug, name: c.chainName, logoUrl: c.chainLogoUrl }))}
+          groupLabel="Chains"
+        />
       ),
     },
   ];
@@ -115,16 +118,17 @@ export default async function StablecoinsPage() {
         </p>
         <h1 className="mt-1.5 text-2xl font-semibold tracking-tight">Stablecoins</h1>
         <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-          Tracked through DeFiHub&apos;s existing token pipeline, not a dedicated stablecoin sync - supply reflects
-          each asset&apos;s market cap (a stablecoin&apos;s market cap is effectively its circulating supply, priced
-          near $1).
+          Tracked through DeFiHub&apos;s existing token pipeline, not a dedicated stablecoin sync - figures below are
+          market cap (price × circulating supply), not circulating supply itself. The two only agree while an asset
+          holds its $1 peg exactly; DeFiHub doesn&apos;t ingest circulating-supply data separately from price, so a
+          depegged asset&apos;s market cap will diverge from its real supply here.
         </p>
       </div>
 
       <div className="mt-6">
         <MetricHeader
-          eyebrow="Global stablecoin supply"
-          value={totalSupply != null ? <AnimatedNumber value={totalSupply} format="usd" /> : "—"}
+          eyebrow="Global stablecoin market cap"
+          value={totalMarketCap != null ? <AnimatedNumber value={totalMarketCap} format="usd" /> : "—"}
           label={`Across ${stablecoins.length} tracked assets${isPartial ? " (partial — some assets missing a market cap)" : ""}`}
         />
         <MetricRow
@@ -140,7 +144,7 @@ export default async function StablecoinsPage() {
       </div>
 
       <section className="py-6">
-        <h2 className="mb-4 text-xs font-medium tracking-widest text-muted-foreground uppercase">Supply history</h2>
+        <h2 className="mb-4 text-xs font-medium tracking-widest text-muted-foreground uppercase">Market cap history</h2>
         <Card className="p-4 sm:p-6">
           <StablecoinChartPanel stablecoins={chartCoins} histories={histories} />
         </Card>

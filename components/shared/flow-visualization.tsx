@@ -80,7 +80,7 @@ export function FlowVisualization({
               </span>
               {flow.changePercent != null && (
                 <span className="text-xs text-muted-foreground">
-                  ({positive ? "+" : ""}
+                  ({flow.changePercent >= 0 ? "+" : ""}
                   {flow.changePercent.toFixed(1)}%)
                 </span>
               )}

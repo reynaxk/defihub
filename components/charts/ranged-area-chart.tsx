@@ -46,6 +46,12 @@ export function RangedAreaChart({
   const [internalRange, setInternalRange] = useState<ChartRangeKey>(defaultRange);
   const range = controlledRange ?? internalRange;
   const setRange = onRangeChange ?? setInternalRange;
+  // A controlled `range` without `onRangeChange` is a caller mistake: clicks
+  // would update the unused `internalRange` while `range` (pinned to
+  // `controlledRange`) never changes, so the picker would look interactive
+  // but silently do nothing. Hide it in that case instead - matches
+  // `showRangePicker={false}`'s own read-only-controlled usage.
+  const isReadOnlyControlled = controlledRange !== undefined && onRangeChange === undefined;
   // Tracks which range `fetchedData` was fetched for, rather than resetting
   // it to null when the user switches back to `defaultRange` - avoids
   // calling setState synchronously on that early-return path (flagged by
@@ -153,7 +159,7 @@ export function RangedAreaChart({
 
   return (
     <div>
-      {showRangePicker && (
+      {showRangePicker && !isReadOnlyControlled && (
         <div role="group" aria-label="Chart time range" className="mb-3 flex items-center justify-end gap-1">
           {CHART_RANGES.map((r) => (
             <button

@@ -9,7 +9,7 @@ import { formatUsd } from "@/lib/format";
 import type { ChainBadge, ProtocolListItem } from "@/lib/database/queries/protocols";
 
 function ChainBadges({ chains }: { chains: ChainBadge[] }) {
-  return <EntityBadges items={chains.map((c) => ({ key: c.slug, name: c.name, logoUrl: c.logoUrl }))} />;
+  return <EntityBadges items={chains.map((c) => ({ key: c.slug, name: c.name, logoUrl: c.logoUrl }))} groupLabel="Chains" />;
 }
 
 export function ProtocolsTable({

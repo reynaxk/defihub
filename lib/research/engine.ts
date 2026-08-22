@@ -128,9 +128,24 @@ async function answerChainTrend(query: string, chain: ChainListItem): Promise<Re
       body: `${chain.name}'s TVL is ${directionWord} over the last 7 days.`,
       metrics: [
         { label: "Current TVL", value: formatUsd(chain.tvl), href: `/chain/${chain.slug}` },
-        { label: "24H change", value: formatPercent(chain.change24h, { signed: true }), changeDirection: directionOf(chain.change24h) },
-        { label: "7D change", value: formatPercent(chain.change7d, { signed: true }), changeDirection: directionOf(chain.change7d) },
-        { label: "30D change", value: formatPercent(chain.change30d, { signed: true }), changeDirection: directionOf(chain.change30d) },
+        {
+          label: "24H change",
+          value: formatPercent(chain.change24h, { signed: true }),
+          href: `/chain/${chain.slug}`,
+          changeDirection: directionOf(chain.change24h),
+        },
+        {
+          label: "7D change",
+          value: formatPercent(chain.change7d, { signed: true }),
+          href: `/chain/${chain.slug}`,
+          changeDirection: directionOf(chain.change7d),
+        },
+        {
+          label: "30D change",
+          value: formatPercent(chain.change30d, { signed: true }),
+          href: `/chain/${chain.slug}`,
+          changeDirection: directionOf(chain.change30d),
+        },
       ],
     },
   ];
@@ -166,8 +181,18 @@ async function answerProtocolTrend(query: string, protocol: ProtocolListItem): P
       body: `${protocol.name}'s own tracked TVL change, sourced from DefiLlama's pre-computed figures.`,
       metrics: [
         { label: "Current TVL", value: formatUsd(protocol.tvl), href: `/protocol/${protocol.slug}` },
-        { label: "24H change", value: formatPercent(protocol.tvlChange1d, { signed: true }), changeDirection: directionOf(protocol.tvlChange1d) },
-        { label: "7D change", value: formatPercent(protocol.tvlChange7d, { signed: true }), changeDirection: directionOf(protocol.tvlChange7d) },
+        {
+          label: "24H change",
+          value: formatPercent(protocol.tvlChange1d, { signed: true }),
+          href: `/protocol/${protocol.slug}`,
+          changeDirection: directionOf(protocol.tvlChange1d),
+        },
+        {
+          label: "7D change",
+          value: formatPercent(protocol.tvlChange7d, { signed: true }),
+          href: `/protocol/${protocol.slug}`,
+          changeDirection: directionOf(protocol.tvlChange7d),
+        },
       ],
     },
   ];
@@ -285,7 +310,19 @@ async function answerCapitalFlow(query: string): Promise<ResearchResult> {
 }
 
 async function answerAttractiveYields(query: string): Promise<ResearchResult> {
-  const pools = await getYieldPools({ sortBy: "apy", sortDir: "desc", minTvl: YIELD_MIN_TVL_USD });
+  const pools = await getYieldPools({
+    sortBy: "apy",
+    sortDir: "desc",
+    minTvl: YIELD_MIN_TVL_USD,
+    // Excludes >=HIGH_RISK_APY pools in the query itself, not only after
+    // fetching: getYieldPools caps at UNPAGED_MAX_ROWS (2000) and this is
+    // sorted apy-desc, so without a DB-level ceiling, 2000+ junk/broken
+    // high-APY pools could fill the entire fetched window before any
+    // eligible pool is ever returned, hiding real yields ranked below them.
+    // maxApy is an inclusive <=; the client-side `< HIGH_RISK_APY` filter
+    // below stays as the exact (strict) boundary.
+    maxApy: HIGH_RISK_APY,
+  });
   const screened = pools.filter((p) => p.apy != null && p.apy < HIGH_RISK_APY).slice(0, TOP_N);
 
   return {
@@ -335,11 +372,11 @@ async function answerWeeklyDigest(query: string): Promise<ResearchResult> {
     sections: [
       {
         heading: "Global activity (24H)",
-        body: "Summed across every protocol DeFiHub tracks, at the latest sync.",
+        body: "Summed across every protocol DeFiHub tracks, at the latest sync - the same figures shown on the homepage.",
         metrics: [
-          { label: "Volume", value: formatUsd(totals.volume24h) },
-          { label: "Fees", value: formatUsd(totals.fees24h) },
-          { label: "Revenue", value: formatUsd(totals.revenue24h) },
+          { label: "Volume", value: formatUsd(totals.volume24h), href: "/" },
+          { label: "Fees", value: formatUsd(totals.fees24h), href: "/" },
+          { label: "Revenue", value: formatUsd(totals.revenue24h), href: "/" },
         ],
       },
       {

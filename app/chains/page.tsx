@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { unstable_cache } from "next/cache";
 import { ChainsTable } from "@/components/chains/chains-table";
 import { ChainComparisonChart } from "@/components/chains/chain-comparison";
 import { ExportCsvButton } from "@/components/shared/export-csv-button";
@@ -15,14 +16,29 @@ const COMPARISON_HISTORY_DAYS = 35;
 // entirely) if any of these ever isn't tracked, rather than guessing at a
 // replacement.
 const COMPARISON_CHAIN_SLUGS = ["ethereum", "solana", "arbitrum", "base"];
+const COMPARISON_CACHE_REVALIDATE_SECONDS = 300;
 
-// Deliberately not inlined into the component below: a direct `Date.now()`
-// call in a component/page body trips the React Compiler's purity check
-// (same reason every query function elsewhere in this codebase computes its
-// own `since` internally rather than accepting it pre-computed from a page).
-function daysAgo(days: number): Date {
-  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+// This page calls auth() and reads searchParams, which makes the whole
+// route dynamic in Next.js 16 - `export const revalidate` below has no
+// effect on it, so without this, the comparison charts' history queries
+// (public, session-independent data) would re-run on every single request.
+// unstable_cache keys on its arguments, so `since` is bucketed to the same
+// revalidate window instead of a fresh Date.now() every call - otherwise
+// every request would compute an ever-so-slightly newer cutoff and never
+// hit the cache at all. `next/cache`'s cache scope also can't see
+// headers/cookies (per its own docs) - this only takes chain ids + a
+// bucketed timestamp as arguments, no auth/session data.
+function comparisonSinceBucketed(days: number): Date {
+  const bucketMs = COMPARISON_CACHE_REVALIDATE_SECONDS * 1000;
+  const bucketedNow = Math.floor(Date.now() / bucketMs) * bucketMs;
+  return new Date(bucketedNow - days * 24 * 60 * 60 * 1000);
 }
+
+const getCachedComparisonHistories = unstable_cache(
+  async (chainIds: string[], sinceMs: number) => Promise.all(chainIds.map((id) => getChainHistory(id, new Date(sinceMs)))),
+  ["chain-comparison-histories"],
+  { revalidate: COMPARISON_CACHE_REVALIDATE_SECONDS },
+);
 
 export const metadata: Metadata = {
   title: "Chains",
@@ -77,9 +93,10 @@ export default async function ChainsPage({
   const comparisonChains = COMPARISON_CHAIN_SLUGS.map((slug) => chains.find((c) => c.slug === slug)).filter(
     (c): c is (typeof chains)[number] => c != null,
   );
-  const comparisonSince = daysAgo(COMPARISON_HISTORY_DAYS);
-  const comparisonHistories = await Promise.all(
-    comparisonChains.map((c) => getChainHistory(c.id, comparisonSince)),
+  const comparisonSince = comparisonSinceBucketed(COMPARISON_HISTORY_DAYS);
+  const comparisonHistories = await getCachedComparisonHistories(
+    comparisonChains.map((c) => c.id),
+    comparisonSince.getTime(),
   );
   const comparisonEntries = comparisonChains.map((c, i) => ({
     slug: c.slug,

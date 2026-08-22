@@ -319,9 +319,12 @@ async function answerAttractiveYields(query: string): Promise<ResearchResult> {
     // sorted apy-desc, so without a DB-level ceiling, 2000+ junk/broken
     // high-APY pools could fill the entire fetched window before any
     // eligible pool is ever returned, hiding real yields ranked below them.
-    // maxApy is an inclusive <=; the client-side `< HIGH_RISK_APY` filter
-    // below stays as the exact (strict) boundary.
-    maxApy: HIGH_RISK_APY,
+    // apyLessThan is a strict <, unlike maxApy's inclusive <= - a pool at
+    // exactly HIGH_RISK_APY must still be excluded, not just above it. The
+    // client-side `< HIGH_RISK_APY` filter below is now exactly redundant
+    // with this DB predicate, and stays as a defense-in-depth boundary
+    // check rather than being removed.
+    apyLessThan: HIGH_RISK_APY,
   });
   const screened = pools.filter((p) => p.apy != null && p.apy < HIGH_RISK_APY).slice(0, TOP_N);
 

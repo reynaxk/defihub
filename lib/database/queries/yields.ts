@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, ilike, isNotNull, lte, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, isNotNull, lt, lte, or, sql, type SQL } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, protocols, yieldPools } from "@/lib/database/schema";
 import { normalizePagination, totalPages as computeTotalPages } from "@/lib/database/pagination";
@@ -12,6 +12,13 @@ export interface YieldFilters {
   ilRisk?: "yes" | "no";
   minApy?: number;
   maxApy?: number;
+  // Distinct from maxApy (inclusive <=): a strict exclusive upper bound,
+  // for callers that need a boundary value itself excluded (e.g. the
+  // research engine's HIGH_RISK_APY screening, which must exclude pools
+  // *at* the threshold, not just above it) rather than relying on a
+  // post-fetch filter after getYieldPools' row limit has already been
+  // applied.
+  apyLessThan?: number;
   minTvl?: number;
   search?: string;
   // A pool "involves" a token when that token's address appears in its
@@ -34,6 +41,7 @@ function buildConditions(filters: YieldFilters): SQL[] {
   if (filters.ilRisk) conditions.push(eq(yieldPools.ilRisk, filters.ilRisk));
   if (filters.minApy != null) conditions.push(gte(yieldPools.apy, filters.minApy.toString()));
   if (filters.maxApy != null) conditions.push(lte(yieldPools.apy, filters.maxApy.toString()));
+  if (filters.apyLessThan != null) conditions.push(lt(yieldPools.apy, filters.apyLessThan.toString()));
   if (filters.minTvl != null) conditions.push(gte(yieldPools.tvlUsd, filters.minTvl.toString()));
   if (filters.search) {
     const term = `%${escapeLikePattern(filters.search)}%`;

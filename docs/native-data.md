@@ -178,8 +178,14 @@ PriceProvider (lib/providers/types.ts)
 
 Pre-existing, not new to Phase 4 — `getPrices(coingeckoIds): Promise<NormalizedPrice[]>`
 is already provider-agnostic; nothing outside `lib/providers/` sees a raw
-CoinGecko response shape. `computePoolTvl` takes prices as a plain
-`Map<string, number>` parameter, not a CoinGecko-specific type — a future
+CoinGecko response shape. The provider's own `priceUsd` is necessarily a
+JS `number` (that interface doesn't change), but `verifyAllPools` converts
+every price to an exact decimal string (`priceToExactDecimalString`)
+immediately after fetching, before it ever reaches `computePoolTvl` -
+which itself takes prices as `Map<string, string>`, not
+`Map<string, number>`, so nothing downstream of that one conversion point
+touches a floating-point price at all. See
+[Exact-decimal precision](#exact-decimal-precision) below. A future
 on-chain price source (e.g., reading a DEX's own spot price or a Chainlink
 feed) only needs to implement the same `PriceProvider` interface and swap
 the instance constructed in `lib/providers/index.ts`; the TVL calculation
@@ -188,6 +194,48 @@ robust enough to trust over a free aggregator API is a substantially
 harder problem than reading a contract's own token balance, and out of
 scope for a foundation phase (see the spec's own "do not build a
 decentralized oracle network").
+
+## Exact-decimal precision
+
+`computePoolTvl`'s entire pipeline - balance normalization, price, each
+token's USD value, and the running TVL total - stays exact BigInt/
+fixed-point arithmetic from the first raw on-chain integer through to the
+function's own return value, which is an exact decimal **string**, never a
+`number`. This isn't just an internal implementation detail: a `number`
+can't represent a value beyond `Number.MAX_SAFE_INTEGER` (2^53, ~9e15) and
+a real fractional component (e.g. a sub-cent remainder) at the same time,
+and neither a pool's TVL nor a token's price is guaranteed to stay under
+that ceiling forever. Two conversions bound the whole exact region:
+
+- **In**: `priceToExactDecimalString` (`lib/onchain/verify-pool.ts`) is the
+  one place a price is still a `number` - it prefers
+  `Number.prototype.toString()` over `toFixed()`, since for any "clean"
+  provider price (the common case) `toString()` recovers the shortest
+  decimal that round-trips to the same double, which for those values *is*
+  the original clean decimal (e.g. `0.1`, not that double's true binary
+  expansion, `0.100000000000000005551115...`).
+- **Out**: `roundExactDecimal` rescales `computePoolTvl`'s exact string
+  down to a smaller, table-specific scale (2 decimals for
+  `onchain_verifications`, 8 for `historical_observations`) via BigInt
+  division with explicit rounding - never `Number(...).toFixed(n)`, which
+  rounds a floating-point *approximation* of the value rather than the
+  value's own exact digits.
+
+This exactness carries all the way to storage and back: `historical_observations.value`
+(`numeric(32,8)`) is returned by drizzle/postgres.js as a string by
+default (confirmed - `numeric()` without an explicit `mode` infers
+`string`, not `number`), and `getPoolTvlHistory` (`lib/database/queries/pools.ts`)
+passes that string straight through rather than wrapping it in `Number(...)`.
+`HistoricalObservationCalculationInput.priceUsd` (the provenance snapshot -
+see [Provenance & replay](#provenance--replay)) is the same exact string
+`computePoolTvl` itself consumed, so replaying a stored observation never
+needs a lossy round-trip through `Number` in either direction. The one
+place a `number` legitimately still appears is `onchain_verifications`'
+own reader (`getVerificationsForProtocol`, `getVerifiedPools`) - a
+2-decimal, UI-display-only value the existing `OnchainVerificationCard`
+renders, capped at a precision that could only overflow at an unrealistic
+multi-quadrillion-dollar TVL. That's the "clearly intentional display
+boundary" the exact pipeline converts at - never earlier.
 
 ## Provenance & replay
 
@@ -212,12 +260,15 @@ without guessing:
   one-timestamp-per-run convention).
 - **`calculationInputs`** — the exact per-token snapshot `computePoolTvl`
   used: `symbol`, `coingeckoId`, `decimals`, `balanceRaw` (the raw on-chain
-  integer, as a string), and `priceUsd`. This is what makes an observation
-  *replayable*: feeding these fields straight back into `computePoolTvl`
-  reproduces the stored `value` exactly, not just approximately — see
-  `verify-pool.test.ts`'s "replays a persisted calculation-inputs
-  snapshot" test and `lib/database/queries/pools.test.ts`'s DB round-trip
-  version of the same check.
+  integer, as a string), and `priceUsd` (the same exact decimal string
+  `computePoolTvl` itself consumed - see
+  [Exact-decimal precision](#exact-decimal-precision) - not a `number`).
+  This is what makes an observation *replayable*: feeding these fields
+  straight back into `computePoolTvl` reproduces the stored `value`
+  exactly, not just approximately — see `verify-pool.test.ts`'s "replays a
+  persisted calculation-inputs snapshot" test and
+  `lib/database/queries/pools.test.ts`'s DB round-trip version of the same
+  check.
 
 **Reorg detection.** `lib/onchain/reorg.ts`'s `checkBlockHashStillCanonical`
 compares a stored `blockHash` against what that same block number resolves

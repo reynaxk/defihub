@@ -375,7 +375,12 @@ export interface HistoricalObservationCalculationInput {
   coingeckoId: string;
   decimals: number;
   balanceRaw: string; // exact on-chain integer balance, as a string (too large for a JS number in general)
-  priceUsd: number;
+  // The exact decimal string the calculation actually used, not a
+  // `number` - a JS number can't losslessly hold every real decimal price
+  // (e.g. 0.1 isn't exactly representable in binary floating point), so
+  // storing this as `number` would round the "input" half of the
+  // provenance record even where the calculation itself stayed exact.
+  priceUsd: string;
 }
 
 export const historicalObservations = pgTable(

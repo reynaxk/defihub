@@ -8,7 +8,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
 import { chains, historicalObservations, pools, type HistoricalObservationCalculationInput } from "@/lib/database/schema";
-import { computePoolTvl, type PoolTvlToken } from "@/lib/onchain/verify-pool";
+import { computePoolTvl, roundExactDecimal, type PoolTvlToken } from "@/lib/onchain/verify-pool";
 import { getPoolObservationCount, getPoolTvlHistory, getVerifiedPools } from "./pools";
 
 const PIVOT = new Date("2026-02-01T00:00:00.000Z");
@@ -56,7 +56,7 @@ describe("pool TVL query functions", () => {
       ]);
 
       const bounded = await getPoolTvlHistory(poolId, PIVOT);
-      expect(bounded.map((r) => r.value)).toEqual([200, 300]);
+      expect(bounded.map((r) => r.value)).toEqual(["200.00000000", "300.00000000"]);
     });
 
     it("returns every row when since is null", async () => {
@@ -83,7 +83,7 @@ describe("pool TVL query functions", () => {
 
       const result = await getPoolTvlHistory(poolId, null);
       expect(result).toHaveLength(1);
-      expect(result[0].value).toBe(100);
+      expect(result[0].value).toBe("100.00000000");
     });
 
     it("preserves the real source and calculation version on each row, never fabricating either", async () => {
@@ -113,32 +113,51 @@ describe("pool TVL query functions", () => {
       // real sub-cent TVL contribution survives - regression test for the
       // bug where the same 2-decimal string written to onchain_verifications
       // was also reused here, silently flooring anything under a cent to
-      // "0.00" before it ever reached this higher-precision column.
+      // "0.00" before it ever reached this higher-precision column. The
+      // returned value is compared as the exact string the query layer
+      // hands back - never Number(...)'d, which is a separate, later bug
+      // this same regression now also guards against (see the next test).
       const { chainId, poolId } = await makeChainAndPool();
-      const subCentValue = 0.0000005;
       await db.insert(historicalObservations).values([
         {
           chainId,
           entityType: "pool",
           entityId: poolId,
           metric: "tvl_usd",
-          value: subCentValue.toFixed(8),
+          value: "0.0000005",
           timestamp: PIVOT,
           source: "onchain-verification",
         },
       ]);
 
       const [row] = await getPoolTvlHistory(poolId, null);
-      expect(row.value).toBe(subCentValue);
-      expect(row.value).not.toBe(0);
+      expect(row.value).toBe("0.00000050");
+      expect(row.value).not.toBe("0.00000000");
+    });
+
+    it("preserves a TVL above Number.MAX_SAFE_INTEGER with a fractional component through query round-trip, never through Number(...)", async () => {
+      // This is the exact scenario a `Number(r.value)` conversion in the
+      // query layer cannot survive: at this magnitude the double ULP is 2,
+      // so parsing this exact string through Number() rounds it to the
+      // even neighbor, 10000000000000000, silently discarding the ".5" -
+      // demonstrated below via the same conversion, not asserted blindly.
+      const { chainId, poolId } = await makeChainAndPool();
+      const exactValue = "10000000000000000.50000000";
+      await db.insert(historicalObservations).values([
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: exactValue, timestamp: PIVOT, source: "onchain-verification" },
+      ]);
+
+      const [row] = await getPoolTvlHistory(poolId, null);
+      expect(row.value).toBe(exactValue);
+      expect(Number(exactValue)).toBe(10000000000000000);
     });
 
     it("round-trips block hash and price provenance, and the stored calculation inputs replay to the same value", async () => {
       const { chainId, poolId } = await makeChainAndPool();
 
       const calculationInputs: HistoricalObservationCalculationInput[] = [
-        { symbol: "USDC", coingeckoId: "usd-coin", decimals: 6, balanceRaw: "2500000000", priceUsd: 1.001 },
-        { symbol: "WETH", coingeckoId: "weth", decimals: 18, balanceRaw: "750000000000000000", priceUsd: 3200.5 },
+        { symbol: "USDC", coingeckoId: "usd-coin", decimals: 6, balanceRaw: "2500000000", priceUsd: "1.001" },
+        { symbol: "WETH", coingeckoId: "weth", decimals: 18, balanceRaw: "750000000000000000", priceUsd: "3200.5" },
       ];
       const priceRetrievedAt = new Date("2026-01-15T12:00:00.000Z");
       const blockHash = "0x" + "ab".repeat(32);
@@ -181,7 +200,13 @@ describe("pool TVL query functions", () => {
       const replayed = computePoolTvl(tokens, balances, priceById);
 
       expect(replayed.ok).toBe(true);
-      expect(replayed.ok && replayed.tvlUsd).toBe(row.value);
+      // computePoolTvl's own return trims trailing zeros;
+      // historical_observations.value comes back padded to its full
+      // numeric(32,8) scale - normalizing both sides through the same
+      // roundExactDecimal call (production code's own rescale helper)
+      // before comparing makes the padding difference a non-issue, without
+      // ever routing either value through Number().
+      expect(replayed.ok && roundExactDecimal(replayed.tvlUsd, 8)).toBe(roundExactDecimal(row.value, 8));
     });
 
     it("leaves block hash, price provenance, and calculation inputs null for an observation that never had them, rather than fabricating values", async () => {

@@ -72,7 +72,13 @@ export async function getVerifiedPools(): Promise<VerifiedPoolListItem[]> {
 
 export interface PoolTvlObservation {
   timestamp: Date;
-  value: number;
+  // The exact decimal string historical_observations.value actually
+  // stores (numeric(32,8), returned by drizzle/postgres.js as a string,
+  // never auto-parsed to a number) - never wrapped in Number() here,
+  // which would silently corrupt any value beyond Number.MAX_SAFE_INTEGER
+  // that also has a fractional component. A caller that only needs a
+  // display-bounded number converts explicitly at its own call site.
+  value: string;
   blockNumber: number | null;
   // All four null for any observation recorded before this provenance was
   // captured (or whose source never had it) - never backfilled or guessed.
@@ -114,7 +120,7 @@ export async function getPoolTvlHistory(poolId: string, since: Date | null): Pro
 
   return rows.map((r) => ({
     timestamp: r.timestamp,
-    value: Number(r.value),
+    value: r.value,
     blockNumber: r.blockNumber != null ? Number(r.blockNumber) : null,
     blockHash: r.blockHash,
     priceSource: r.priceSource,

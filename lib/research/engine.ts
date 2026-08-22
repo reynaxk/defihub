@@ -342,7 +342,11 @@ async function answerAttractiveYields(query: string): Promise<ResearchResult> {
         metrics: screened.map((p) => ({
           label: `${p.symbol}${p.protocolName ? ` · ${p.protocolName}` : ""}`,
           value: `${p.apy != null && p.apy >= CAUTION_APY ? "⚠ " : ""}${formatApy(p.apy)} APY · ${formatUsd(p.tvlUsd)} TVL`,
-          href: p.protocolSlug ? `/protocol/${p.protocolSlug}` : undefined,
+          // Falls back to the pool's chain page when it has no protocol
+          // (chainSlug always comes from an inner join in getYieldPools,
+          // so it's never null) - every pool still gets a real destination
+          // rather than an unsourced metric.
+          href: p.protocolSlug ? `/protocol/${p.protocolSlug}` : `/chain/${p.chainSlug}`,
         })),
       },
     ],

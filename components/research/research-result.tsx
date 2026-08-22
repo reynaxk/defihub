@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { ArrowDownRight, ArrowUpRight, Minus } from "lucide-react";
 import { Card } from "@/components/ui/card";
-import { cn } from "@/lib/utils";
 import type { ResearchMetric, ResearchResult as ResearchResultData } from "@/lib/research/types";
 import { formatDate } from "@/lib/format";
 
@@ -12,26 +11,19 @@ function DirectionIcon({ direction }: { direction: ResearchMetric["changeDirecti
   return null;
 }
 
+// `href` is required on ResearchMetric (see lib/research/types.ts) - every
+// metric this renders is guaranteed a real destination, so this is always a
+// link, never a conditional fallback to a bare, unsourced span.
 function MetricPill({ metric }: { metric: ResearchMetric }) {
-  const content = (
-    <span
-      className={cn(
-        "flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-sm transition-colors",
-        metric.href && "hover:border-primary/50 hover:bg-muted",
-      )}
-    >
-      <DirectionIcon direction={metric.changeDirection} />
-      <span className="flex flex-col">
-        <span className="text-xs text-muted-foreground">{metric.label}</span>
-        <span className="font-medium tabular-nums">{metric.value}</span>
-      </span>
-    </span>
-  );
-
-  if (!metric.href) return content;
   return (
     <Link href={metric.href} className="block">
-      {content}
+      <span className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-sm transition-colors hover:border-primary/50 hover:bg-muted">
+        <DirectionIcon direction={metric.changeDirection} />
+        <span className="flex flex-col">
+          <span className="text-xs text-muted-foreground">{metric.label}</span>
+          <span className="font-medium tabular-nums">{metric.value}</span>
+        </span>
+      </span>
     </Link>
   );
 }

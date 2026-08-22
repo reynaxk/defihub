@@ -1,12 +1,19 @@
 import { eq } from "drizzle-orm";
 import { erc20Abi, type Address } from "viem";
 import { db } from "@/lib/database/client";
-import { onchainVerifications, protocols, chains } from "@/lib/database/schema";
+import { historicalObservations, onchainVerifications, protocols, chains } from "@/lib/database/schema";
 import { priceProvider } from "@/lib/providers";
 import { VIEM_CHAIN_BY_SLUG } from "@/lib/chains/rpc-client";
 import { confirmationsFor } from "@/lib/chains/confirmations";
 import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { VERIFIED_POOLS, type VerifiedPool } from "./config";
+import { syncPoolsFromConfig } from "./pools";
+
+// Bumped only if the sum-of-balances methodology itself changes (e.g. a
+// future AMM adapter that isn't "sum this contract's own ERC-20 balances")
+// - lets historical_observations distinguish figures computed one way from
+// figures computed another, rather than silently mixing them in one series.
+const TVL_CALCULATION_VERSION = "pool-balance-sum-v1";
 
 export interface OnchainVerificationResult {
   key: string;
@@ -58,6 +65,46 @@ interface PoolOutcome {
   error?: string;
   tvlUsd?: number;
   blockNumber?: bigint;
+}
+
+export interface PoolTvlToken {
+  symbol: string;
+  decimals: number;
+  coingeckoId: string;
+}
+
+export type PoolTvlComputationResult = { ok: true; tvlUsd: number } | { ok: false; error: string };
+
+// Pure - the actual "raw balance + decimals + USD price -> pool TVL" math,
+// split out from verifyPoolsOnChain so it's directly unit-testable with
+// plain numbers, no RPC/multicall involved. `balances[i] === null` means
+// that token's on-chain read failed - never treated as a zero balance.
+// Missing price and missing decimals both surface as an explicit failure
+// (never silently 0/skipped/assumed), matching this app's "never fabricate
+// a missing value" rule everywhere else.
+export function computePoolTvl(
+  tokens: PoolTvlToken[],
+  balances: (bigint | null)[],
+  priceById: Map<string, number>,
+): PoolTvlComputationResult {
+  let tvlUsd = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    const balance = balances[i];
+    if (balance == null) return { ok: false, error: `balance read failed for ${token.symbol}` };
+
+    const price = priceById.get(token.coingeckoId);
+    if (price == null) return { ok: false, error: `missing USD price for ${token.symbol}` };
+
+    // Raw on-chain integer -> normalized token amount -> USD value. Kept as
+    // three explicit steps (not one fused expression) so each is visible
+    // independently when reasoning about precision - see this function's
+    // test file for the deterministic worked example and edge cases.
+    const normalizedAmount = Number(balance) / 10 ** token.decimals;
+    const usdValue = normalizedAmount * price;
+    tvlUsd += usdValue;
+  }
+  return { ok: true, tvlUsd };
 }
 
 /**
@@ -136,35 +183,18 @@ async function verifyPoolsOnChain(
     const slice = multicallResults.slice(offset, offset + pool.tokens.length);
     offset += pool.tokens.length;
 
-    const failedToken = pool.tokens.find((_, i) => slice[i]?.status !== "success");
-    if (failedToken) {
-      outcomes.push({
-        key: pool.key,
-        ok: false,
-        error: `balance read failed for ${failedToken.symbol}`,
-      });
+    // A failed per-token multicall result becomes `null`, never a
+    // substituted/assumed balance - computePoolTvl treats that as a hard
+    // failure for the whole pool, same as before this was extracted.
+    const balances = pool.tokens.map((_, i) => (slice[i]?.status === "success" ? (slice[i].result as bigint) : null));
+    const result = computePoolTvl(pool.tokens, balances, priceById);
+
+    if (!result.ok) {
+      outcomes.push({ key: pool.key, ok: false, error: result.error });
       continue;
     }
 
-    let tvlUsd = 0;
-    let missingPriceSymbol: string | undefined;
-    for (let i = 0; i < pool.tokens.length; i++) {
-      const token = pool.tokens[i];
-      const price = priceById.get(token.coingeckoId);
-      if (price == null) {
-        missingPriceSymbol = token.symbol;
-        break;
-      }
-      const balance = slice[i].result as bigint;
-      tvlUsd += (Number(balance) / 10 ** token.decimals) * price;
-    }
-
-    if (missingPriceSymbol) {
-      outcomes.push({ key: pool.key, ok: false, error: `missing USD price for ${missingPriceSymbol}` });
-      continue;
-    }
-
-    outcomes.push({ key: pool.key, ok: true, tvlUsd, blockNumber });
+    outcomes.push({ key: pool.key, ok: true, tvlUsd: result.tvlUsd, blockNumber });
   }
 
   return outcomes;
@@ -172,6 +202,11 @@ async function verifyPoolsOnChain(
 
 export async function verifyAllPools(): Promise<{ key: string; ok: boolean; error?: string }[]> {
   if (VERIFIED_POOLS.length === 0) return [];
+
+  // Keeps the canonical pools/pool_tokens rows in sync with this file's
+  // config before recording any observation against them - the historical
+  // insert below needs a real pools.id to reference.
+  const poolIdByConfigKey = await syncPoolsFromConfig();
 
   const [protocolRows, chainRows] = await Promise.all([
     db.select({ id: protocols.id, defillamaSlug: protocols.defillamaSlug }).from(protocols),
@@ -202,6 +237,13 @@ export async function verifyAllPools(): Promise<{ key: string; ok: boolean; erro
   );
   const outcomeByKey = new Map(perChainOutcomes.flat().map((o) => [o.key, o]));
 
+  // One shared timestamp for this whole run, not a fresh `new Date()` per
+  // pool - keeps every observation this run produces at the exact same
+  // instant, matching historical_observations' own dedup unique index
+  // (entityType, entityId, metric, timestamp) and making "everything from
+  // one verification run" a coherent, queryable slice.
+  const runTimestamp = new Date();
+
   const results: { key: string; ok: boolean; error?: string }[] = [];
   for (const pool of VERIFIED_POOLS) {
     const outcome = outcomeByKey.get(pool.key);
@@ -226,8 +268,34 @@ export async function verifyAllPools(): Promise<{ key: string; ok: boolean; erro
         .values({ key: pool.key, protocolId, chainId, label: pool.label, poolAddress: pool.poolAddress, tvlUsd, blockNumber })
         .onConflictDoUpdate({
           target: onchainVerifications.key,
-          set: { protocolId, chainId, tvlUsd, blockNumber, verifiedAt: new Date() },
+          set: { protocolId, chainId, tvlUsd, blockNumber, verifiedAt: runTimestamp },
         });
+
+      // Durable history, distinct from the upserted latest-value row above
+      // - see historical_observations' own schema comment. A missing
+      // pools.id (chain not yet synced into `pools` - see
+      // syncPoolsFromConfig) means there's nothing to attach this
+      // observation to; skip the history write but still report the
+      // verification itself as successful, since onchain_verifications
+      // (the value the existing UI reads) was written either way.
+      const poolId = poolIdByConfigKey.get(pool.key);
+      if (poolId) {
+        await db
+          .insert(historicalObservations)
+          .values({
+            chainId,
+            entityType: "pool",
+            entityId: poolId,
+            metric: "tvl_usd",
+            value: tvlUsd,
+            timestamp: runTimestamp,
+            blockNumber,
+            source: "onchain-verification",
+            calculationVersion: TVL_CALCULATION_VERSION,
+          })
+          .onConflictDoNothing();
+      }
+
       results.push({ key: pool.key, ok: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

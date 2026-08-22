@@ -135,6 +135,15 @@ minutes by `workers/onchain/verify.ts` (the per-chain `*_RPC_URL` env vars
 documented in `.env.example` let you swap in a paid provider later if a
 public endpoint gets rate-limited).
 
+**Phase 4 extended this** from a config array + latest-value cache into
+canonical `pools`/`pool_tokens` database entities and a real
+`historical_observations` time series, and established the RPC/indexer
+primitives (`lib/chains/rpc-resilient-client.ts`, `lib/indexing/`) this
+system's retry/failover/checkpointing logic is now built on. See
+[native-data.md](./native-data.md) for the full writeup — the scope and
+reasoning above (bounded, hand-curated, not a general indexer) still
+holds; Phase 4 made the existing exception more durable, not bigger.
+
 ## Graceful degradation
 
 No single failing dependency should take down the rest of the app. In

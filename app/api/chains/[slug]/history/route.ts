@@ -5,8 +5,14 @@ import { isChartRangeKey, sinceForRange } from "@/lib/charts/ranges";
 
 // Internal, app-only endpoint (not part of the documented /api/v1/* public
 // API) - powers RangedAreaChart's range switcher on the chain detail page's
-// TVL chart.
-const HISTORY_LIMIT = { limit: 60, windowMs: 60 * 1000 };
+// TVL chart. 180/min (raised from 60 during the Phase 4 historical-TVL
+// audit): confirmed live that 60/min is realistic to exhaust through
+// ordinary active browsing - switching ranges across a handful of chain
+// pages in one session - not just abuse, and a fetch failure here (rate
+// limit or otherwise) is exactly the trigger for the "chart shows the
+// wrong range's data" bug fixed in computeChartDisplayState. Still a real,
+// meaningful cap, just one with headroom for legitimate exploration.
+const HISTORY_LIMIT = { limit: 180, windowMs: 60 * 1000 };
 
 export async function GET(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const ip = getClientIp(request);

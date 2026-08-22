@@ -290,6 +290,121 @@ export const onchainVerifications = pgTable("onchain_verifications", {
 });
 
 // ---------------------------------------------------------------------------
+// Canonical on-chain entities (pools, pool tokens) - Phase 4
+//
+// Persists the same human-curated, research-verified entries already
+// defined in lib/onchain/config.ts's VERIFIED_POOLS as real, queryable
+// database rows, instead of only living as a TypeScript config array. The
+// config file stays the source of truth an engineer edits and reviews (see
+// its own module comment on why this app deliberately doesn't
+// auto-discover pools, and requires a human to confirm every entry before
+// it's added) - these tables are the derived, canonical representation
+// that the rest of the app can query like any other entity.
+// lib/onchain/pools.ts keeps them in sync with the config on every
+// verification run (upsert by configKey, never auto-discovered here
+// either).
+// ---------------------------------------------------------------------------
+
+export const pools = pgTable(
+  "pools",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    // Matches VERIFIED_POOLS' own `key` - the stable join back to the
+    // curated config entry this row was derived from.
+    configKey: varchar("config_key", { length: 64 }).notNull().unique(),
+    chainId: uuid("chain_id")
+      .notNull()
+      .references(() => chains.id, { onDelete: "cascade" }),
+    protocolId: uuid("protocol_id").references(() => protocols.id, { onDelete: "set null" }),
+    label: text("label").notNull(),
+    address: varchar("address", { length: 128 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex("pools_chain_address_unique").on(table.chainId, table.address)],
+);
+
+export const poolTokens = pgTable(
+  "pool_tokens",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    poolId: uuid("pool_id")
+      .notNull()
+      .references(() => pools.id, { onDelete: "cascade" }),
+    address: varchar("address", { length: 128 }).notNull(),
+    symbol: varchar("symbol", { length: 32 }).notNull(),
+    // Never defaulted (see lib/chains/token-decimals.ts's own comment on
+    // why 18 is never a safe assumption) - a pool token whose decimals
+    // couldn't be confirmed stays null rather than guessed.
+    decimals: integer("decimals"),
+    coingeckoId: varchar("coingecko_id", { length: 128 }),
+    // Preserves VERIFIED_POOLS' own token ordering (position in the
+    // array) - not semantically meaningful beyond display order.
+    position: integer("position").notNull(),
+  },
+  (table) => [uniqueIndex("pool_tokens_pool_position_unique").on(table.poolId, table.position)],
+);
+
+// ---------------------------------------------------------------------------
+// Historical observations - Phase 4
+//
+// A generic, append-only time series for DeFiHub-native calculated metrics
+// (currently: on-chain-verified pool TVL) - deliberately not specific to
+// pools, so a future native metric (another AMM adapter, a native price
+// source, ...) writes into this same table rather than each needing its
+// own history table. `onchain_verifications` above stays as the fast
+// "latest value" lookup the existing UI already reads (a single upserted
+// row per key, no history) - this table is the durable history that was
+// previously discarded on every overwrite.
+//
+// entityType/entityId is a deliberately simple pairing rather than a
+// polymorphic FK - Postgres has no clean native way to FK a column against
+// "whichever table entityType names," and a nullable FK column per
+// possible entity type doesn't scale as more entity types are added.
+// Consumers join back to the real table themselves using entityType to
+// pick which one (currently only "pool", referencing pools.id).
+// ---------------------------------------------------------------------------
+
+export const historicalObservations = pgTable(
+  "historical_observations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    chainId: uuid("chain_id").references(() => chains.id, { onDelete: "cascade" }),
+    // e.g. "pool" - which table entityId's value refers to.
+    entityType: varchar("entity_type", { length: 32 }).notNull(),
+    entityId: uuid("entity_id").notNull(),
+    // e.g. "tvl_usd" - which figure this row is a snapshot of, so the same
+    // entity can eventually have more than one tracked native metric
+    // without a new table.
+    metric: varchar("metric", { length: 32 }).notNull(),
+    value: numeric("value", { precision: 32, scale: 8 }).notNull(),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
+    blockNumber: numeric("block_number", { precision: 20, scale: 0 }),
+    // e.g. "onchain-verification" - which subsystem computed this, for the
+    // native-vs-external provenance distinction (never label externally-
+    // sourced data as DeFiHub-native, or vice versa).
+    source: varchar("source", { length: 64 }).notNull(),
+    // Free-form, optional - lets a future change to how a metric is
+    // computed (e.g. a new AMM adapter's math) be distinguished from
+    // observations computed the old way, without needing to backfill or
+    // silently mix incompatible historical figures.
+    calculationVersion: varchar("calculation_version", { length: 32 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("historical_observations_entity_idx").on(table.entityType, table.entityId, table.metric, table.timestamp),
+    // Guards against double-writing the identical observation if a
+    // verification run is retried/re-triggered for the same block/moment.
+    uniqueIndex("historical_observations_dedup_unique").on(
+      table.entityType,
+      table.entityId,
+      table.metric,
+      table.timestamp,
+    ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Auth.js (users / OAuth accounts / verification tokens)
 // JWT session strategy is used (required by the Credentials provider), so no
 // `sessions` table is needed.
@@ -607,4 +722,18 @@ export const onchainVerificationsRelations = relations(onchainVerifications, ({ 
     fields: [onchainVerifications.chainId],
     references: [chains.id],
   }),
+}));
+
+export const poolsRelations = relations(pools, ({ one, many }) => ({
+  chain: one(chains, { fields: [pools.chainId], references: [chains.id] }),
+  protocol: one(protocols, { fields: [pools.protocolId], references: [protocols.id] }),
+  tokens: many(poolTokens),
+}));
+
+export const poolTokensRelations = relations(poolTokens, ({ one }) => ({
+  pool: one(pools, { fields: [poolTokens.poolId], references: [pools.id] }),
+}));
+
+export const historicalObservationsRelations = relations(historicalObservations, ({ one }) => ({
+  chain: one(chains, { fields: [historicalObservations.chainId], references: [chains.id] }),
 }));

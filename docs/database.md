@@ -24,7 +24,7 @@ generated from it, never hand-written).
 | `sync_runs` | Per-worker sync run tracking (status/duration/counts) | Generic across workers via a `metadata` jsonb column |
 | `indexing_state` | Generic `(chain_slug, component)` cursor for resumable indexing | Not wired to every worker — only the small event-ingestion example uses it today |
 | `pools`, `pool_tokens` | Canonical AMM pools DeFiHub verifies on-chain, and the tokens each one holds | Synced from `lib/onchain/config.ts`'s `VERIFIED_POOLS` by `configKey`, not auto-discovered. See [native-data.md](./native-data.md) |
-| `historical_observations` | Generic time series for DeFiHub-native calculated metrics | `(entity_type, entity_id, metric, timestamp)` — currently only `entityType: "pool"`, `metric: "tvl_usd"`. See [native-data.md](./native-data.md) |
+| `historical_observations` | Generic time series for DeFiHub-native calculated metrics | Rows are `(entity_type, entity_id, metric, timestamp)` — currently only `entityType: "pool"`, `metric: "tvl_usd"`. Deduped at *block* granularity (two partial unique indexes on `entity_type, entity_id, metric, block_number[, block_hash]`), not by `timestamp` — see [native-data.md](./native-data.md#reliability--security) |
 
 ## Design decisions worth knowing
 

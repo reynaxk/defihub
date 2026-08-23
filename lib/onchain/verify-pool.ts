@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { erc20Abi, formatUnits, parseUnits, type Address } from "viem";
 import { db } from "@/lib/database/client";
 import {
@@ -427,7 +427,38 @@ export async function recordPoolVerification(record: PoolVerificationRecord): Pr
           source: "onchain-verification",
           calculationVersion: record.calculationVersion,
         })
-        .onConflictDoNothing();
+        // Explicit target, matching whichever of the two partial block-
+        // identity indexes actually applies to this row (see their own
+        // schema comment) - not a bare onConflictDoNothing(), which would
+        // silently absorb a conflict against *any* unique index on this
+        // table, including ones this insert didn't intend to dedupe
+        // against. Postgres resolves ON CONFLICT by matching both the
+        // column list and the WHERE predicate to one specific index, so
+        // the predicate here has to mirror the index's own exactly -
+        // record.blockHash's nullness is known at insert time, so the
+        // correct one can be picked deterministically rather than guessed.
+        .onConflictDoNothing(
+          record.blockHash == null
+            ? {
+                target: [
+                  historicalObservations.entityType,
+                  historicalObservations.entityId,
+                  historicalObservations.metric,
+                  historicalObservations.blockNumber,
+                ],
+                where: sql`${historicalObservations.blockNumber} is not null and ${historicalObservations.blockHash} is null`,
+              }
+            : {
+                target: [
+                  historicalObservations.entityType,
+                  historicalObservations.entityId,
+                  historicalObservations.metric,
+                  historicalObservations.blockNumber,
+                  historicalObservations.blockHash,
+                ],
+                where: sql`${historicalObservations.blockNumber} is not null and ${historicalObservations.blockHash} is not null`,
+              },
+        );
     }
   });
 }

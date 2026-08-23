@@ -9,7 +9,7 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
 import { chains, historicalObservations, pools, type HistoricalObservationCalculationInput } from "@/lib/database/schema";
 import { computePoolTvl, roundExactDecimal, type PoolTvlToken } from "@/lib/onchain/verify-pool";
-import { getPoolObservationCount, getPoolTvlHistory, getVerifiedPools } from "./pools";
+import { getPoolObservationCount, getPoolTvlHistory, getVerifiedPools, normalizePoolTvlHistoryLimit } from "./pools";
 
 const PIVOT = new Date("2026-02-01T00:00:00.000Z");
 const BEFORE = new Date(PIVOT.getTime() - 60 * 60 * 1000);
@@ -117,6 +117,35 @@ describe("pool TVL query functions", () => {
       // the remaining 3 (indices 2 and 3).
       const result = await getPoolTvlHistory(poolId, timestamps[1], 2);
       expect(result.map((r) => r.value)).toEqual(["2.00000000", "3.00000000"]);
+    });
+
+    it("never errors on an invalid explicit limit - each still returns real, correctly-bounded data", async () => {
+      const { chainId, poolId } = await makeChainAndPool();
+      const timestamps = Array.from({ length: 3 }, (_, i) => new Date(PIVOT.getTime() + i * 60 * 60 * 1000));
+      await db.insert(historicalObservations).values(
+        timestamps.map((timestamp, i) => ({
+          chainId,
+          entityType: "pool" as const,
+          entityId: poolId,
+          metric: "tvl_usd",
+          value: String(i),
+          timestamp,
+          source: "onchain-verification",
+        })),
+      );
+
+      // Every one of these previously would have gone straight into
+      // Postgres's LIMIT clause unchecked - a fractional or negative value
+      // is a real SQL error, not just an unexpected result.
+      for (const wildLimit of [0, -1, 2.5, Infinity]) {
+        await expect(getPoolTvlHistory(poolId, null, wildLimit)).resolves.not.toThrow();
+      }
+
+      const zero = await getPoolTvlHistory(poolId, null, 0);
+      expect(zero).toHaveLength(1); // 0 is corrected to the safe minimum (1), not "return nothing"
+
+      const fractional = await getPoolTvlHistory(poolId, null, 2.5);
+      expect(fractional).toHaveLength(2); // truncated to 2, not rounded or rejected
     });
 
     it("never returns another pool's or another metric's observations", async () => {
@@ -329,6 +358,36 @@ describe("pool TVL query functions", () => {
       expect(row.priceSource).toBeNull();
       expect(row.priceRetrievedAt).toBeNull();
       expect(row.calculationInputs).toBeNull();
+    });
+  });
+
+  describe("normalizePoolTvlHistoryLimit", () => {
+    it("truncates a fractional limit to an integer", () => {
+      expect(normalizePoolTvlHistoryLimit(2.5)).toBe(2);
+    });
+
+    it("corrects zero to the safe minimum", () => {
+      expect(normalizePoolTvlHistoryLimit(0)).toBe(1);
+    });
+
+    it("corrects a negative value to the safe minimum", () => {
+      expect(normalizePoolTvlHistoryLimit(-1)).toBe(1);
+    });
+
+    it("clamps a very large value down to the documented default/max", () => {
+      expect(normalizePoolTvlHistoryLimit(10_000)).toBe(5000);
+    });
+
+    it("defaults a non-finite value (Infinity) safely, rather than passing it to Postgres", () => {
+      expect(normalizePoolTvlHistoryLimit(Infinity)).toBe(5000);
+    });
+
+    it("defaults NaN safely too", () => {
+      expect(normalizePoolTvlHistoryLimit(NaN)).toBe(5000);
+    });
+
+    it("passes an ordinary in-range integer through unchanged", () => {
+      expect(normalizePoolTvlHistoryLimit(100)).toBe(100);
     });
   });
 

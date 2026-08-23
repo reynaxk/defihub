@@ -176,6 +176,13 @@
       "when": 1787397585038,
       "tag": "0024_pool_observation_provenance",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1787473519290,
+      "tag": "0025_pool_observation_block_identity",
+      "breakpoints": true
     }
   ]
 }

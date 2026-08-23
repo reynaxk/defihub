@@ -5,7 +5,7 @@
 // force a real constraint violation on the second write inside the
 // transaction and confirm the first write rolls back with it.
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
 import { chains, historicalObservations, onchainVerifications } from "@/lib/database/schema";
@@ -104,6 +104,10 @@ describe("recordPoolVerification atomicity", () => {
   it("skips the history write (but still commits the verification) when poolId is null, matching the pre-existing unsynced-chain behavior", async () => {
     const chainId = await makeChain();
     const poolKey = `atomicity-verify-nohistory-${randomUUID()}`;
+    // Synthetic, unused by this call - only here so the negative assertion
+    // below has something concrete to search for (entityId is the poolId
+    // that would have been used, had one been supplied).
+    const wouldBePoolId = randomUUID();
 
     await recordPoolVerification({
       poolKey,
@@ -125,5 +129,113 @@ describe("recordPoolVerification atomicity", () => {
 
     const [row] = await db.select().from(onchainVerifications).where(eq(onchainVerifications.key, poolKey));
     expect(row.tvlUsd).toBe("50.00");
+
+    // Explicit negative assertion: poolId: null must produce zero
+    // historical_observations rows for this key's chain, not merely "we
+    // didn't check." entityType/metric/chainId scope the search to rows
+    // this call could plausibly have written.
+    const observations = await db
+      .select()
+      .from(historicalObservations)
+      .where(
+        and(
+          eq(historicalObservations.chainId, chainId),
+          eq(historicalObservations.entityType, "pool"),
+          eq(historicalObservations.metric, "tvl_usd"),
+        ),
+      );
+    expect(observations).toHaveLength(0);
+    // Also confirm directly against the specific id no call ever supplied,
+    // in case some other test's data happened to share this chain.
+    const byWouldBePoolId = await db
+      .select()
+      .from(historicalObservations)
+      .where(eq(historicalObservations.entityId, wouldBePoolId));
+    expect(byWouldBePoolId).toHaveLength(0);
+  });
+
+  it("repeated verification of the same pool at the same block number and hash produces exactly one historical observation, even with a different runTimestamp each time", async () => {
+    const chainId = await makeChain();
+    const poolKey = `block-identity-${randomUUID()}`;
+    const poolId = randomUUID();
+    const blockHash = "0x" + "bb".repeat(32);
+
+    const makeRecord = (runTimestamp: Date): PoolVerificationRecord => ({
+      poolKey,
+      protocolId: null,
+      chainId,
+      label: "Block Identity Test Pool",
+      poolAddress: `0xpool${randomUUID().slice(0, 8)}`,
+      tvlUsdForVerification: "200.00",
+      blockNumber: "19000000",
+      runTimestamp,
+      poolId,
+      tvlUsdForObservation: "200.00000000",
+      blockHash,
+      priceSource: "coingecko",
+      priceRetrievedAt: runTimestamp,
+      calculationInputs: null,
+      calculationVersion: "pool-balance-sum-v1",
+    });
+
+    // Three separate "verification runs" against the identical block,
+    // each with its own runTimestamp - simulating a cron retry/re-trigger
+    // rather than a single call repeated with identical arguments.
+    await recordPoolVerification(makeRecord(new Date("2026-01-01T00:00:00.000Z")));
+    await recordPoolVerification(makeRecord(new Date("2026-01-01T00:30:00.000Z")));
+    await recordPoolVerification(makeRecord(new Date("2026-01-01T01:00:00.000Z")));
+
+    const observations = await db
+      .select()
+      .from(historicalObservations)
+      .where(eq(historicalObservations.entityId, poolId));
+    expect(observations).toHaveLength(1);
+    // The first run's timestamp survives - onConflictDoNothing means later
+    // attempts never overwrite it.
+    expect(observations[0].timestamp.getTime()).toBe(new Date("2026-01-01T00:00:00.000Z").getTime());
+  });
+
+  it("the same block number with a different block hash is treated as a distinct observation (a reorg), not deduplicated away", async () => {
+    const chainId = await makeChain();
+    const poolKey = `block-identity-reorg-${randomUUID()}`;
+    const poolId = randomUUID();
+    const blockNumber = "19500000";
+
+    const makeRecord = (blockHash: string, runTimestamp: Date): PoolVerificationRecord => ({
+      poolKey,
+      protocolId: null,
+      chainId,
+      label: "Reorg Test Pool",
+      poolAddress: `0xpool${randomUUID().slice(0, 8)}`,
+      tvlUsdForVerification: "300.00",
+      blockNumber,
+      runTimestamp,
+      poolId,
+      tvlUsdForObservation: "300.00000000",
+      blockHash,
+      priceSource: "coingecko",
+      priceRetrievedAt: runTimestamp,
+      calculationInputs: null,
+      calculationVersion: "pool-balance-sum-v1",
+    });
+
+    await recordPoolVerification(
+      makeRecord("0x" + "11".repeat(32), new Date("2026-01-01T00:00:00.000Z")),
+    );
+    // Same pool, same block number, a *different* hash - the height was
+    // reorged onto different chain history between the two verification
+    // runs. Both observations are real and neither should be dropped.
+    await recordPoolVerification(
+      makeRecord("0x" + "22".repeat(32), new Date("2026-01-01T00:30:00.000Z")),
+    );
+
+    const observations = await db
+      .select()
+      .from(historicalObservations)
+      .where(eq(historicalObservations.entityId, poolId))
+      .orderBy(historicalObservations.timestamp);
+    expect(observations).toHaveLength(2);
+    expect(observations.map((o) => o.blockHash)).toEqual(["0x" + "11".repeat(32), "0x" + "22".repeat(32)]);
+    expect(observations.every((o) => o.blockNumber === blockNumber)).toBe(true);
   });
 });

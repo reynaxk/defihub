@@ -425,14 +425,38 @@ export const historicalObservations = pgTable(
   },
   (table) => [
     index("historical_observations_entity_idx").on(table.entityType, table.entityId, table.metric, table.timestamp),
-    // Guards against double-writing the identical observation if a
-    // verification run is retried/re-triggered for the same block/moment.
-    uniqueIndex("historical_observations_dedup_unique").on(
-      table.entityType,
-      table.entityId,
-      table.metric,
-      table.timestamp,
-    ),
+    // Block-level idempotency, not timestamp-level: `timestamp` is the
+    // wall-clock moment a verification run happened to execute, which
+    // differs on every retry even when the run reads the exact same chain
+    // block - a (entityType, entityId, metric, timestamp) unique index
+    // (this table's original dedup guard, removed by this migration)
+    // therefore never actually caught a retried observation of the same
+    // block, since that timestamp essentially never repeats. Identity here
+    // is the block itself: same pool + same block number + same block hash
+    // is one observation; same block number with a *different* hash is a
+    // distinct, legitimate observation (a reorg moved that height onto
+    // different chain history, and both are real data worth keeping).
+    //
+    // Two *partial* unique indexes, not one - scoped to `blockNumber IS
+    // NOT NULL` so a row with no block at all (any current entityType/
+    // metric other than "pool"/"tvl_usd", or a future one) is entirely
+    // outside this rule and free to repeat, same as before. Split into two
+    // rather than one to make blockHash's nullability explicitly null-safe
+    // without relying on ordinary SQL NULL semantics (where two NULLs are
+    // never "equal," so duplicate no-hash rows for the same block would
+    // otherwise silently accumulate) - the "hash known" and "hash unknown"
+    // cases are mutually exclusive by their own predicates, so exactly one
+    // of the two ever applies to a given row, and either one is expressible
+    // as a plain-column partial index (no COALESCE expression needed),
+    // which keeps the insert's ON CONFLICT target fully typed - see
+    // recordPoolVerification in verify-pool.ts, which picks whichever of
+    // the two applies based on whether it's inserting a known blockHash.
+    uniqueIndex("historical_observations_block_hash_identity_unique")
+      .on(table.entityType, table.entityId, table.metric, table.blockNumber, table.blockHash)
+      .where(sql`${table.blockNumber} is not null and ${table.blockHash} is not null`),
+    uniqueIndex("historical_observations_block_only_identity_unique")
+      .on(table.entityType, table.entityId, table.metric, table.blockNumber)
+      .where(sql`${table.blockNumber} is not null and ${table.blockHash} is null`),
   ],
 );
 

@@ -276,13 +276,19 @@ risk `Number(...)` carries: silent precision loss on conversion, not a
 loud failure.
 
 None of this makes `onchain_verifications`' own `Number(r.tvlUsd)` calls
-unsafe *today* - a verified pool's TVL is nowhere near tens of trillions of
-dollars, and isn't going to be. It's why that conversion is confined to
-genuinely display-only readers (`OnchainVerificationResult`,
-`VerifiedPoolListItem`) that exist specifically to feed a UI number, and
-why nothing else in this pipeline reaches for `Number(...)` on a value that
-might not stay small - `historical_observations.value` (a value this app
-is explicitly trying to keep durable and exact) never does.
+unsafe *for the pools this app currently verifies* - a handful of AMM
+pools (see `VERIFIED_POOLS` in `lib/onchain/config.ts`) whose real TVL is
+nowhere near tens of trillions of dollars. That's a fact about today's
+dataset and expected operating range, not a mathematical property this
+column, this function, or this codebase actually enforces - nothing here
+caps what a future pool's TVL could be, and this doc doesn't claim
+otherwise. It's why that conversion is confined to genuinely display-only
+readers (`OnchainVerificationResult`, `VerifiedPoolListItem`) that exist
+specifically to feed a UI number - the *safety* comes from that boundary
+being narrow and display-only, not from an assumption that large values
+can't occur - and why nothing else in this pipeline reaches for
+`Number(...)` on a value that's meant to stay exact regardless of
+magnitude - `historical_observations.value` never does.
 
 ## Provenance & replay
 
@@ -420,10 +426,25 @@ being treated as done.
   in the path) are redacted to scheme+host before ever reaching a log line
   or a thrown error (`lib/chains/rpc-resilient-client.ts`'s
   `redactRpcUrl`/`redactUrlInMessage`) — pre-existing, unchanged by Phase 4.
-- **Idempotent writes:** `historical_observations` has a unique index on
-  `(entityType, entityId, metric, timestamp)`; `verifyAllPools()` inserts
-  with `onConflictDoNothing()`, so a retried/re-triggered run never
-  double-writes the same observation.
+- **Idempotent writes, at block granularity:** identity is the block a
+  native pool observation represents, not the wall-clock moment it was
+  recorded - `timestamp` (`runTimestamp`) differs on every retry even for
+  the exact same chain block, so a `(entityType, entityId, metric,
+  timestamp)` index (this table's original dedup guard) could never
+  actually catch a retried observation of the same block. Two partial
+  unique indexes on `historical_observations` — `historical_observations_block_hash_identity_unique`
+  (`entityType, entityId, metric, blockNumber, blockHash`, scoped to rows
+  where both are known) and `historical_observations_block_only_identity_unique`
+  (`entityType, entityId, metric, blockNumber`, scoped to rows with a block
+  number but no hash) — together make "same pool, same block number, same
+  block hash" a single observation, while "same block number, a *different*
+  hash" (a reorg) stays a distinct one, explicitly null-safe for a missing
+  hash rather than relying on ordinary SQL NULL semantics. `recordPoolVerification`
+  (`lib/onchain/verify-pool.ts`) picks whichever index applies via an
+  explicit `onConflictDoNothing({ target, where })` matching the row it's
+  about to insert - never a bare `onConflictDoNothing()`, which would
+  silently absorb a conflict against any unique index on the table. See
+  `lib/onchain/verify-pool.integration.test.ts`'s block-identity tests.
 - **Reorg safety:** every on-chain read in `verify-pool.ts` pins to
   `head - confirmationsFor(chainSlug)`, not the raw chain head, using the
   pre-existing per-chain confirmation depths in `lib/chains/confirmations.ts`.

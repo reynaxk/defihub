@@ -100,23 +100,46 @@ export interface PoolTvlObservation {
 // days of coverage at that cadence - comfortably past the app's existing
 // 90-day convention, while staying a small, fixed-size response either way.
 const DEFAULT_POOL_TVL_HISTORY_LIMIT = 5000;
+// The floor a caller-supplied `limit` gets corrected to when it's zero,
+// negative, or otherwise nonsensical - never 0 (a query that always
+// returns nothing isn't a "safe" substitute for an invalid input) and
+// never silently passed through.
+const MIN_POOL_TVL_HISTORY_LIMIT = 1;
+
+// Clamps an arbitrary caller-supplied `limit` into a value that's always
+// safe to hand to Postgres's LIMIT clause - the default parameter above
+// only covers an *omitted* argument, not one a caller builds from
+// unchecked input (e.g. a query-string parameter parsed with `Number(...)`,
+// which can produce NaN, Infinity, a negative number, or a fraction).
+// DEFAULT_POOL_TVL_HISTORY_LIMIT doubles as the upper bound: there is no
+// way to request more than that many rows, regardless of what's passed in.
+export function normalizePoolTvlHistoryLimit(limit: number): number {
+  if (!Number.isFinite(limit)) return DEFAULT_POOL_TVL_HISTORY_LIMIT;
+  const truncated = Math.trunc(limit);
+  if (truncated < MIN_POOL_TVL_HISTORY_LIMIT) return MIN_POOL_TVL_HISTORY_LIMIT;
+  return Math.min(truncated, DEFAULT_POOL_TVL_HISTORY_LIMIT);
+}
 
 // Server-side date-range pushdown, same convention as every other history
 // query in this codebase (getChainHistory, getProtocolHistory, ...) -
 // `since: null` means no lower bound. `limit` is always applied (default
-// DEFAULT_POOL_TVL_HISTORY_LIMIT above) - there's no way to request a
-// genuinely unbounded result. When more rows exist than `limit` allows,
-// the *most recent* ones are kept (the useful window for "how has this
-// pool trended lately"), not simply the first `limit` in chronological
-// order - the cutoff is applied as an ORDER BY DESC + LIMIT subquery, in
-// the database, then re-sorted ascending for the outer query so callers
-// see the same chronological order this function has always returned,
-// never by loading every row and slicing in JavaScript.
+// DEFAULT_POOL_TVL_HISTORY_LIMIT above) and always normalized (see
+// normalizePoolTvlHistoryLimit) before it ever reaches the database -
+// there's no way to request a genuinely unbounded result, or an invalid
+// one. When more rows exist than `limit` allows, the *most recent* ones
+// are kept (the useful window for "how has this pool trended lately"),
+// not simply the first `limit` in chronological order - the cutoff is
+// applied as an ORDER BY DESC + LIMIT subquery, in the database, then
+// re-sorted ascending for the outer query so callers see the same
+// chronological order this function has always returned, never by loading
+// every row and slicing in JavaScript.
 export async function getPoolTvlHistory(
   poolId: string,
   since: Date | null,
   limit: number = DEFAULT_POOL_TVL_HISTORY_LIMIT,
 ): Promise<PoolTvlObservation[]> {
+  const normalizedLimit = normalizePoolTvlHistoryLimit(limit);
+
   const conditions = [
     eq(historicalObservations.entityType, "pool"),
     eq(historicalObservations.entityId, poolId),
@@ -139,7 +162,7 @@ export async function getPoolTvlHistory(
     .from(historicalObservations)
     .where(and(...conditions))
     .orderBy(desc(historicalObservations.timestamp))
-    .limit(limit)
+    .limit(normalizedLimit)
     .as("recent");
 
   const rows = await db.select().from(recent).orderBy(asc(recent.timestamp));

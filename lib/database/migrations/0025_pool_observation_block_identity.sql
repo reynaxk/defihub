@@ -1,0 +1,3 @@
+DROP INDEX "historical_observations_dedup_unique";--> statement-breakpoint
+CREATE UNIQUE INDEX "historical_observations_block_hash_identity_unique" ON "historical_observations" USING btree ("entity_type","entity_id","metric","block_number","block_hash") WHERE "historical_observations"."block_number" is not null and "historical_observations"."block_hash" is not null;--> statement-breakpoint
+CREATE UNIQUE INDEX "historical_observations_block_only_identity_unique" ON "historical_observations" USING btree ("entity_type","entity_id","metric","block_number") WHERE "historical_observations"."block_number" is not null and "historical_observations"."block_hash" is null;

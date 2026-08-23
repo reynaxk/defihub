@@ -263,6 +263,41 @@ describe("recordPoolVerification atomicity", () => {
     expect(observations).toHaveLength(0);
   });
 
+  it("does NOT create a historical observation when the block hash is present but malformed (too short, not a real 32-byte hash)", async () => {
+    const chainId = await makeChain();
+    const poolKey = `malformed-hash-${randomUUID()}`;
+    const poolId = randomUUID();
+
+    await recordPoolVerification({
+      poolKey,
+      protocolId: null,
+      chainId,
+      label: "Malformed Hash Pool",
+      poolAddress: `0xpool${randomUUID().slice(0, 8)}`,
+      tvlUsdForVerification: "700.00",
+      blockNumber: "20700000",
+      runTimestamp: new Date("2026-01-01T00:00:00.000Z"),
+      poolId,
+      tvlUsdForObservation: "700.00000000",
+      blockHash: "0xnotarealhash",
+      priceSource: "coingecko",
+      priceRetrievedAt: new Date("2026-01-01T00:00:00.000Z"),
+      calculationInputs: null,
+      calculationVersion: "pool-balance-sum-v1",
+    });
+
+    // Still a latest-value commit - the malformed hash doesn't invalidate
+    // the TVL figure itself, only the durable history record of it.
+    const [row] = await db.select().from(onchainVerifications).where(eq(onchainVerifications.key, poolKey));
+    expect(row.tvlUsd).toBe("700.00");
+
+    const observations = await db
+      .select()
+      .from(historicalObservations)
+      .where(eq(historicalObservations.entityId, poolId));
+    expect(observations).toHaveLength(0);
+  });
+
   it("a retry that later obtains the block hash creates exactly one observation, after an earlier hash-less attempt created none", async () => {
     const chainId = await makeChain();
     const poolKey = `retry-hash-${randomUUID()}`;

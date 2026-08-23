@@ -18,4 +18,11 @@
 -- to be added. NOT VALID without a later VALIDATE is exactly Postgres's
 -- supported way to grandfather them in permanently while still enforcing
 -- the invariant going forward.
-ALTER TABLE "historical_observations" ADD CONSTRAINT "historical_observations_pool_tvl_requires_block_identity" CHECK ("historical_observations"."entity_type" <> 'pool' OR "historical_observations"."metric" <> 'tvl_usd' OR ("historical_observations"."block_number" IS NOT NULL AND "historical_observations"."block_hash" IS NOT NULL)) NOT VALID;
+--
+-- The CHECK expression itself rejects an empty string as well as NULL
+-- ("historical_observations_pool_tvl_requires_block_identity" - see its
+-- own schema.ts comment) - "null/empty/fabricated" are all the same
+-- failure here: no real block identity. This doesn't affect the
+-- grandfathered rows above, which have NULL, not '', and are unvalidated
+-- regardless.
+ALTER TABLE "historical_observations" ADD CONSTRAINT "historical_observations_pool_tvl_requires_block_identity" CHECK ("historical_observations"."entity_type" <> 'pool' OR "historical_observations"."metric" <> 'tvl_usd' OR ("historical_observations"."block_number" IS NOT NULL AND "historical_observations"."block_hash" IS NOT NULL AND "historical_observations"."block_hash" <> '')) NOT VALID;

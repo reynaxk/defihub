@@ -456,27 +456,39 @@ being treated as done.
   block number but genuinely no hash to attach. See
   `lib/onchain/verify-pool.integration.test.ts`'s block-identity tests.
 - **Block hash is required, not merely preferred, for pool TVL history:**
-  a native pool TVL observation without a block hash isn't reliable
+  a native pool TVL observation without a real block hash isn't reliable
   provenance - it can never be checked against a reorg later (see
-  [Reorg detection](#provenance--replay) below). `recordPoolVerification`
-  refuses to write the `historical_observations` row at all when
-  `blockHash` is unavailable (it still commits the `onchain_verifications`
-  "latest value" row - a missing hash doesn't make the current TVL figure
-  itself untrustworthy, only the durable history record of it), and the
-  database enforces the same rule independently via the
-  `historical_observations_pool_tvl_requires_block_identity` CHECK
-  constraint on `historical_observations`, scoped specifically to
-  `entityType = 'pool' AND metric = 'tvl_usd'` - not a table-wide `NOT
-  NULL` on the column, since a different, future metric could legitimately
-  have no block-level provenance at all. In the current implementation,
-  `verifyPoolsOnChain` always fetches the block hash via the same
-  `client.getBlock({ blockNumber })` call it already needed for
-  reorg-safety provenance (see [Provenance & replay](#provenance--replay))
-  - there's no separate, duplicate RPC request for it - so a missing hash
-  is a defensive case (a malformed RPC response, or a future code path)
-  rather than one that occurs in ordinary operation today. There is
-  deliberately no "retry the same block" mechanism: the next scheduled
-  verification run (whatever block is current by then) is the retry.
+  [Reorg detection](#provenance--replay) below). "Real" is checked, not
+  assumed: `recordPoolVerification` validates `blockHash` against
+  `VALID_BLOCK_HASH` (`/^0x[0-9a-fA-F]{64}$/` - the exact shape of a real
+  32-byte EVM hash) before writing anything, and refuses to write the
+  `historical_observations` row at all when the hash is missing, empty, or
+  malformed (it still commits the `onchain_verifications` "latest value"
+  row either way - a bad hash doesn't make the current TVL figure itself
+  untrustworthy, only the durable history record of it). That skip is
+  logged (`logger.warn`, `component: "onchain"`) rather than silent -
+  see `lib/observability/logger.ts` - specifically so an operator can
+  notice if it ever starts happening, rather than incomplete provenance
+  quietly piling up unnoticed. The database enforces the same rule
+  independently via the `historical_observations_pool_tvl_requires_block_identity`
+  CHECK constraint on `historical_observations` (rejecting both `NULL`
+  and `''`), scoped specifically to `entityType = 'pool' AND metric =
+  'tvl_usd'` - not a table-wide `NOT NULL` on the column, since a
+  different, future metric could legitimately have no block-level
+  provenance at all. Full 64-hex-character format validation is an
+  application-layer concern (`VALID_BLOCK_HASH`); the database constraint
+  is deliberately coarser - never null, never empty - matching how this
+  schema's other `CHECK` constraints (e.g. `users_email_lowercase`) stay
+  simple rather than encoding a full format grammar in SQL. In the
+  current implementation, `verifyPoolsOnChain` always fetches the block
+  hash via the same `client.getBlock({ blockNumber })` call it already
+  needed for reorg-safety provenance (see
+  [Provenance & replay](#provenance--replay)) - there's no separate,
+  duplicate RPC request for it - so a missing/invalid hash is a defensive
+  case (a malformed RPC response, or a future code path) rather than one
+  that occurs in ordinary operation today. There is deliberately no
+  "retry the same block" mechanism: the next scheduled verification run
+  (whatever block is current by then) is the retry.
   The constraint was added `NOT VALID`, not fully validated - real rows
   from before `blockHash` tracking existed are grandfathered in rather
   than rejected or backfilled; see the migration's own comment

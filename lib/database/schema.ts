@@ -475,10 +475,18 @@ export const historicalObservations = pgTable(
     // that were always going to fail it. See recordPoolVerification in
     // verify-pool.ts, which now refuses to write a pool/tvl_usd
     // observation at all when blockHash is unavailable, rather than
-    // relying on this constraint alone to catch it.
+    // relying on this constraint alone to catch it. Rejects an empty
+    // string as well as NULL - "null/empty/fabricated" are all the same
+    // failure from this constraint's point of view: no real block
+    // identity. Full 64-hex-character format validation lives at the
+    // application layer instead (VALID_BLOCK_HASH in verify-pool.ts) - a
+    // regex that specific would be an unusual thing for a table-wide CHECK
+    // constraint to encode, and this constraint's job is the coarser
+    // "never null, never empty" floor, matching this schema's other CHECK
+    // constraints (e.g. users_email_lowercase, below).
     check(
       "historical_observations_pool_tvl_requires_block_identity",
-      sql`${table.entityType} <> 'pool' OR ${table.metric} <> 'tvl_usd' OR (${table.blockNumber} IS NOT NULL AND ${table.blockHash} IS NOT NULL)`,
+      sql`${table.entityType} <> 'pool' OR ${table.metric} <> 'tvl_usd' OR (${table.blockNumber} IS NOT NULL AND ${table.blockHash} IS NOT NULL AND ${table.blockHash} <> '')`,
     ),
   ],
 );

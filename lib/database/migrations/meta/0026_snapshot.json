@@ -1,5 +1,5 @@
 {
-  "id": "a0f134ea-b38e-4f49-88d5-22d7611bab29",
+  "id": "df2c638d-9ad9-45d3-a894-66476b1efcd6",
   "prevId": "6077b965-9e83-487e-a01c-2ccf1a8ceca8",
   "version": "7",
   "dialect": "postgresql",
@@ -641,7 +641,7 @@
       "checkConstraints": {
         "historical_observations_pool_tvl_requires_block_identity": {
           "name": "historical_observations_pool_tvl_requires_block_identity",
-          "value": "\"historical_observations\".\"entity_type\" <> 'pool' OR \"historical_observations\".\"metric\" <> 'tvl_usd' OR (\"historical_observations\".\"block_number\" IS NOT NULL AND \"historical_observations\".\"block_hash\" IS NOT NULL)"
+          "value": "\"historical_observations\".\"entity_type\" <> 'pool' OR \"historical_observations\".\"metric\" <> 'tvl_usd' OR (\"historical_observations\".\"block_number\" IS NOT NULL AND \"historical_observations\".\"block_hash\" IS NOT NULL AND \"historical_observations\".\"block_hash\" <> '')"
         }
       },
       "isRLSEnabled": false

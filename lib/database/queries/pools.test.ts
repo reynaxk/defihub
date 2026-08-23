@@ -408,6 +408,25 @@ describe("pool TVL query functions", () => {
         ]),
       ).rejects.toThrow();
     });
+
+    it("rejects a pool/tvl_usd observation with an empty-string block hash at the database level too, not just null", async () => {
+      const { chainId, poolId } = await makeChainAndPool();
+      await expect(
+        db.insert(historicalObservations).values([
+          {
+            chainId,
+            entityType: "pool",
+            entityId: poolId,
+            metric: "tvl_usd",
+            value: "100",
+            timestamp: PIVOT,
+            source: "onchain-verification",
+            blockNumber: String(++blockCounter),
+            blockHash: "",
+          },
+        ]),
+      ).rejects.toThrow();
+    });
   });
 
   describe("normalizePoolTvlHistoryLimit", () => {

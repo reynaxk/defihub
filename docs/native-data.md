@@ -219,7 +219,12 @@ that ceiling forever. Two conversions bound the whole exact region:
   `onchain_verifications`, 8 for `historical_observations`) via BigInt
   division with explicit rounding - never `Number(...).toFixed(n)`, which
   rounds a floating-point *approximation* of the value rather than the
-  value's own exact digits.
+  value's own exact digits. This rounding is a real, intentional narrowing,
+  not a formality: `computePoolTvl` itself carries 30 decimal places of
+  precision internally, so a calculation can genuinely have more fractional
+  digits than a storage column's declared scale can hold. "Exact" below
+  means *exact within each column's own declared precision* - `numeric(32,8)`
+  is a finite, 8-decimal contract, not unlimited precision.
 
 This exactness carries all the way to storage and back: `historical_observations.value`
 (`numeric(32,8)`) is returned by drizzle/postgres.js as a string by
@@ -229,13 +234,55 @@ passes that string straight through rather than wrapping it in `Number(...)`.
 `HistoricalObservationCalculationInput.priceUsd` (the provenance snapshot -
 see [Provenance & replay](#provenance--replay)) is the same exact string
 `computePoolTvl` itself consumed, so replaying a stored observation never
-needs a lossy round-trip through `Number` in either direction. The one
-place a `number` legitimately still appears is `onchain_verifications`'
+needs a lossy round-trip through `Number` in either direction - but because
+the *stored* value was already rounded to 8 decimals on the way in, a
+raw/unrounded replay only matches it when the original calculation happened
+to need 8 or fewer fractional digits. A replay comparison must apply the
+same `roundExactDecimal(..., 8)` the original write used before comparing
+- see `lib/database/queries/pools.test.ts`'s "replays a value whose exact
+calculation has more than 8 fractional digits" test, which checks both
+halves: the raw replay reproducing the *true* exact calculation, and only
+the rounded replay matching what's actually in the database.
+
+The one place a `number` legitimately still appears is `onchain_verifications`'
 own reader (`getVerificationsForProtocol`, `getVerifiedPools`) - a
 2-decimal, UI-display-only value the existing `OnchainVerificationCard`
-renders, capped at a precision that could only overflow at an unrealistic
-multi-quadrillion-dollar TVL. That's the "clearly intentional display
-boundary" the exact pipeline converts at - never earlier.
+renders. That's the "clearly intentional display boundary" the exact
+pipeline converts at - never earlier. See
+[The Number(...) boundary, precisely](#the-number-boundary-precisely)
+below for why that specific conversion is safe at this app's real TVL
+magnitudes, and why "2^53" alone understates where cent-level precision
+actually starts being at risk.
+
+## The Number(...) boundary, precisely
+
+`Number.MAX_SAFE_INTEGER` (2^53, ~9.007e15) is the boundary for exactly
+representing a plain *integer* as a double - not the boundary for a
+financial value that also needs to keep 2 decimal places (cents) exact. A
+double has roughly 15-17 significant decimal digits of precision, total,
+shared between the integer part and the fraction. Reserving 2 of those
+digits for cents means the integer part can safely carry at most
+~13-15 digits before cent-level information starts silently eroding -
+concretely, somewhere in the *tens of trillions of dollars*, not the
+quadrillions "2^53 is huge" might suggest if the 2 decimal places aren't
+accounted for.
+
+This is also not "overflow" - nothing throws, warns, or produces `Infinity`
+or `NaN`. A double silently rounds a `numeric` string like
+`"12345678901234.57"` to the nearest value it can actually represent during
+the binary floating-point conversion `Number(...)` performs, which may
+differ in the cents place with no signal that it happened. That's the real
+risk `Number(...)` carries: silent precision loss on conversion, not a
+loud failure.
+
+None of this makes `onchain_verifications`' own `Number(r.tvlUsd)` calls
+unsafe *today* - a verified pool's TVL is nowhere near tens of trillions of
+dollars, and isn't going to be. It's why that conversion is confined to
+genuinely display-only readers (`OnchainVerificationResult`,
+`VerifiedPoolListItem`) that exist specifically to feed a UI number, and
+why nothing else in this pipeline reaches for `Number(...)` on a value that
+might not stay small - `historical_observations.value` (a value this app
+is explicitly trying to keep durable and exact) never does.
 
 ## Provenance & replay
 
@@ -264,11 +311,18 @@ without guessing:
   `computePoolTvl` itself consumed - see
   [Exact-decimal precision](#exact-decimal-precision) - not a `number`).
   This is what makes an observation *replayable*: feeding these fields
-  straight back into `computePoolTvl` reproduces the stored `value`
-  exactly, not just approximately — see `verify-pool.test.ts`'s "replays a
-  persisted calculation-inputs snapshot" test and
-  `lib/database/queries/pools.test.ts`'s DB round-trip version of the same
-  check.
+  straight back into `computePoolTvl` reproduces the *true* exact
+  calculation - and once that replay is rounded to the same 8-decimal
+  storage precision `historical_observations.value` uses (`roundExactDecimal`,
+  not `Number(...).toFixed()`), it reproduces the stored `value` too. The
+  raw, unrounded replay only equals the stored value directly when the
+  original calculation happened to need 8 or fewer fractional digits - see
+  `verify-pool.test.ts`'s "replays a persisted calculation-inputs snapshot"
+  test (an 8-or-fewer-digit case) and
+  `lib/database/queries/pools.test.ts`'s "replays a value whose exact
+  calculation has more than 8 fractional digits" test, which checks both
+  the true exact replay and the rounded-to-match-storage comparison
+  explicitly.
 
 **Reorg detection.** `lib/onchain/reorg.ts`'s `checkBlockHashStillCanonical`
 compares a stored `blockHash` against what that same block number resolves

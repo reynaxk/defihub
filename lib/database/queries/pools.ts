@@ -1,4 +1,4 @@
-import { and, count, eq, gte, min } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, min } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import {
   chains,
@@ -90,11 +90,33 @@ export interface PoolTvlObservation {
   calculationVersion: string | null;
 }
 
+// A row cap on every call, not just an opt-in default a caller has to
+// remember to pass. Unlike chain_metrics/protocol_metrics/token_prices,
+// historical_observations has no retention/rollup worker downsampling it
+// over time (see workers/retention/rollup.ts's own scope - it doesn't
+// touch this table), so `since: null` (the "give me everything" case) has
+// nothing else keeping it from growing genuinely unbounded as verification
+// runs accumulate every 30 minutes (vercel.json's cron), forever. ~100+
+// days of coverage at that cadence - comfortably past the app's existing
+// 90-day convention, while staying a small, fixed-size response either way.
+const DEFAULT_POOL_TVL_HISTORY_LIMIT = 5000;
+
 // Server-side date-range pushdown, same convention as every other history
 // query in this codebase (getChainHistory, getProtocolHistory, ...) -
-// `since: null` means no lower bound. Never loads the unbounded full
-// history of every observation ever recorded.
-export async function getPoolTvlHistory(poolId: string, since: Date | null): Promise<PoolTvlObservation[]> {
+// `since: null` means no lower bound. `limit` is always applied (default
+// DEFAULT_POOL_TVL_HISTORY_LIMIT above) - there's no way to request a
+// genuinely unbounded result. When more rows exist than `limit` allows,
+// the *most recent* ones are kept (the useful window for "how has this
+// pool trended lately"), not simply the first `limit` in chronological
+// order - the cutoff is applied as an ORDER BY DESC + LIMIT subquery, in
+// the database, then re-sorted ascending for the outer query so callers
+// see the same chronological order this function has always returned,
+// never by loading every row and slicing in JavaScript.
+export async function getPoolTvlHistory(
+  poolId: string,
+  since: Date | null,
+  limit: number = DEFAULT_POOL_TVL_HISTORY_LIMIT,
+): Promise<PoolTvlObservation[]> {
   const conditions = [
     eq(historicalObservations.entityType, "pool"),
     eq(historicalObservations.entityId, poolId),
@@ -102,7 +124,7 @@ export async function getPoolTvlHistory(poolId: string, since: Date | null): Pro
   ];
   if (since) conditions.push(gte(historicalObservations.timestamp, since));
 
-  const rows = await db
+  const recent = db
     .select({
       timestamp: historicalObservations.timestamp,
       value: historicalObservations.value,
@@ -116,7 +138,11 @@ export async function getPoolTvlHistory(poolId: string, since: Date | null): Pro
     })
     .from(historicalObservations)
     .where(and(...conditions))
-    .orderBy(historicalObservations.timestamp);
+    .orderBy(desc(historicalObservations.timestamp))
+    .limit(limit)
+    .as("recent");
+
+  const rows = await db.select().from(recent).orderBy(asc(recent.timestamp));
 
   return rows.map((r) => ({
     timestamp: r.timestamp,

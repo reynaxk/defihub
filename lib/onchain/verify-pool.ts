@@ -352,6 +352,86 @@ async function verifyPoolsOnChain(
   return outcomes;
 }
 
+export interface PoolVerificationRecord {
+  poolKey: string;
+  protocolId: string | null;
+  chainId: string;
+  label: string;
+  poolAddress: string;
+  tvlUsdForVerification: string;
+  blockNumber: string;
+  runTimestamp: Date;
+  // null means "chain not yet synced into `pools`" - skip the history
+  // write, matching verifyAllPools' pre-existing behavior for that case.
+  poolId: string | null;
+  tvlUsdForObservation: string;
+  blockHash: string | null;
+  priceSource: string;
+  priceRetrievedAt: Date;
+  calculationInputs: HistoricalObservationCalculationInput[] | null;
+  calculationVersion: string;
+}
+
+// The atomic write at the heart of recording one pool's verification: the
+// upserted "latest value" (onchain_verifications) and the durable history
+// row (historical_observations) commit together, in one transaction, or
+// neither does. Without this, a failure on the second insert (e.g. a
+// constraint violation) would leave onchain_verifications already updated
+// to the new figure with no corresponding history row - a caller relying
+// on "both tables agree" can't tolerate that inconsistency. Same
+// db.transaction(async (tx) => {...}) mechanism already used for pool sync
+// (lib/onchain/pools.ts) - one pooled connection for the whole callback,
+// never a second one. Extracted into its own function (rather than left
+// inline in verifyAllPools' loop) specifically so this transactional
+// behavior - including its failure path - is directly testable against
+// real seeded data, without a live RPC/price-provider round trip.
+export async function recordPoolVerification(record: PoolVerificationRecord): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx
+      .insert(onchainVerifications)
+      .values({
+        key: record.poolKey,
+        protocolId: record.protocolId,
+        chainId: record.chainId,
+        label: record.label,
+        poolAddress: record.poolAddress,
+        tvlUsd: record.tvlUsdForVerification,
+        blockNumber: record.blockNumber,
+      })
+      .onConflictDoUpdate({
+        target: onchainVerifications.key,
+        set: {
+          protocolId: record.protocolId,
+          chainId: record.chainId,
+          tvlUsd: record.tvlUsdForVerification,
+          blockNumber: record.blockNumber,
+          verifiedAt: record.runTimestamp,
+        },
+      });
+
+    if (record.poolId) {
+      await tx
+        .insert(historicalObservations)
+        .values({
+          chainId: record.chainId,
+          entityType: "pool",
+          entityId: record.poolId,
+          metric: "tvl_usd",
+          value: record.tvlUsdForObservation,
+          timestamp: record.runTimestamp,
+          blockNumber: record.blockNumber,
+          blockHash: record.blockHash,
+          priceSource: record.priceSource,
+          priceRetrievedAt: record.priceRetrievedAt,
+          calculationInputs: record.calculationInputs,
+          source: "onchain-verification",
+          calculationVersion: record.calculationVersion,
+        })
+        .onConflictDoNothing();
+    }
+  });
+}
+
 export async function verifyAllPools(): Promise<{ key: string; ok: boolean; error?: string }[]> {
   if (VERIFIED_POOLS.length === 0) return [];
 
@@ -432,50 +512,29 @@ export async function verifyAllPools(): Promise<{ key: string; ok: boolean; erro
     const blockNumber = String(outcome.blockNumber!);
 
     try {
-      await db
-        .insert(onchainVerifications)
-        .values({
-          key: pool.key,
-          protocolId,
-          chainId,
-          label: pool.label,
-          poolAddress: pool.poolAddress,
-          tvlUsd: tvlUsdForVerification,
-          blockNumber,
-        })
-        .onConflictDoUpdate({
-          target: onchainVerifications.key,
-          set: { protocolId, chainId, tvlUsd: tvlUsdForVerification, blockNumber, verifiedAt: runTimestamp },
-        });
-
-      // Durable history, distinct from the upserted latest-value row above
-      // - see historical_observations' own schema comment. A missing
-      // pools.id (chain not yet synced into `pools` - see
-      // syncPoolsFromConfig) means there's nothing to attach this
-      // observation to; skip the history write but still report the
-      // verification itself as successful, since onchain_verifications
-      // (the value the existing UI reads) was written either way.
-      const poolId = poolIdByConfigKey.get(pool.key);
-      if (poolId) {
-        await db
-          .insert(historicalObservations)
-          .values({
-            chainId,
-            entityType: "pool",
-            entityId: poolId,
-            metric: "tvl_usd",
-            value: tvlUsdForObservation,
-            timestamp: runTimestamp,
-            blockNumber,
-            blockHash: outcome.blockHash ?? null,
-            priceSource: priceProvider.name,
-            priceRetrievedAt,
-            calculationInputs: outcome.calculationInputs ?? null,
-            source: "onchain-verification",
-            calculationVersion: TVL_CALCULATION_VERSION,
-          })
-          .onConflictDoNothing();
-      }
+      await recordPoolVerification({
+        poolKey: pool.key,
+        protocolId,
+        chainId,
+        label: pool.label,
+        poolAddress: pool.poolAddress,
+        tvlUsdForVerification,
+        blockNumber,
+        runTimestamp,
+        // A missing pools.id (chain not yet synced into `pools` - see
+        // syncPoolsFromConfig) means there's nothing to attach a history
+        // observation to; recordPoolVerification skips that write but
+        // still commits the verification itself, since onchain_verifications
+        // (the value the existing UI reads) is the only row that can exist
+        // for this pool in that case.
+        poolId: poolIdByConfigKey.get(pool.key) ?? null,
+        tvlUsdForObservation,
+        blockHash: outcome.blockHash ?? null,
+        priceSource: priceProvider.name,
+        priceRetrievedAt,
+        calculationInputs: outcome.calculationInputs ?? null,
+        calculationVersion: TVL_CALCULATION_VERSION,
+      });
 
       results.push({ key: pool.key, ok: true });
     } catch (err) {

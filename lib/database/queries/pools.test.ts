@@ -59,7 +59,7 @@ describe("pool TVL query functions", () => {
       expect(bounded.map((r) => r.value)).toEqual(["200.00000000", "300.00000000"]);
     });
 
-    it("returns every row when since is null", async () => {
+    it("returns every row when since is null and the row count is under the limit", async () => {
       const { chainId, poolId } = await makeChainAndPool();
       await db.insert(historicalObservations).values([
         { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "100", timestamp: BEFORE, source: "onchain-verification" },
@@ -68,6 +68,55 @@ describe("pool TVL query functions", () => {
 
       const all = await getPoolTvlHistory(poolId, null);
       expect(all).toHaveLength(2);
+    });
+
+    it("respects an explicit limit, applied in the database - keeping the most recent rows in ascending order, not the oldest", async () => {
+      const { chainId, poolId } = await makeChainAndPool();
+      const timestamps = Array.from({ length: 5 }, (_, i) => new Date(PIVOT.getTime() + i * 60 * 60 * 1000));
+      await db.insert(historicalObservations).values(
+        timestamps.map((timestamp, i) => ({
+          chainId,
+          entityType: "pool" as const,
+          entityId: poolId,
+          metric: "tvl_usd",
+          value: String(i),
+          timestamp,
+          source: "onchain-verification",
+        })),
+      );
+
+      const limited = await getPoolTvlHistory(poolId, null, 3);
+      expect(limited).toHaveLength(3);
+      // The 3 most recent of the 5 (values "2","3","4"), still returned
+      // oldest-to-newest - not simply the first 3 rows in insertion/scan
+      // order, and not sliced down from a larger in-memory result.
+      expect(limited.map((r) => r.value)).toEqual(["2.00000000", "3.00000000", "4.00000000"]);
+      expect(limited.map((r) => r.timestamp.getTime())).toEqual([
+        timestamps[2].getTime(),
+        timestamps[3].getTime(),
+        timestamps[4].getTime(),
+      ]);
+    });
+
+    it("combines an explicit limit with a since filter correctly", async () => {
+      const { chainId, poolId } = await makeChainAndPool();
+      const timestamps = Array.from({ length: 4 }, (_, i) => new Date(PIVOT.getTime() + i * 60 * 60 * 1000));
+      await db.insert(historicalObservations).values(
+        timestamps.map((timestamp, i) => ({
+          chainId,
+          entityType: "pool" as const,
+          entityId: poolId,
+          metric: "tvl_usd",
+          value: String(i),
+          timestamp,
+          source: "onchain-verification",
+        })),
+      );
+
+      // since excludes index 0; limit then keeps only the most recent 2 of
+      // the remaining 3 (indices 2 and 3).
+      const result = await getPoolTvlHistory(poolId, timestamps[1], 2);
+      expect(result.map((r) => r.value)).toEqual(["2.00000000", "3.00000000"]);
     });
 
     it("never returns another pool's or another metric's observations", async () => {
@@ -207,6 +256,66 @@ describe("pool TVL query functions", () => {
       // before comparing makes the padding difference a non-issue, without
       // ever routing either value through Number().
       expect(replayed.ok && roundExactDecimal(replayed.tvlUsd, 8)).toBe(roundExactDecimal(row.value, 8));
+    });
+
+    it("replays a value whose exact calculation has more than 8 fractional digits - the raw replay does NOT match storage, only rounding it the same way does", async () => {
+      // historical_observations.value is numeric(32,8): a finite, 8-decimal
+      // storage precision, not unlimited. A price like this one produces an
+      // exact TVL with 12 fractional digits - more than the column can
+      // hold - so what's actually persisted is already rounded before it
+      // ever reaches the database. "Replayable" means a replay rounded the
+      // same way reproduces that stored value, not that the raw exact
+      // replay is somehow identical to it.
+      const { chainId, poolId } = await makeChainAndPool();
+      const calculationInputs: HistoricalObservationCalculationInput[] = [
+        { symbol: "TOK", coingeckoId: "tok", decimals: 0, balanceRaw: "1", priceUsd: "0.123456789123" },
+      ];
+
+      const exactCalculation = computePoolTvl(
+        calculationInputs.map((i) => ({ symbol: i.symbol, decimals: i.decimals, coingeckoId: i.coingeckoId })),
+        calculationInputs.map((i) => BigInt(i.balanceRaw)),
+        new Map(calculationInputs.map((i) => [i.coingeckoId, i.priceUsd])),
+      );
+      if (!exactCalculation.ok) throw new Error("expected calculation to succeed");
+      expect(exactCalculation.tvlUsd).toBe("0.123456789123");
+
+      const storedValue = roundExactDecimal(exactCalculation.tvlUsd, 8);
+      expect(storedValue).toBe("0.12345679"); // storage rounding genuinely changes the value here
+
+      await db.insert(historicalObservations).values([
+        {
+          chainId,
+          entityType: "pool",
+          entityId: poolId,
+          metric: "tvl_usd",
+          value: storedValue,
+          timestamp: PIVOT,
+          calculationInputs,
+          source: "onchain-verification",
+        },
+      ]);
+
+      const [row] = await getPoolTvlHistory(poolId, null);
+      expect(row.value).toBe("0.12345679");
+
+      const tokens: PoolTvlToken[] = row.calculationInputs!.map((i) => ({
+        symbol: i.symbol,
+        decimals: i.decimals,
+        coingeckoId: i.coingeckoId,
+      }));
+      const balances = row.calculationInputs!.map((i) => BigInt(i.balanceRaw));
+      const priceById = new Map(row.calculationInputs!.map((i) => [i.coingeckoId, i.priceUsd]));
+      const replayed = computePoolTvl(tokens, balances, priceById);
+      if (!replayed.ok) throw new Error("expected replay to succeed");
+
+      // The raw, unrounded replay reproduces the true exact calculation -
+      // not what's actually in the database.
+      expect(replayed.tvlUsd).toBe("0.123456789123");
+      expect(replayed.tvlUsd).not.toBe(row.value);
+
+      // Applying the same storage-precision rounding the original write
+      // used is what makes the two match.
+      expect(roundExactDecimal(replayed.tvlUsd, 8)).toBe(row.value);
     });
 
     it("leaves block hash, price provenance, and calculation inputs null for an observation that never had them, rather than fabricating values", async () => {

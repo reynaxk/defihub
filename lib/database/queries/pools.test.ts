@@ -15,6 +15,17 @@ const PIVOT = new Date("2026-02-01T00:00:00.000Z");
 const BEFORE = new Date(PIVOT.getTime() - 60 * 60 * 1000);
 const AFTER = new Date(PIVOT.getTime() + 60 * 60 * 1000);
 
+// A pool/tvl_usd historical_observations row now requires a real
+// (blockNumber, blockHash) pair - historical_observations_pool_tvl_requires_block_identity
+// rejects a null blockHash outright. Every fixture insert below needs its
+// own distinct pair (the block-identity unique index would otherwise
+// collide rows that share one).
+let blockCounter = 30_000_000;
+function nextBlock() {
+  blockCounter += 1;
+  return { blockNumber: String(blockCounter), blockHash: `0xblock${randomUUID()}` };
+}
+
 describe("pool TVL query functions", () => {
   const createdChainIds: string[] = [];
 
@@ -50,9 +61,9 @@ describe("pool TVL query functions", () => {
     it("includes an observation exactly at the cutoff and excludes one before it", async () => {
       const { chainId, poolId } = await makeChainAndPool();
       await db.insert(historicalObservations).values([
-        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "100", timestamp: BEFORE, source: "onchain-verification" },
-        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "200", timestamp: PIVOT, source: "onchain-verification" },
-        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "300", timestamp: AFTER, source: "onchain-verification" },
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "100", timestamp: BEFORE, source: "onchain-verification", ...nextBlock() },
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "200", timestamp: PIVOT, source: "onchain-verification", ...nextBlock() },
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "300", timestamp: AFTER, source: "onchain-verification", ...nextBlock() },
       ]);
 
       const bounded = await getPoolTvlHistory(poolId, PIVOT);
@@ -62,8 +73,8 @@ describe("pool TVL query functions", () => {
     it("returns every row when since is null and the row count is under the limit", async () => {
       const { chainId, poolId } = await makeChainAndPool();
       await db.insert(historicalObservations).values([
-        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "100", timestamp: BEFORE, source: "onchain-verification" },
-        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "200", timestamp: AFTER, source: "onchain-verification" },
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "100", timestamp: BEFORE, source: "onchain-verification", ...nextBlock() },
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "200", timestamp: AFTER, source: "onchain-verification", ...nextBlock() },
       ]);
 
       const all = await getPoolTvlHistory(poolId, null);
@@ -82,6 +93,7 @@ describe("pool TVL query functions", () => {
           value: String(i),
           timestamp,
           source: "onchain-verification",
+          ...nextBlock(),
         })),
       );
 
@@ -110,6 +122,7 @@ describe("pool TVL query functions", () => {
           value: String(i),
           timestamp,
           source: "onchain-verification",
+          ...nextBlock(),
         })),
       );
 
@@ -131,6 +144,7 @@ describe("pool TVL query functions", () => {
           value: String(i),
           timestamp,
           source: "onchain-verification",
+          ...nextBlock(),
         })),
       );
 
@@ -152,10 +166,14 @@ describe("pool TVL query functions", () => {
       const { chainId, poolId } = await makeChainAndPool();
       const other = await makeChainAndPool();
       await db.insert(historicalObservations).values([
-        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "100", timestamp: PIVOT, source: "onchain-verification" },
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "100", timestamp: PIVOT, source: "onchain-verification", ...nextBlock() },
         // A different pool, same timestamp - must not leak in.
-        { chainId: other.chainId, entityType: "pool", entityId: other.poolId, metric: "tvl_usd", value: "999", timestamp: PIVOT, source: "onchain-verification" },
-        // Same pool, a different (hypothetical future) metric - must not leak in.
+        { chainId: other.chainId, entityType: "pool", entityId: other.poolId, metric: "tvl_usd", value: "999", timestamp: PIVOT, source: "onchain-verification", ...nextBlock() },
+        // Same pool, a different (hypothetical future) metric - must not
+        // leak in. Deliberately no blockNumber/blockHash: the block-identity
+        // CHECK constraint is scoped to metric = 'tvl_usd' specifically, so
+        // a differently-metriced row is exempt - this also happens to prove
+        // that scoping is real, not just documented.
         { chainId, entityType: "pool", entityId: poolId, metric: "volume_usd", value: "999", timestamp: PIVOT, source: "onchain-verification" },
       ]);
 
@@ -175,6 +193,7 @@ describe("pool TVL query functions", () => {
           value: "42",
           timestamp: PIVOT,
           blockNumber: "18000000",
+          blockHash: "0xblock" + randomUUID(),
           source: "onchain-verification",
           calculationVersion: "pool-balance-sum-v1",
         },
@@ -205,6 +224,7 @@ describe("pool TVL query functions", () => {
           value: "0.0000005",
           timestamp: PIVOT,
           source: "onchain-verification",
+          ...nextBlock(),
         },
       ]);
 
@@ -222,7 +242,7 @@ describe("pool TVL query functions", () => {
       const { chainId, poolId } = await makeChainAndPool();
       const exactValue = "10000000000000000.50000000";
       await db.insert(historicalObservations).values([
-        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: exactValue, timestamp: PIVOT, source: "onchain-verification" },
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: exactValue, timestamp: PIVOT, source: "onchain-verification", ...nextBlock() },
       ]);
 
       const [row] = await getPoolTvlHistory(poolId, null);
@@ -321,6 +341,7 @@ describe("pool TVL query functions", () => {
           timestamp: PIVOT,
           calculationInputs,
           source: "onchain-verification",
+          ...nextBlock(),
         },
       ]);
 
@@ -347,17 +368,45 @@ describe("pool TVL query functions", () => {
       expect(roundExactDecimal(replayed.tvlUsd, 8)).toBe(row.value);
     });
 
-    it("leaves block hash, price provenance, and calculation inputs null for an observation that never had them, rather than fabricating values", async () => {
+    it("leaves price provenance and calculation inputs null for an observation that never had them, rather than fabricating values", async () => {
+      // blockHash itself is NOT part of this - historical_observations_pool_tvl_requires_block_identity
+      // (see schema.ts) means a pool/tvl_usd row can never actually have a
+      // null blockHash; that invariant has its own dedicated test below.
+      // priceSource/priceRetrievedAt/calculationInputs remain genuinely
+      // optional provenance, independent of block identity.
       const { chainId, poolId } = await makeChainAndPool();
       await db.insert(historicalObservations).values([
-        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "100", timestamp: PIVOT, source: "onchain-verification" },
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "100", timestamp: PIVOT, source: "onchain-verification", ...nextBlock() },
       ]);
 
       const [row] = await getPoolTvlHistory(poolId, null);
-      expect(row.blockHash).toBeNull();
+      expect(row.blockHash).not.toBeNull();
       expect(row.priceSource).toBeNull();
       expect(row.priceRetrievedAt).toBeNull();
       expect(row.calculationInputs).toBeNull();
+    });
+
+    it("rejects a pool/tvl_usd observation with a null block hash at the database level, even bypassing recordPoolVerification", async () => {
+      // Defense in depth: the database's own CHECK constraint - not just
+      // recordPoolVerification's application-level guard - refuses this,
+      // so a future write path that forgets the guard still can't create
+      // unreliable-provenance history.
+      const { chainId, poolId } = await makeChainAndPool();
+      await expect(
+        db.insert(historicalObservations).values([
+          {
+            chainId,
+            entityType: "pool",
+            entityId: poolId,
+            metric: "tvl_usd",
+            value: "100",
+            timestamp: PIVOT,
+            source: "onchain-verification",
+            blockNumber: String(++blockCounter),
+            blockHash: null,
+          },
+        ]),
+      ).rejects.toThrow();
     });
   });
 
@@ -395,8 +444,8 @@ describe("pool TVL query functions", () => {
     it("counts observations and reports the earliest timestamp honestly", async () => {
       const { chainId, poolId } = await makeChainAndPool();
       await db.insert(historicalObservations).values([
-        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "1", timestamp: BEFORE, source: "onchain-verification" },
-        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "2", timestamp: AFTER, source: "onchain-verification" },
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "1", timestamp: BEFORE, source: "onchain-verification", ...nextBlock() },
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "2", timestamp: AFTER, source: "onchain-verification", ...nextBlock() },
       ]);
 
       const result = await getPoolObservationCount(poolId);

@@ -112,9 +112,16 @@ chains ──┬──< pools >──── protocols (optional)
   not a polymorphic foreign key (Postgres has no clean native support for
   that) — a consumer that knows `entityType === "pool"` joins back to
   `pools` itself. `blockHash`, `priceSource`, `priceRetrievedAt`, and
-  `calculationInputs` are all nullable — real for every row written by the
-  current `verifyAllPools()` flow, `null` for anything recorded before
-  those columns existed. Nothing is ever backfilled into them.
+  `calculationInputs` are all nullable *at the column level* — real for
+  every row written by the current `verifyAllPools()` flow, `null` for
+  anything recorded before those columns existed. Nothing is ever
+  backfilled into them. `blockHash` specifically is further constrained: a
+  `historical_observations_pool_tvl_requires_block_identity` CHECK
+  constraint (added `NOT VALID` - see [Idempotent writes, at block granularity](#reliability--security))
+  means a *new* row with `entityType: "pool"`, `metric: "tvl_usd"` can
+  never have a null `blockHash` going forward, even though old rows that
+  predate the column still legitimately do (grandfathered in, never
+  dropped or rewritten).
 - **No separate `contracts` table.** `pools.address` / `pool_tokens.address`
   are plain address strings. A generic contract registry (ABI storage,
   multi-purpose tracking) is a reasonable next step once there's a second
@@ -440,11 +447,65 @@ being treated as done.
   block hash" a single observation, while "same block number, a *different*
   hash" (a reorg) stays a distinct one, explicitly null-safe for a missing
   hash rather than relying on ordinary SQL NULL semantics. `recordPoolVerification`
-  (`lib/onchain/verify-pool.ts`) picks whichever index applies via an
-  explicit `onConflictDoNothing({ target, where })` matching the row it's
-  about to insert - never a bare `onConflictDoNothing()`, which would
-  silently absorb a conflict against any unique index on the table. See
+  (`lib/onchain/verify-pool.ts`) always targets the "hash known" index for a
+  pool/tvl_usd row now (never a bare `onConflictDoNothing()`, which would
+  silently absorb a conflict against any unique index on the table) -
+  `historical_observations_pool_tvl_requires_block_identity` (below) means
+  that's the only one such a row can ever match; the "block number only"
+  index remains for a hypothetical future entityType/metric that has a
+  block number but genuinely no hash to attach. See
   `lib/onchain/verify-pool.integration.test.ts`'s block-identity tests.
+- **Block hash is required, not merely preferred, for pool TVL history:**
+  a native pool TVL observation without a block hash isn't reliable
+  provenance - it can never be checked against a reorg later (see
+  [Reorg detection](#provenance--replay) below). `recordPoolVerification`
+  refuses to write the `historical_observations` row at all when
+  `blockHash` is unavailable (it still commits the `onchain_verifications`
+  "latest value" row - a missing hash doesn't make the current TVL figure
+  itself untrustworthy, only the durable history record of it), and the
+  database enforces the same rule independently via the
+  `historical_observations_pool_tvl_requires_block_identity` CHECK
+  constraint on `historical_observations`, scoped specifically to
+  `entityType = 'pool' AND metric = 'tvl_usd'` - not a table-wide `NOT
+  NULL` on the column, since a different, future metric could legitimately
+  have no block-level provenance at all. In the current implementation,
+  `verifyPoolsOnChain` always fetches the block hash via the same
+  `client.getBlock({ blockNumber })` call it already needed for
+  reorg-safety provenance (see [Provenance & replay](#provenance--replay))
+  - there's no separate, duplicate RPC request for it - so a missing hash
+  is a defensive case (a malformed RPC response, or a future code path)
+  rather than one that occurs in ordinary operation today. There is
+  deliberately no "retry the same block" mechanism: the next scheduled
+  verification run (whatever block is current by then) is the retry.
+  The constraint was added `NOT VALID`, not fully validated - real rows
+  from before `blockHash` tracking existed are grandfathered in rather
+  than rejected or backfilled; see the migration's own comment
+  (`lib/database/migrations/0026_pool_tvl_requires_block_identity.sql`)
+  for why validating them would be both impossible (they're genuinely
+  missing data, not a defect to fix) and unnecessary (the constraint still
+  fully applies to every new write).
+- **Migration lock safety, honestly scoped:** this project's migration
+  runner (`drizzle-kit`'s built-in `migrate()`, via `npm run db:migrate`)
+  wraps every pending migration file - and every statement in it - in one
+  Postgres transaction, and Postgres refuses `CREATE`/`DROP INDEX
+  CONCURRENTLY` inside a transaction block. Genuinely online index/constraint
+  changes aren't something this tooling can express, so neither migration
+  claims to be lock-free: `0025_pool_observation_block_identity.sql`'s two
+  `CREATE UNIQUE INDEX` statements (both now `IF NOT EXISTS`) hold a `SHARE`
+  lock - blocking concurrent writes, not reads - for as long as each index
+  build takes, and `0026`'s `ADD CONSTRAINT ... CHECK (...) NOT VALID` takes
+  only a brief metadata lock (no table scan, since it's deliberately not
+  validated - see above). For a small/dev table this is a non-issue,
+  confirmed at implementation time by running both migrations against a
+  database that already had real `historical_observations` rows. For a
+  production database where that table has grown large enough for a
+  write-blocking window to matter, `0025`'s own top-of-file comment
+  documents the operational workaround: manually run the equivalent
+  `CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS` statements outside a
+  transaction before running the standard migration, so it then finds both
+  indexes already present and completes near-instantly. This is the
+  safest strategy actually available within this project's migration
+  setup - stated as such, not as a claim of true zero-downtime.
 - **Reorg safety:** every on-chain read in `verify-pool.ts` pins to
   `head - confirmationsFor(chainSlug)`, not the raw chain head, using the
   pre-existing per-chain confirmation depths in `lib/chains/confirmations.ts`.

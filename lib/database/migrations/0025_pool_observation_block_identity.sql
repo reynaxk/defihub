@@ -1,3 +1,45 @@
-DROP INDEX "historical_observations_dedup_unique";--> statement-breakpoint
-CREATE UNIQUE INDEX "historical_observations_block_hash_identity_unique" ON "historical_observations" USING btree ("entity_type","entity_id","metric","block_number","block_hash") WHERE "historical_observations"."block_number" is not null and "historical_observations"."block_hash" is not null;--> statement-breakpoint
-CREATE UNIQUE INDEX "historical_observations_block_only_identity_unique" ON "historical_observations" USING btree ("entity_type","entity_id","metric","block_number") WHERE "historical_observations"."block_number" is not null and "historical_observations"."block_hash" is null;
+-- Operational note (hand-added; drizzle-kit's generated SQL below is
+-- otherwise unmodified apart from adding IF NOT EXISTS to both CREATE
+-- statements): this project's migration runner (drizzle-kit's built-in
+-- `migrate()`, invoked via `npm run db:migrate`) wraps every pending
+-- migration file, and every statement in each one, inside a single
+-- Postgres transaction. Postgres does not allow CREATE INDEX CONCURRENTLY
+-- or DROP INDEX CONCURRENTLY inside a transaction block, so genuinely
+-- online/non-blocking index creation is not something this migration
+-- tooling can express here - writing CONCURRENTLY into this file would
+-- simply make the migration fail outright, not run it safely. This file's
+-- plain CREATE/DROP INDEX statements are therefore not lock-free: while
+-- each index is being built, Postgres holds a SHARE lock on
+-- historical_observations, which blocks concurrent INSERT/UPDATE/DELETE
+-- (never SELECT) against it for that statement's duration.
+--
+-- DROP INDEX is a fast, metadata-only operation regardless of table size -
+-- not a practical concern at any point.
+--
+-- The two CREATE UNIQUE INDEX statements scan and sort the table and are
+-- the real cost, proportional to historical_observations' row count at
+-- migration time. For a small/dev table (true today) running this
+-- migration as-is is fine. For a production database where
+-- historical_observations has grown large enough that a multi-second
+-- write-blocking window would matter, the safe operational procedure is:
+-- BEFORE running `npm run db:migrate`, manually run the equivalent
+-- CONCURRENTLY statements against that database, outside any transaction:
+--
+--   DROP INDEX CONCURRENTLY IF EXISTS historical_observations_dedup_unique;
+--   CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS historical_observations_block_hash_identity_unique
+--     ON historical_observations (entity_type, entity_id, metric, block_number, block_hash)
+--     WHERE block_number IS NOT NULL AND block_hash IS NOT NULL;
+--   CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS historical_observations_block_only_identity_unique
+--     ON historical_observations (entity_type, entity_id, metric, block_number)
+--     WHERE block_number IS NOT NULL AND block_hash IS NULL;
+--
+-- With IF NOT EXISTS added to this file's own statements below, the
+-- standard migration then finds both indexes already present and
+-- completes as a fast no-op for them, taking only DROP INDEX's brief,
+-- non-blocking-of-writes-in-practice metadata lock. This is the safest
+-- strategy actually available within this project's migration setup -
+-- not a claim of true zero-downtime, since the manual pre-step above is
+-- still a real, separate operational action an operator has to take.
+DROP INDEX IF EXISTS "historical_observations_dedup_unique";--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "historical_observations_block_hash_identity_unique" ON "historical_observations" USING btree ("entity_type","entity_id","metric","block_number","block_hash") WHERE "historical_observations"."block_number" is not null and "historical_observations"."block_hash" is not null;--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "historical_observations_block_only_identity_unique" ON "historical_observations" USING btree ("entity_type","entity_id","metric","block_number") WHERE "historical_observations"."block_number" is not null and "historical_observations"."block_hash" is null;

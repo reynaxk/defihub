@@ -457,6 +457,29 @@ export const historicalObservations = pgTable(
     uniqueIndex("historical_observations_block_only_identity_unique")
       .on(table.entityType, table.entityId, table.metric, table.blockNumber)
       .where(sql`${table.blockNumber} is not null and ${table.blockHash} is null`),
+    // A native pool TVL observation without a block hash isn't reliable
+    // provenance - it can't be checked against a reorg later, and it's
+    // exactly the "block number only" case the second index above exists
+    // for, which this constraint now closes off specifically for
+    // (entityType: "pool", metric: "tvl_usd") going forward. Scoped to
+    // that one entityType/metric pair, not the whole table - a different,
+    // future metric that legitimately has no block-level provenance stays
+    // completely unconstrained by this rule (see column comments above).
+    // Added `NOT VALID` (in the migration, not expressible here) rather
+    // than fully validated: real historical rows already exist that
+    // predate blockHash tracking (see blockHash's own column comment,
+    // "or predates this column") - those are genuine data, not defects,
+    // and this constraint must not force dropping or rewriting them to be
+    // added. NOT VALID enforces the rule for every new insert/update from
+    // this point forward without retroactively scanning/rejecting rows
+    // that were always going to fail it. See recordPoolVerification in
+    // verify-pool.ts, which now refuses to write a pool/tvl_usd
+    // observation at all when blockHash is unavailable, rather than
+    // relying on this constraint alone to catch it.
+    check(
+      "historical_observations_pool_tvl_requires_block_identity",
+      sql`${table.entityType} <> 'pool' OR ${table.metric} <> 'tvl_usd' OR (${table.blockNumber} IS NOT NULL AND ${table.blockHash} IS NOT NULL)`,
+    ),
   ],
 );
 

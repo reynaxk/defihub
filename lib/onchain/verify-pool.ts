@@ -385,6 +385,22 @@ export interface PoolVerificationRecord {
 // inline in verifyAllPools' loop) specifically so this transactional
 // behavior - including its failure path - is directly testable against
 // real seeded data, without a live RPC/price-provider round trip.
+//
+// The history write requires BOTH a poolId and a blockHash - not just the
+// poolId check this function used to have. A pool TVL observation without
+// a block hash isn't reliable provenance (it can't be checked against a
+// reorg later - see lib/onchain/reorg.ts), so this function refuses to
+// create one rather than persisting a null-hash row and hoping nothing
+// downstream relies on it. This mirrors (and is backed by) the database's
+// own historical_observations_pool_tvl_requires_block_identity check
+// constraint - enforced here too, at the application layer, since relying
+// on the database alone would surface this as an opaque constraint-
+// violation error instead of a clean, expected skip. onchain_verifications
+// (the "latest value" the UI reads) still commits either way - a missing
+// hash doesn't make the latest TVL figure itself untrustworthy, only the
+// durable history record of it. The next verification run - on whatever
+// block is current then - tries again; there's no separate "retry the
+// same block" path, since the chain has already moved on by the next run.
 export async function recordPoolVerification(record: PoolVerificationRecord): Promise<void> {
   await db.transaction(async (tx) => {
     await tx
@@ -409,7 +425,7 @@ export async function recordPoolVerification(record: PoolVerificationRecord): Pr
         },
       });
 
-    if (record.poolId) {
+    if (record.poolId && record.blockHash != null) {
       await tx
         .insert(historicalObservations)
         .values({
@@ -427,38 +443,24 @@ export async function recordPoolVerification(record: PoolVerificationRecord): Pr
           source: "onchain-verification",
           calculationVersion: record.calculationVersion,
         })
-        // Explicit target, matching whichever of the two partial block-
-        // identity indexes actually applies to this row (see their own
-        // schema comment) - not a bare onConflictDoNothing(), which would
-        // silently absorb a conflict against *any* unique index on this
-        // table, including ones this insert didn't intend to dedupe
-        // against. Postgres resolves ON CONFLICT by matching both the
-        // column list and the WHERE predicate to one specific index, so
-        // the predicate here has to mirror the index's own exactly -
-        // record.blockHash's nullness is known at insert time, so the
-        // correct one can be picked deterministically rather than guessed.
-        .onConflictDoNothing(
-          record.blockHash == null
-            ? {
-                target: [
-                  historicalObservations.entityType,
-                  historicalObservations.entityId,
-                  historicalObservations.metric,
-                  historicalObservations.blockNumber,
-                ],
-                where: sql`${historicalObservations.blockNumber} is not null and ${historicalObservations.blockHash} is null`,
-              }
-            : {
-                target: [
-                  historicalObservations.entityType,
-                  historicalObservations.entityId,
-                  historicalObservations.metric,
-                  historicalObservations.blockNumber,
-                  historicalObservations.blockHash,
-                ],
-                where: sql`${historicalObservations.blockNumber} is not null and ${historicalObservations.blockHash} is not null`,
-              },
-        );
+        // Explicit target, matching historical_observations_block_hash_identity_unique
+        // (see its own schema comment) - not a bare onConflictDoNothing(),
+        // which would silently absorb a conflict against *any* unique
+        // index on this table, including ones this insert didn't intend to
+        // dedupe against. Always the "hash known" partial index here, never
+        // the "block number only" one - the `record.blockHash != null`
+        // check above guarantees this insert always has a real hash, so
+        // that's the only index a pool/tvl_usd row can ever match.
+        .onConflictDoNothing({
+          target: [
+            historicalObservations.entityType,
+            historicalObservations.entityId,
+            historicalObservations.metric,
+            historicalObservations.blockNumber,
+            historicalObservations.blockHash,
+          ],
+          where: sql`${historicalObservations.blockNumber} is not null and ${historicalObservations.blockHash} is not null`,
+        });
     }
   });
 }

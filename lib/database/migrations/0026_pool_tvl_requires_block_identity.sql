@@ -1,0 +1,21 @@
+-- Added NOT VALID, deliberately not followed by VALIDATE CONSTRAINT (both
+-- hand-edited onto drizzle-kit's plain generated ADD CONSTRAINT).
+--
+-- ADD CONSTRAINT ... CHECK (...) NOT VALID only takes a brief metadata
+-- lock (SHARE UPDATE EXCLUSIVE) and does not scan the table, so it applies
+-- the rule to every new INSERT/UPDATE from this moment forward without
+-- blocking concurrent reads or writes while it's added - the standard safe
+-- pattern for adding a CHECK constraint to a live table.
+--
+-- VALIDATE CONSTRAINT (which *would* scan every existing row and enforce
+-- the rule retroactively) is intentionally never run here, in any
+-- environment: real historical_observations rows already exist - written
+-- by workers/onchain/verify.ts before this project's blockHash column was
+-- added - with entityType "pool", metric "tvl_usd", and a null blockHash.
+-- Those rows are genuine prior data, not defects (see blockHash's own
+-- schema comment: "or predates this column - never backfilled or
+-- guessed"), and this constraint must not force dropping or rewriting them
+-- to be added. NOT VALID without a later VALIDATE is exactly Postgres's
+-- supported way to grandfather them in permanently while still enforcing
+-- the invariant going forward.
+ALTER TABLE "historical_observations" ADD CONSTRAINT "historical_observations_pool_tvl_requires_block_identity" CHECK ("historical_observations"."entity_type" <> 'pool' OR "historical_observations"."metric" <> 'tvl_usd' OR ("historical_observations"."block_number" IS NOT NULL AND "historical_observations"."block_hash" IS NOT NULL)) NOT VALID;

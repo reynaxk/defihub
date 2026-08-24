@@ -1,9 +1,19 @@
 # Data sources & methodology
 
-DeFiHub doesn't compute TVL, fees, revenue, volume, or APY itself — it
-displays each provider's own numbers, normalized into a common shape. If a
-figure looks wrong, the question is "does DefiLlama/CoinGecko show the same
-number," not "did DeFiHub's math go wrong."
+For nearly every metric in the app, DeFiHub doesn't compute TVL, fees,
+revenue, volume, or APY itself — it displays each provider's own numbers,
+normalized into a common shape. If a figure looks wrong, the question is
+usually "does DefiLlama/CoinGecko show the same number," not "did DeFiHub's
+math go wrong." The deliberate exception is on-chain verification
+(`lib/onchain/`) — a small, hand-curated set of figures DeFiHub computes or
+reads directly from a live RPC call, in two forms: AMM pool TVL (summed
+directly from a pool contract's own ERC-20 balances) and single-figure
+protocol accounting (a value some protocols already expose as one
+dedicated view function on their own core contract, e.g. Lido's
+`getTotalPooledEther()`) — see [native-data.md](./native-data.md) for both.
+Neither replaces DefiLlama's protocol-wide TVL; both are clearly labeled as
+independently verified wherever they appear, never presented as if they
+were the provider's own number.
 
 ## DefiLlama (`lib/providers/defillama.ts`)
 
@@ -67,11 +77,15 @@ Free public tier without a key (rate-limited); a free Demo API key
   from two of DeFiHub's own snapshots. This matters because it means the
   figure is correct from the very first sync, rather than requiring two
   sync runs a day apart before it means anything.
-- **Decimals default to 18** (`tokens.decimals`) since neither endpoint used
-  here returns a token's actual decimal count, and nothing in the app
-  currently converts raw on-chain amounts using it — it's stored for future
-  use, not read anywhere yet. Don't trust it for anything that needs the
-  real value (e.g. USDC is 6, not 18).
+- **`tokens.decimals` is nullable, never defaulted to 18** — neither
+  CoinGecko endpoint used here returns a token's actual decimal count.
+  Nothing in this sync path converts raw on-chain amounts using it.
+  Where this app *does* need a real, trustworthy decimals value for an
+  on-chain calculation (the wallet balance reader, `pool_tokens.decimals`),
+  it's read live from the token contract itself
+  (`lib/chains/token-decimals.ts`) or hand-confirmed in
+  `lib/onchain/config.ts` — see [native-data.md](./native-data.md) — never
+  assumed from this sync.
 
 ## Adding a data source
 

@@ -104,7 +104,7 @@ export async function getChainProtocolCounts(chainIds: string[]): Promise<Map<st
   return new Map(rows.map((r) => [r.chainId, r.value]));
 }
 
-export async function getGlobalTvlHistory(): Promise<{ timestamp: Date; tvl: number }[]> {
+export async function getGlobalTvlHistory(): Promise<{ timestamp: Date; tvl: number | null }[]> {
   // `date_trunc('day', ts)` on a timestamptz truncates using the Postgres
   // *session's* TimeZone setting, not UTC - nothing in this app pins that
   // (lib/database/client.ts opens the connection with no timezone option),
@@ -132,7 +132,23 @@ export async function getGlobalTvlHistory(): Promise<{ timestamp: Date; tvl: num
   // `date_trunc` on a raw sql fragment comes back from the postgres driver
   // as a string, not a parsed Date, despite the sql<Date> type hint -
   // coerce explicitly rather than trusting that annotation at runtime.
-  return rows.map((r) => ({ timestamp: new Date(r.day), tvl: Number(r.tvl) }));
+  //
+  // `sum()` returns SQL NULL, not 0, for a day where every contributing
+  // chain_metrics row has a null tvl - Postgres aggregates ignore nulls and
+  // only produce one themselves when there's nothing real to sum. Root
+  // cause of a real bug (found during the Phase 4 historical-TVL audit):
+  // `Number(r.tvl)` here previously ran unconditionally, and `Number(null)`
+  // evaluates to `0` in JS, silently turning "no chain reported TVL that
+  // day" into a confident, wrong "$0" data point - exactly the silent
+  // zero-conversion this app's other history queries (getChainHistory,
+  // getProtocolHistory, ...) all deliberately avoid via the same `!= null`
+  // guard applied here now. computeTvlChanges and every RangedAreaChart
+  // consumer of this history already expect and correctly handle a
+  // `tvl: number | null` point (see app/page.tsx's `as number | null`
+  // cast on this exact field, previously dead code since this function
+  // could never actually produce a null) - this fix makes that contract
+  // real instead of just asserted.
+  return rows.map((r) => ({ timestamp: new Date(r.day), tvl: r.tvl != null ? Number(r.tvl) : null }));
 }
 
 // A single indexed id lookup, for callers (the history API route) that

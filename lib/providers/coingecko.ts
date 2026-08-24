@@ -46,6 +46,8 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 export class CoinGeckoProvider implements PriceProvider, TokenDiscoveryProvider {
+  readonly name = "coingecko";
+
   constructor(private readonly apiKey = process.env.COINGECKO_API_KEY) {}
 
   private async fetchJson(path: string): Promise<unknown> {

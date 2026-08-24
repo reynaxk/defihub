@@ -290,6 +290,208 @@ export const onchainVerifications = pgTable("onchain_verifications", {
 });
 
 // ---------------------------------------------------------------------------
+// Canonical on-chain entities (pools, pool tokens) - Phase 4
+//
+// Persists the same human-curated, research-verified entries already
+// defined in lib/onchain/config.ts's VERIFIED_POOLS as real, queryable
+// database rows, instead of only living as a TypeScript config array. The
+// config file stays the source of truth an engineer edits and reviews (see
+// its own module comment on why this app deliberately doesn't
+// auto-discover pools, and requires a human to confirm every entry before
+// it's added) - these tables are the derived, canonical representation
+// that the rest of the app can query like any other entity.
+// lib/onchain/pools.ts keeps them in sync with the config on every
+// verification run (upsert by configKey, never auto-discovered here
+// either).
+// ---------------------------------------------------------------------------
+
+export const pools = pgTable(
+  "pools",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    // Matches VERIFIED_POOLS' own `key` - the stable join back to the
+    // curated config entry this row was derived from.
+    configKey: varchar("config_key", { length: 64 }).notNull().unique(),
+    chainId: uuid("chain_id")
+      .notNull()
+      .references(() => chains.id, { onDelete: "cascade" }),
+    protocolId: uuid("protocol_id").references(() => protocols.id, { onDelete: "set null" }),
+    label: text("label").notNull(),
+    address: varchar("address", { length: 128 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex("pools_chain_address_unique").on(table.chainId, table.address)],
+);
+
+export const poolTokens = pgTable(
+  "pool_tokens",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    poolId: uuid("pool_id")
+      .notNull()
+      .references(() => pools.id, { onDelete: "cascade" }),
+    address: varchar("address", { length: 128 }).notNull(),
+    symbol: varchar("symbol", { length: 32 }).notNull(),
+    // Never defaulted (see lib/chains/token-decimals.ts's own comment on
+    // why 18 is never a safe assumption) - a pool token whose decimals
+    // couldn't be confirmed stays null rather than guessed.
+    decimals: integer("decimals"),
+    coingeckoId: varchar("coingecko_id", { length: 128 }),
+    // Preserves VERIFIED_POOLS' own token ordering (position in the
+    // array) - not semantically meaningful beyond display order.
+    position: integer("position").notNull(),
+  },
+  (table) => [uniqueIndex("pool_tokens_pool_position_unique").on(table.poolId, table.position)],
+);
+
+// ---------------------------------------------------------------------------
+// Historical observations - Phase 4
+//
+// A generic, append-only time series for DeFiHub-native calculated metrics
+// (currently: on-chain-verified pool TVL) - deliberately not specific to
+// pools, so a future native metric (another AMM adapter, a native price
+// source, ...) writes into this same table rather than each needing its
+// own history table. `onchain_verifications` above stays as the fast
+// "latest value" lookup the existing UI already reads (a single upserted
+// row per key, no history) - this table is the durable history that was
+// previously discarded on every overwrite.
+//
+// entityType/entityId is a deliberately simple pairing rather than a
+// polymorphic FK - Postgres has no clean native way to FK a column against
+// "whichever table entityType names," and a nullable FK column per
+// possible entity type doesn't scale as more entity types are added.
+// Consumers join back to the real table themselves using entityType to
+// pick which one (currently only "pool", referencing pools.id).
+// ---------------------------------------------------------------------------
+
+// The per-token snapshot an on-chain calculation actually used - enough to
+// mechanically redo the same calculation later (e.g. computePoolTvl) and
+// confirm it reproduces `value`, without needing anything not already
+// captured at calculation time. Never populated with placeholder/derived
+// values for a token whose real balance or price wasn't actually read.
+export interface HistoricalObservationCalculationInput {
+  symbol: string;
+  coingeckoId: string;
+  decimals: number;
+  balanceRaw: string; // exact on-chain integer balance, as a string (too large for a JS number in general)
+  // The exact decimal string the calculation actually used, not a
+  // `number` - a JS number can't losslessly hold every real decimal price
+  // (e.g. 0.1 isn't exactly representable in binary floating point), so
+  // storing this as `number` would round the "input" half of the
+  // provenance record even where the calculation itself stayed exact.
+  priceUsd: string;
+}
+
+export const historicalObservations = pgTable(
+  "historical_observations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    chainId: uuid("chain_id").references(() => chains.id, { onDelete: "cascade" }),
+    // e.g. "pool" - which table entityId's value refers to.
+    entityType: varchar("entity_type", { length: 32 }).notNull(),
+    entityId: uuid("entity_id").notNull(),
+    // e.g. "tvl_usd" - which figure this row is a snapshot of, so the same
+    // entity can eventually have more than one tracked native metric
+    // without a new table.
+    metric: varchar("metric", { length: 32 }).notNull(),
+    value: numeric("value", { precision: 32, scale: 8 }).notNull(),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
+    blockNumber: numeric("block_number", { precision: 20, scale: 0 }),
+    // The pinned block's own hash, not just its number - a block number
+    // alone doesn't identify *which* chain history it belonged to if that
+    // height was later reorged onto a different canonical block. Null for
+    // any observation whose source never had a block to pin (or predates
+    // this column) - never backfilled or guessed.
+    blockHash: varchar("block_hash", { length: 128 }),
+    // Which price provider produced the price(s) baked into `value`, and
+    // when they were fetched - both null for an observation with no
+    // external price input (or that predates this column). Together with
+    // calculationInputs below, this is what makes a native calculation
+    // replayable: the exact inputs, and where/when they came from.
+    priceSource: varchar("price_source", { length: 64 }),
+    priceRetrievedAt: timestamp("price_retrieved_at", { withTimezone: true }),
+    calculationInputs: jsonb("calculation_inputs").$type<HistoricalObservationCalculationInput[]>(),
+    // e.g. "onchain-verification" - which subsystem computed this, for the
+    // native-vs-external provenance distinction (never label externally-
+    // sourced data as DeFiHub-native, or vice versa).
+    source: varchar("source", { length: 64 }).notNull(),
+    // Free-form, optional - lets a future change to how a metric is
+    // computed (e.g. a new AMM adapter's math) be distinguished from
+    // observations computed the old way, without needing to backfill or
+    // silently mix incompatible historical figures.
+    calculationVersion: varchar("calculation_version", { length: 32 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("historical_observations_entity_idx").on(table.entityType, table.entityId, table.metric, table.timestamp),
+    // Block-level idempotency, not timestamp-level: `timestamp` is the
+    // wall-clock moment a verification run happened to execute, which
+    // differs on every retry even when the run reads the exact same chain
+    // block - a (entityType, entityId, metric, timestamp) unique index
+    // (this table's original dedup guard, removed by this migration)
+    // therefore never actually caught a retried observation of the same
+    // block, since that timestamp essentially never repeats. Identity here
+    // is the block itself: same pool + same block number + same block hash
+    // is one observation; same block number with a *different* hash is a
+    // distinct, legitimate observation (a reorg moved that height onto
+    // different chain history, and both are real data worth keeping).
+    //
+    // Two *partial* unique indexes, not one - scoped to `blockNumber IS
+    // NOT NULL` so a row with no block at all (any current entityType/
+    // metric other than "pool"/"tvl_usd", or a future one) is entirely
+    // outside this rule and free to repeat, same as before. Split into two
+    // rather than one to make blockHash's nullability explicitly null-safe
+    // without relying on ordinary SQL NULL semantics (where two NULLs are
+    // never "equal," so duplicate no-hash rows for the same block would
+    // otherwise silently accumulate) - the "hash known" and "hash unknown"
+    // cases are mutually exclusive by their own predicates, so exactly one
+    // of the two ever applies to a given row, and either one is expressible
+    // as a plain-column partial index (no COALESCE expression needed),
+    // which keeps the insert's ON CONFLICT target fully typed - see
+    // recordPoolVerification in verify-pool.ts, which picks whichever of
+    // the two applies based on whether it's inserting a known blockHash.
+    uniqueIndex("historical_observations_block_hash_identity_unique")
+      .on(table.entityType, table.entityId, table.metric, table.blockNumber, table.blockHash)
+      .where(sql`${table.blockNumber} is not null and ${table.blockHash} is not null`),
+    uniqueIndex("historical_observations_block_only_identity_unique")
+      .on(table.entityType, table.entityId, table.metric, table.blockNumber)
+      .where(sql`${table.blockNumber} is not null and ${table.blockHash} is null`),
+    // A native pool TVL observation without a block hash isn't reliable
+    // provenance - it can't be checked against a reorg later, and it's
+    // exactly the "block number only" case the second index above exists
+    // for, which this constraint now closes off specifically for
+    // (entityType: "pool", metric: "tvl_usd") going forward. Scoped to
+    // that one entityType/metric pair, not the whole table - a different,
+    // future metric that legitimately has no block-level provenance stays
+    // completely unconstrained by this rule (see column comments above).
+    // Added `NOT VALID` (in the migration, not expressible here) rather
+    // than fully validated: real historical rows already exist that
+    // predate blockHash tracking (see blockHash's own column comment,
+    // "or predates this column") - those are genuine data, not defects,
+    // and this constraint must not force dropping or rewriting them to be
+    // added. NOT VALID enforces the rule for every new insert/update from
+    // this point forward without retroactively scanning/rejecting rows
+    // that were always going to fail it. See recordPoolVerification in
+    // verify-pool.ts, which now refuses to write a pool/tvl_usd
+    // observation at all when blockHash is unavailable, rather than
+    // relying on this constraint alone to catch it. Rejects an empty
+    // string as well as NULL - "null/empty/fabricated" are all the same
+    // failure from this constraint's point of view: no real block
+    // identity. Full 64-hex-character format validation lives at the
+    // application layer instead (VALID_BLOCK_HASH in verify-pool.ts) - a
+    // regex that specific would be an unusual thing for a table-wide CHECK
+    // constraint to encode, and this constraint's job is the coarser
+    // "never null, never empty" floor, matching this schema's other CHECK
+    // constraints (e.g. users_email_lowercase, below).
+    check(
+      "historical_observations_pool_tvl_requires_block_identity",
+      sql`${table.entityType} <> 'pool' OR ${table.metric} <> 'tvl_usd' OR (${table.blockNumber} IS NOT NULL AND ${table.blockHash} IS NOT NULL AND ${table.blockHash} <> '')`,
+    ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Auth.js (users / OAuth accounts / verification tokens)
 // JWT session strategy is used (required by the Credentials provider), so no
 // `sessions` table is needed.
@@ -607,4 +809,18 @@ export const onchainVerificationsRelations = relations(onchainVerifications, ({ 
     fields: [onchainVerifications.chainId],
     references: [chains.id],
   }),
+}));
+
+export const poolsRelations = relations(pools, ({ one, many }) => ({
+  chain: one(chains, { fields: [pools.chainId], references: [chains.id] }),
+  protocol: one(protocols, { fields: [pools.protocolId], references: [protocols.id] }),
+  tokens: many(poolTokens),
+}));
+
+export const poolTokensRelations = relations(poolTokens, ({ one }) => ({
+  pool: one(pools, { fields: [poolTokens.poolId], references: [pools.id] }),
+}));
+
+export const historicalObservationsRelations = relations(historicalObservations, ({ one }) => ({
+  chain: one(chains, { fields: [historicalObservations.chainId], references: [chains.id] }),
 }));

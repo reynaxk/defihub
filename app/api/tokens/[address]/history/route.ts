@@ -5,8 +5,13 @@ import { isChartRangeKey, sinceForRange } from "@/lib/charts/ranges";
 
 // Internal, app-only endpoint (not part of the documented /api/v1/* public
 // API) - powers RangedAreaChart's range switcher on the token detail
-// page's price/market-cap charts.
-const HISTORY_LIMIT = { limit: 60, windowMs: 60 * 1000 };
+// page's price/market-cap charts, and the stablecoins page's per-asset
+// supply-history tabs. 180/min (raised from 60 during the Phase 4
+// historical-TVL audit): confirmed live that 60/min is realistic to
+// exhaust through ordinary active browsing, and a fetch failure here is
+// exactly the trigger for the "chart shows the wrong range's data" bug
+// fixed in computeChartDisplayState.
+const HISTORY_LIMIT = { limit: 180, windowMs: 60 * 1000 };
 
 export async function GET(request: Request, { params }: { params: Promise<{ address: string }> }) {
   const ip = getClientIp(request);

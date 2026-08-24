@@ -20,6 +20,11 @@ generated from it, never hand-written).
 | `users`, `accounts`, `verification_token` | Auth.js tables | No `sessions` table — JWT strategy doesn't need one |
 | `watchlist` | User's watched protocols/chains/tokens | One of `protocol_id`/`chain_id`/`token_id` is set per row; three plain unique composite indexes `(user_id, protocol_id)` etc. enforce "at most one watch per user per entity" — Postgres treats each `NULL` as distinct in a unique index, so the two always-null columns on any given row don't collide with each other |
 | `alerts` | User-defined threshold alerts | `type` + `target` (a slug/address/id) + `condition` + `threshold` |
+| `onchain_verifications` | Latest DeFiHub-computed on-chain TVL per verified pool/read | One upserted row per key, no history — see `historical_observations` below. See [native-data.md](./native-data.md) |
+| `sync_runs` | Per-worker sync run tracking (status/duration/counts) | Generic across workers via a `metadata` jsonb column |
+| `indexing_state` | Generic `(chain_slug, component)` cursor for resumable indexing | Not wired to every worker — only the small event-ingestion example uses it today |
+| `pools`, `pool_tokens` | Canonical AMM pools DeFiHub verifies on-chain, and the tokens each one holds | Synced from `lib/onchain/config.ts`'s `VERIFIED_POOLS` by `configKey`, not auto-discovered. See [native-data.md](./native-data.md) |
+| `historical_observations` | Generic time series for DeFiHub-native calculated metrics | Rows are `(entity_type, entity_id, metric, timestamp)` — currently only `entityType: "pool"`, `metric: "tvl_usd"`. Deduped at *block* granularity (two partial unique indexes on `entity_type, entity_id, metric, block_number[, block_hash]`), not by `timestamp` — see [native-data.md](./native-data.md#reliability--security) |
 
 ## Design decisions worth knowing
 
@@ -59,6 +64,19 @@ tooling — a mistake gets fixed with a new forward migration, not a rollback.
    helps — see the `tokens_address_idx` addition for the pattern (confirmed
    via `EXPLAIN` that the planner switched from a sequential scan to a
    bitmap index scan before considering it done).
+5. If the migration adds an index to a table that could already be large
+   in production, `npm run db:migrate` alone isn't lock-free — drizzle-kit
+   wraps every statement in one transaction, and Postgres refuses `CREATE
+   INDEX CONCURRENTLY` inside a transaction block, so a plain `CREATE
+   INDEX` holds a write-blocking lock for as long as the build takes. The
+   pattern for this (see `lib/database/migrations/scripts/0025-create-block-identity-indexes-concurrently.ts`,
+   run via `npm run db:migrate:0025-concurrent-indexes`, and
+   [native-data.md](./native-data.md#reliability--security)) is a small
+   companion script that creates the same index(es) `CONCURRENTLY` as
+   plain top-level (non-transactional) calls, with `IF NOT EXISTS` on both
+   the script and the migration's own statements so either order is safe
+   - run the script before `db:migrate` when the table might be large,
+   skip it otherwise.
 
 ## Local setup
 

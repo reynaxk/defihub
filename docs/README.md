@@ -8,6 +8,11 @@ exists is worse than no doc.
 - **[architecture.md](./architecture.md)** — the data pipeline, provider
   abstraction, why there's no in-house blockchain indexer, graceful
   degradation, auth, rate limiting, observability.
+- **[native-data.md](./native-data.md)** — the Phase 4 foundation for
+  DeFiHub-computed (not aggregator-sourced) metrics: RPC/indexer
+  primitives, canonical pool entities, native AMM TVL calculation,
+  historical observations, and the historical-TVL chart bug found and
+  fixed during that work.
 - **[database.md](./database.md)** — schema overview, the `DISTINCT ON`
   pattern for "latest snapshot," index design notes, migration workflow.
 - **[data-sources.md](./data-sources.md)** — exact DefiLlama/CoinGecko

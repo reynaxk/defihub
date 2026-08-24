@@ -89,6 +89,32 @@ describe("computePoolTvl", () => {
     }
   });
 
+  it("rejects a token whose decimals exceed the calculation scale, rather than silently truncating its raw balance", () => {
+    // CALCULATION_SCALE is 30 - no real ERC-20 this app tracks comes close
+    // (18 is the practical maximum), but the function's own contract is
+    // exact arithmetic or an explicit failure, never silent precision
+    // loss for whatever input arrives. 31 decimals can't be rescaled up to
+    // 30 by multiplication - the only alternative would be dividing the
+    // raw balance back down, discarding real digits while still claiming
+    // an "exact" result.
+    const tokens: PoolTvlToken[] = [{ symbol: "EXOTIC", decimals: 31, coingeckoId: "exotic-token" }];
+    const result = computePoolTvl(tokens, [BigInt("123456789012345678901234567890123")], new Map([["exotic-token", "1"]]));
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.error).toContain("EXOTIC");
+    expect(!result.ok && result.error).toContain("31");
+  });
+
+  it("accepts a token whose decimals exactly equal the calculation scale (the boundary case)", () => {
+    const tokens: PoolTvlToken[] = [{ symbol: "EDGE", decimals: 30, coingeckoId: "edge-token" }];
+    // 1 raw unit at 30 decimals = 1e-30 tokens; priced at $1, the whole
+    // pool's TVL from this token is a vanishingly small but real, non-zero
+    // number - proving the boundary (decimals === CALCULATION_SCALE)
+    // computes rather than being swept into the same rejection as
+    // decimals > CALCULATION_SCALE.
+    const result = computePoolTvl(tokens, [BigInt(1)], new Map([["edge-token", "1"]]));
+    expect(result).toEqual({ ok: true, tvlUsd: "0." + "0".repeat(29) + "1" });
+  });
+
   it("handles a huge balance without overflow or precision collapse", () => {
     const tokens: PoolTvlToken[] = [{ symbol: "BIG", decimals: 18, coingeckoId: "big-token" }];
     // 10 billion tokens at 18 decimals - a genuinely large but real-world-

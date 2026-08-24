@@ -511,13 +511,21 @@ being treated as done.
   confirmed at implementation time by running both migrations against a
   database that already had real `historical_observations` rows. For a
   production database where that table has grown large enough for a
-  write-blocking window to matter, `0025`'s own top-of-file comment
-  documents the operational workaround: manually run the equivalent
-  `CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS` statements outside a
-  transaction before running the standard migration, so it then finds both
-  indexes already present and completes near-instantly. This is the
-  safest strategy actually available within this project's migration
-  setup - stated as such, not as a claim of true zero-downtime.
+  write-blocking window to matter, `0025` ships an actual companion deploy
+  step, not just a comment to copy SQL from -
+  `npm run db:migrate:0025-concurrent-indexes`
+  (`lib/database/migrations/scripts/0025-create-block-identity-indexes-concurrently.ts`)
+  runs the equivalent `CREATE`/`DROP INDEX CONCURRENTLY` statements as
+  plain top-level (non-transactional) calls, since that's the only way
+  Postgres allows `CONCURRENTLY` at all. Run before `npm run db:migrate`;
+  every statement on both sides is `IF [NOT] EXISTS`, so running the
+  concurrent script first is always safe (including against a database
+  that already applied 0025 the normal way, or a small/dev database where
+  it isn't needed) - whichever path runs first leaves nothing for the
+  other to do. This is the safest strategy actually available within this
+  project's migration setup, genuinely integrated into how the project
+  deploys - not a claim of true zero-downtime, since running the script is
+  still a real, separate step a deploy has to take before `db:migrate`.
 - **Reorg safety:** every on-chain read in `verify-pool.ts` pins to
   `head - confirmationsFor(chainSlug)`, not the raw chain head, using the
   pre-existing per-chain confirmation depths in `lib/chains/confirmations.ts`.

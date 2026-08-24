@@ -195,16 +195,29 @@ export function computePoolTvl(
       return { ok: false, error: `invalid USD price for ${token.symbol}: ${price}` };
     }
 
+    // A token whose confirmed decimals exceed CALCULATION_SCALE can't be
+    // rescaled up to it by multiplication - the only alternative is
+    // dividing back down, which discards whatever's below CALCULATION_SCALE
+    // and silently truncates the raw balance. CALCULATION_SCALE (30)
+    // comfortably exceeds every real ERC-20 this app tracks (18 is the
+    // practical maximum), so this is a defensive, not a practical, case -
+    // but "practically doesn't happen" isn't "exact," and this function's
+    // entire contract is exact arithmetic or an explicit failure, never a
+    // silent precision loss. Rejecting outright (rather than adding
+    // arbitrary-precision support for a case with no known real-world
+    // instance) keeps that contract simple and honest.
+    if (token.decimals > CALCULATION_SCALE) {
+      return {
+        ok: false,
+        error: `unsupported decimals for ${token.symbol}: ${token.decimals} exceeds this calculation's ${CALCULATION_SCALE}-decimal scale`,
+      };
+    }
+
     // Raw on-chain integer (token.decimals precision) -> exact fixed-point
     // at CALCULATION_SCALE. Pure integer rescaling - no remainder
-    // discarded, since CALCULATION_SCALE (30) comfortably exceeds every
-    // real ERC-20's decimals (18 is the practical maximum this app
-    // tracks); the division branch only exists for a token whose
-    // confirmed decimals somehow exceeds that.
-    const balanceAtScale =
-      CALCULATION_SCALE >= token.decimals
-        ? balance * BigInt(10) ** BigInt(CALCULATION_SCALE - token.decimals)
-        : balance / BigInt(10) ** BigInt(token.decimals - CALCULATION_SCALE);
+    // discarded; the check above guarantees the exponent here is never
+    // negative.
+    const balanceAtScale = balance * BigInt(10) ** BigInt(CALCULATION_SCALE - token.decimals);
 
     // price is already an exact decimal string (see priceById above) -
     // parseUnits parses and rounds it using exact integer arithmetic

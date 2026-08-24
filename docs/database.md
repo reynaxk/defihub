@@ -64,6 +64,19 @@ tooling — a mistake gets fixed with a new forward migration, not a rollback.
    helps — see the `tokens_address_idx` addition for the pattern (confirmed
    via `EXPLAIN` that the planner switched from a sequential scan to a
    bitmap index scan before considering it done).
+5. If the migration adds an index to a table that could already be large
+   in production, `npm run db:migrate` alone isn't lock-free — drizzle-kit
+   wraps every statement in one transaction, and Postgres refuses `CREATE
+   INDEX CONCURRENTLY` inside a transaction block, so a plain `CREATE
+   INDEX` holds a write-blocking lock for as long as the build takes. The
+   pattern for this (see `lib/database/migrations/scripts/0025-create-block-identity-indexes-concurrently.ts`,
+   run via `npm run db:migrate:0025-concurrent-indexes`, and
+   [native-data.md](./native-data.md#reliability--security)) is a small
+   companion script that creates the same index(es) `CONCURRENTLY` as
+   plain top-level (non-transactional) calls, with `IF NOT EXISTS` on both
+   the script and the migration's own statements so either order is safe
+   - run the script before `db:migrate` when the table might be large,
+   skip it otherwise.
 
 ## Local setup
 

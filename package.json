@@ -10,6 +10,7 @@
     "test": "dotenv -e .env.local -- vitest run",
     "db:generate": "dotenv -e .env.local -- drizzle-kit generate",
     "db:migrate": "dotenv -e .env.local -- drizzle-kit migrate",
+    "db:migrate:0025-concurrent-indexes": "dotenv -e .env.local -- tsx lib/database/migrations/scripts/0025-create-block-identity-indexes-concurrently.ts",
     "db:studio": "dotenv -e .env.local -- drizzle-kit studio",
     "seed": "dotenv -e .env.local -- tsx lib/database/seed.ts",
     "sync:protocols": "dotenv -e .env.local -- tsx workers/protocols/sync.ts",

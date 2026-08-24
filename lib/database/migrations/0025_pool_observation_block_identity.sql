@@ -19,27 +19,28 @@
 -- The two CREATE UNIQUE INDEX statements scan and sort the table and are
 -- the real cost, proportional to historical_observations' row count at
 -- migration time. For a small/dev table (true today) running this
--- migration as-is is fine. For a production database where
--- historical_observations has grown large enough that a multi-second
--- write-blocking window would matter, the safe operational procedure is:
--- BEFORE running `npm run db:migrate`, manually run the equivalent
--- CONCURRENTLY statements against that database, outside any transaction:
+-- migration as-is is fine.
 --
---   DROP INDEX CONCURRENTLY IF EXISTS historical_observations_dedup_unique;
---   CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS historical_observations_block_hash_identity_unique
---     ON historical_observations (entity_type, entity_id, metric, block_number, block_hash)
---     WHERE block_number IS NOT NULL AND block_hash IS NOT NULL;
---   CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS historical_observations_block_only_identity_unique
---     ON historical_observations (entity_type, entity_id, metric, block_number)
---     WHERE block_number IS NOT NULL AND block_hash IS NULL;
+-- For a production database where historical_observations has grown large
+-- enough that a multi-second write-blocking window would matter, this
+-- migration ships an actual companion deploy step, not just a comment to
+-- copy SQL from:
 --
--- With IF NOT EXISTS added to this file's own statements below, the
--- standard migration then finds both indexes already present and
--- completes as a fast no-op for them, taking only DROP INDEX's brief,
--- non-blocking-of-writes-in-practice metadata lock. This is the safest
--- strategy actually available within this project's migration setup -
--- not a claim of true zero-downtime, since the manual pre-step above is
--- still a real, separate operational action an operator has to take.
+--   npm run db:migrate:0025-concurrent-indexes
+--
+-- (lib/database/migrations/scripts/0025-create-block-identity-indexes-concurrently.ts)
+-- runs the equivalent CONCURRENTLY statements as plain top-level
+-- (non-transactional) calls - the only way Postgres allows CONCURRENTLY at
+-- all - before `npm run db:migrate` runs. With IF NOT EXISTS/IF EXISTS on
+-- every statement on both sides, running the concurrent script first is
+-- always safe, including against a small/dev database or one that already
+-- applied this migration the normal way: whichever path ran first leaves
+-- nothing for the other to do, so it completes as a fast no-op. This is
+-- the safest strategy actually available within this project's migration
+-- setup, genuinely integrated into how the project deploys - not a claim
+-- of true zero-downtime, since running the concurrent-index script is
+-- still a real, separate step an operator (or deploy pipeline) has to
+-- take before `db:migrate`, not something `db:migrate` does on its own.
 DROP INDEX IF EXISTS "historical_observations_dedup_unique";--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "historical_observations_block_hash_identity_unique" ON "historical_observations" USING btree ("entity_type","entity_id","metric","block_number","block_hash") WHERE "historical_observations"."block_number" is not null and "historical_observations"."block_hash" is not null;--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "historical_observations_block_only_identity_unique" ON "historical_observations" USING btree ("entity_type","entity_id","metric","block_number") WHERE "historical_observations"."block_number" is not null and "historical_observations"."block_hash" is null;

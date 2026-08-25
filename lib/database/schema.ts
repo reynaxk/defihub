@@ -421,6 +421,22 @@ export const historicalObservations = pgTable(
     // observations computed the old way, without needing to backfill or
     // silently mix incompatible historical figures.
     calculationVersion: varchar("calculation_version", { length: 32 }),
+    // Null (the default, for every row ever written by recordPoolVerification)
+    // means this observation is still considered canonical history. Set only
+    // by workers/onchain/recheck-reorgs.ts, the moment it determines this
+    // row's pinned blockHash no longer matches the chain's current canonical
+    // hash at that block number - i.e. a reorg moved this height onto
+    // different chain history after the observation was written. Additive
+    // and non-destructive on purpose (see migration 0027's own comment): the
+    // row, and every provenance field on it (blockNumber, blockHash,
+    // calculationInputs, priceSource, ...), is never touched or deleted -
+    // only this one column changes, so the full record stays available for
+    // debugging/audit. getPoolTvlHistory/getPoolObservationCount (queries/
+    // pools.ts) exclude any row where this is non-null from canonical
+    // results; getObservationsNeedingRecheck (queries/onchain-recheck.ts)
+    // also excludes such rows from future recheck candidates, since a
+    // block's outcome here doesn't need re-verifying once determined.
+    reorgInvalidatedAt: timestamp("reorg_invalidated_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [

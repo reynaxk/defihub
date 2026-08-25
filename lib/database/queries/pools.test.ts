@@ -427,6 +427,72 @@ describe("pool TVL query functions", () => {
         ]),
       ).rejects.toThrow();
     });
+
+    it("returns a canonical observation normally, but excludes a sibling row workers/onchain/recheck-reorgs.ts has since marked as reorged", async () => {
+      const { chainId, poolId } = await makeChainAndPool();
+      await db.insert(historicalObservations).values([
+        {
+          chainId,
+          entityType: "pool",
+          entityId: poolId,
+          metric: "tvl_usd",
+          value: "100",
+          timestamp: BEFORE,
+          source: "onchain-verification",
+          ...nextBlock(),
+        },
+        {
+          chainId,
+          entityType: "pool",
+          entityId: poolId,
+          metric: "tvl_usd",
+          value: "999",
+          timestamp: AFTER,
+          source: "onchain-verification",
+          reorgInvalidatedAt: new Date(),
+          ...nextBlock(),
+        },
+      ]);
+
+      const result = await getPoolTvlHistory(poolId, null);
+      expect(result).toHaveLength(1);
+      expect(result[0].value).toBe("100.00000000");
+    });
+
+    it("shows a later canonical replacement once written, even though an earlier observation for the same pool was invalidated by a detected reorg", async () => {
+      const { chainId, poolId } = await makeChainAndPool();
+      // The reorged observation and its eventual canonical replacement, in
+      // the order they'd realistically occur: the original write, then
+      // (once recheck-reorgs.ts detects the reorg and marks it) a fresh
+      // verify-onchain run writes a new, currently-canonical observation.
+      await db.insert(historicalObservations).values([
+        {
+          chainId,
+          entityType: "pool",
+          entityId: poolId,
+          metric: "tvl_usd",
+          value: "100",
+          timestamp: BEFORE,
+          source: "onchain-verification",
+          reorgInvalidatedAt: new Date(),
+          ...nextBlock(),
+        },
+        {
+          chainId,
+          entityType: "pool",
+          entityId: poolId,
+          metric: "tvl_usd",
+          value: "150",
+          timestamp: AFTER,
+          source: "onchain-verification",
+          ...nextBlock(),
+        },
+      ]);
+
+      const result = await getPoolTvlHistory(poolId, null);
+      expect(result).toHaveLength(1);
+      expect(result[0].value).toBe("150.00000000");
+    });
   });
 
   describe("normalizePoolTvlHistoryLimit", () => {
@@ -477,6 +543,28 @@ describe("pool TVL query functions", () => {
       const result = await getPoolObservationCount(poolId);
       expect(result.count).toBe(0);
       expect(result.earliestAt).toBeNull();
+    });
+
+    it("excludes a reorg-invalidated observation from the count and from earliestAt", async () => {
+      const { chainId, poolId } = await makeChainAndPool();
+      await db.insert(historicalObservations).values([
+        {
+          chainId,
+          entityType: "pool",
+          entityId: poolId,
+          metric: "tvl_usd",
+          value: "1",
+          timestamp: BEFORE,
+          source: "onchain-verification",
+          reorgInvalidatedAt: new Date(),
+          ...nextBlock(),
+        },
+        { chainId, entityType: "pool", entityId: poolId, metric: "tvl_usd", value: "2", timestamp: AFTER, source: "onchain-verification", ...nextBlock() },
+      ]);
+
+      const result = await getPoolObservationCount(poolId);
+      expect(result.count).toBe(1);
+      expect(result.earliestAt?.getTime()).toBe(AFTER.getTime());
     });
   });
 

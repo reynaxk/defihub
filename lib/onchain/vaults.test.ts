@@ -8,12 +8,14 @@
 // function's whole job is to populate `vaults` with the real, permanent
 // canonical rows VERIFIED_VAULTS describes - those are the intended
 // production data, not disposable test fixtures.
-import { count, eq } from "drizzle-orm";
+import { count, eq, inArray } from "drizzle-orm";
 import { afterAll, describe, expect, it } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
 import { chains, vaults } from "@/lib/database/schema";
 import { VERIFIED_VAULTS } from "./config";
 import { syncVaultsFromConfig } from "./vaults";
+
+const REAL_VAULT_KEYS = VERIFIED_VAULTS.map((v) => v.key);
 
 describe("syncVaultsFromConfig", () => {
   afterAll(async () => {
@@ -45,11 +47,24 @@ describe("syncVaultsFromConfig", () => {
   });
 
   it("is idempotent - running it twice does not create duplicate vault rows", async () => {
-    await syncVaultsFromConfig();
-    const [{ value: firstCount }] = await db.select({ value: count() }).from(vaults);
+    // Scoped to VERIFIED_VAULTS' own keys, not a bare global count of the
+    // whole table - this test runs concurrently with other test files
+    // (e.g. lib/database/queries/vaults.test.ts, which inserts/deletes its
+    // own synthetic vault rows via a real Postgres connection) under
+    // vitest's default per-file parallelism, and an unscoped count can
+    // observe an unrelated file's row appear or disappear mid-test. Scoping
+    // by configKey makes this assertion depend only on what
+    // syncVaultsFromConfig itself did, immune to that race.
+    const countForRealVaults = async () => {
+      const [row] = await db.select({ value: count() }).from(vaults).where(inArray(vaults.configKey, REAL_VAULT_KEYS));
+      return row.value;
+    };
 
     await syncVaultsFromConfig();
-    const [{ value: secondCount }] = await db.select({ value: count() }).from(vaults);
+    const firstCount = await countForRealVaults();
+
+    await syncVaultsFromConfig();
+    const secondCount = await countForRealVaults();
 
     expect(secondCount).toBe(firstCount);
   });

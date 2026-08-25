@@ -1,13 +1,7 @@
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { erc20Abi, formatUnits, parseUnits, type Address } from "viem";
 import { db } from "@/lib/database/client";
-import {
-  historicalObservations,
-  onchainVerifications,
-  protocols,
-  chains,
-  type HistoricalObservationCalculationInput,
-} from "@/lib/database/schema";
+import { onchainVerifications, protocols, chains, type HistoricalObservationCalculationInput } from "@/lib/database/schema";
 import { priceProvider } from "@/lib/providers";
 import { VIEM_CHAIN_BY_SLUG } from "@/lib/chains/rpc-client";
 import { confirmationsFor } from "@/lib/chains/confirmations";
@@ -15,6 +9,7 @@ import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { logger } from "@/lib/observability/logger";
 import { VERIFIED_POOLS, type VerifiedPool } from "./config";
 import { syncPoolsFromConfig } from "./pools";
+import { recordVerification } from "./record-verification";
 
 // Bumped only if the sum-of-balances methodology itself changes (e.g. a
 // future AMM adapter that isn't "sum this contract's own ERC-20 balances")
@@ -399,117 +394,62 @@ export interface PoolVerificationRecord {
 // The atomic write at the heart of recording one pool's verification: the
 // upserted "latest value" (onchain_verifications) and the durable history
 // row (historical_observations) commit together, in one transaction, or
-// neither does. Without this, a failure on the second insert (e.g. a
-// constraint violation) would leave onchain_verifications already updated
-// to the new figure with no corresponding history row - a caller relying
-// on "both tables agree" can't tolerate that inconsistency. Same
-// db.transaction(async (tx) => {...}) mechanism already used for pool sync
-// (lib/onchain/pools.ts) - one pooled connection for the whole callback,
-// never a second one. Extracted into its own function (rather than left
-// inline in verifyAllPools' loop) specifically so this transactional
-// behavior - including its failure path - is directly testable against
-// real seeded data, without a live RPC/price-provider round trip.
+// neither does. The actual transaction logic lives in recordVerification
+// (record-verification.ts) - shared with recordVaultVerification
+// (verify-vault.ts), since the two were byte-for-byte identical except for
+// which config/table each pulled its own identifiers from. This wrapper's
+// job is entity-specific: translate PoolVerificationRecord's field names
+// into the shared record shape (poolKey passed through unchanged as the
+// onchain_verifications key - pools are never namespaced, preserving
+// exactly what Phase 4/5.1 already wrote, unlike vault keys - see
+// record-verification.ts's own comment), and own this entity type's
+// logging.
 //
 // The history write requires BOTH a poolId and a genuinely valid blockHash
 // (VALID_BLOCK_HASH - a real 32-byte hex hash, never null, never empty,
-// never a malformed/truncated string) - not just the poolId check this
-// function used to have. A pool TVL observation without a real block hash
-// isn't reliable provenance (it can't be checked against a reorg later -
-// see lib/onchain/reorg.ts), so this function refuses to create one rather
-// than persisting incomplete/fabricated provenance and hoping nothing
-// downstream relies on it. This mirrors (and is backed by) the database's
-// own historical_observations_pool_tvl_requires_block_identity check
-// constraint - enforced here too, at the application layer, since relying
-// on the database alone would surface this as an opaque constraint-
-// violation error instead of a clean, expected skip. onchain_verifications
-// (the "latest value" the UI reads) still commits either way - a missing
-// hash doesn't make the latest TVL figure itself untrustworthy, only the
-// durable history record of it. A skip is logged (logger.warn,
-// component: "onchain") specifically so it's an observable event, not a
-// silent one - see the else branch below. There's no separate "retry the
-// same block" path: the next scheduled verification run, on whatever
-// block is current then, is the retry.
+// never a malformed/truncated string). A pool TVL observation without a
+// real block hash isn't reliable provenance (it can't be checked against a
+// reorg later - see lib/onchain/reorg.ts), so recordVerification refuses
+// to create one rather than persisting incomplete/fabricated provenance.
+// onchain_verifications (the "latest value" the UI reads) still commits
+// either way - a missing hash doesn't make the latest TVL figure itself
+// untrustworthy, only the durable history record of it. A skip is logged
+// here (logger.warn, component: "onchain") specifically so it's an
+// observable event, not a silent one. There's no separate "retry the same
+// block" path: the next scheduled verification run, on whatever block is
+// current then, is the retry.
 export async function recordPoolVerification(record: PoolVerificationRecord): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
-      .insert(onchainVerifications)
-      .values({
-        key: record.poolKey,
-        protocolId: record.protocolId,
-        chainId: record.chainId,
-        label: record.label,
-        poolAddress: record.poolAddress,
-        tvlUsd: record.tvlUsdForVerification,
-        blockNumber: record.blockNumber,
-      })
-      .onConflictDoUpdate({
-        target: onchainVerifications.key,
-        set: {
-          protocolId: record.protocolId,
-          chainId: record.chainId,
-          tvlUsd: record.tvlUsdForVerification,
-          blockNumber: record.blockNumber,
-          verifiedAt: record.runTimestamp,
-        },
-      });
-
-    if (record.poolId) {
-      const hasValidBlockHash = record.blockHash != null && VALID_BLOCK_HASH.test(record.blockHash);
-
-      if (hasValidBlockHash) {
-        await tx
-          .insert(historicalObservations)
-          .values({
-            chainId: record.chainId,
-            entityType: "pool",
-            entityId: record.poolId,
-            metric: "tvl_usd",
-            value: record.tvlUsdForObservation,
-            timestamp: record.runTimestamp,
-            blockNumber: record.blockNumber,
-            blockHash: record.blockHash,
-            priceSource: record.priceSource,
-            priceRetrievedAt: record.priceRetrievedAt,
-            calculationInputs: record.calculationInputs,
-            source: "onchain-verification",
-            calculationVersion: record.calculationVersion,
-          })
-          // Explicit target, matching historical_observations_block_hash_identity_unique
-          // (see its own schema comment) - not a bare onConflictDoNothing(),
-          // which would silently absorb a conflict against *any* unique
-          // index on this table, including ones this insert didn't intend to
-          // dedupe against. Always the "hash known" partial index here, never
-          // the "block number only" one - hasValidBlockHash above guarantees
-          // this insert always has a real hash, so that's the only index a
-          // pool/tvl_usd row can ever match.
-          .onConflictDoNothing({
-            target: [
-              historicalObservations.entityType,
-              historicalObservations.entityId,
-              historicalObservations.metric,
-              historicalObservations.blockNumber,
-              historicalObservations.blockHash,
-            ],
-            where: sql`${historicalObservations.blockNumber} is not null and ${historicalObservations.blockHash} is not null`,
-          });
-      } else {
-        // Explicit and observable, not a silent skip: the pool's latest
-        // TVL still committed above, but no historical_observations row
-        // was written, because there's no reliable block identity to
-        // attach it to. This should be rare (verifyPoolsOnChain fetches
-        // the hash from the same chain read it already needed for the
-        // pinned block number - see its own comment) - a warning here is
-        // a real signal something's off with that read or its RPC
-        // response, not routine/expected noise.
-        logger.warn("skipping native pool TVL historical observation - block hash unavailable or invalid", {
-          component: "onchain",
-          poolKey: record.poolKey,
-          blockNumber: record.blockNumber,
-          blockHash: record.blockHash,
-        });
-      }
-    }
+  const outcome = await recordVerification({
+    entityType: "pool",
+    verificationKey: record.poolKey,
+    protocolId: record.protocolId,
+    chainId: record.chainId,
+    label: record.label,
+    contractAddress: record.poolAddress,
+    tvlUsdForVerification: record.tvlUsdForVerification,
+    blockNumber: record.blockNumber,
+    runTimestamp: record.runTimestamp,
+    entityId: record.poolId,
+    tvlUsdForObservation: record.tvlUsdForObservation,
+    blockHash: record.blockHash,
+    priceSource: record.priceSource,
+    priceRetrievedAt: record.priceRetrievedAt,
+    calculationInputs: record.calculationInputs,
+    calculationVersion: record.calculationVersion,
   });
+
+  if (outcome === "skipped-invalid-hash") {
+    // This should be rare (verifyPoolsOnChain fetches the hash from the
+    // same chain read it already needed for the pinned block number - see
+    // its own comment) - a warning here is a real signal something's off
+    // with that read or its RPC response, not routine/expected noise.
+    logger.warn("skipping native pool TVL historical observation - block hash unavailable or invalid", {
+      component: "onchain",
+      poolKey: record.poolKey,
+      blockNumber: record.blockNumber,
+      blockHash: record.blockHash,
+    });
+  }
 }
 
 export async function verifyAllPools(): Promise<{ key: string; ok: boolean; error?: string }[]> {

@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, isNull, min } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, isNull, min, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import {
   chains,
@@ -16,6 +16,18 @@ import {
 // granularity of one vault, not "the protocol's TVL, falling back to
 // DefiLlama" - a verified vault's totalAssets() is a complete, authoritative
 // figure for that one vault, not a claim about the protocol as a whole).
+//
+// onchain_verifications.key is one shared varchar(64) namespace across
+// pools, vaults, and the legacy VERIFIED_PROTOCOL_TVLS entries - a bare
+// vault configKey used directly as that key could otherwise collide with an
+// unrelated pool/protocol-TVL entry that happens to share the same string,
+// silently joining this query to the wrong entity's verification.
+// getVerifiedVaults' join below reads the exact same "vault:" prefix
+// lib/onchain/verify-vault.ts's recordVaultVerification writes - kept as a
+// plain literal in both places (not a shared import) since this query
+// layer deliberately doesn't depend on lib/onchain/* in production code;
+// if either one changes, the other must change with it.
+const VAULT_VERIFICATION_KEY_PREFIX = "vault:";
 
 export interface VerifiedVaultListItem {
   id: string;
@@ -55,7 +67,7 @@ export async function getVerifiedVaults(): Promise<VerifiedVaultListItem[]> {
     .from(vaults)
     .innerJoin(chains, eq(chains.id, vaults.chainId))
     .leftJoin(protocols, eq(protocols.id, vaults.protocolId))
-    .leftJoin(onchainVerifications, eq(onchainVerifications.key, vaults.configKey));
+    .leftJoin(onchainVerifications, eq(onchainVerifications.key, sql`${VAULT_VERIFICATION_KEY_PREFIX} || ${vaults.configKey}`));
 
   return rows.map((r) => ({
     ...r,

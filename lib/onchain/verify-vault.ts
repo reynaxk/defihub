@@ -1,27 +1,26 @@
-import { sql } from "drizzle-orm";
 import { parseAbi, type Address } from "viem";
 import { db } from "@/lib/database/client";
-import {
-  historicalObservations,
-  onchainVerifications,
-  protocols,
-  chains,
-  type HistoricalObservationCalculationInput,
-} from "@/lib/database/schema";
+import { protocols, chains, type HistoricalObservationCalculationInput } from "@/lib/database/schema";
 import { priceProvider } from "@/lib/providers";
 import { VIEM_CHAIN_BY_SLUG } from "@/lib/chains/rpc-client";
 import { confirmationsFor } from "@/lib/chains/confirmations";
 import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { logger } from "@/lib/observability/logger";
-import {
-  computePoolTvl,
-  priceToExactDecimalString,
-  roundExactDecimal,
-  VALID_BLOCK_HASH,
-  type PoolTvlToken,
-} from "./verify-pool";
+import { computePoolTvl, priceToExactDecimalString, roundExactDecimal, type PoolTvlToken } from "./verify-pool";
+import { recordVerification } from "./record-verification";
 import { VERIFIED_VAULTS, type VerifiedVault } from "./config";
 import { syncVaultsFromConfig } from "./vaults";
+
+// onchain_verifications.key is one shared namespace across pools, vaults,
+// and the legacy VERIFIED_PROTOCOL_TVLS entries (see
+// record-verification.ts's own comment) - vault keys are namespaced with
+// this prefix specifically to make an accidental collision with a pool or
+// protocol-TVL config key structurally impossible, rather than merely
+// unlikely. Must match the identical prefix used in getVerifiedVaults'
+// join (lib/database/queries/vaults.ts) - kept as a plain literal in both
+// places (not a shared import) since the query layer deliberately doesn't
+// depend on lib/onchain/* in production code.
+const VAULT_VERIFICATION_KEY_PREFIX = "vault:";
 
 // Phase 5.2: a genuinely reusable ERC-4626 adapter, structurally mirroring
 // verify-pool.ts throughout (same block-pinning discipline, same
@@ -40,7 +39,10 @@ const TVL_CALCULATION_VERSION = "erc4626-total-assets-v1";
 const VERIFICATION_DISPLAY_DECIMALS = 2;
 const OBSERVATION_VALUE_DECIMALS = 8;
 
-const VAULT_ABI = parseAbi(["function totalAssets() view returns (uint256)"]);
+const VAULT_ABI = parseAbi([
+  "function totalAssets() view returns (uint256)",
+  "function asset() view returns (address)",
+]);
 
 interface VaultOutcome {
   key: string;
@@ -62,7 +64,48 @@ interface VaultOutcome {
  * calls can land on different blocks if one is mined in between, which
  * would make the persisted blockNumber not actually correspond to the
  * state that produced tvlUsd.
+ *
+ * Each vault contributes two calls to the same pinned multicall -
+ * totalAssets() and asset() - not just the first. The config's own
+ * underlyingAsset.address (lib/onchain/config.ts) is the *expected*
+ * identity, confirmed by hand at config-authoring time (see each entry's
+ * own comment); this on-chain asset() read is the ongoing, automatic check
+ * that the vault's real identity hasn't drifted from what the config
+ * claims - a compromised/upgraded/misconfigured vault contract, or a
+ * config entry that was simply wrong, is caught here as an explicit
+ * failure for that vault rather than silently computing TVL against the
+ * wrong asset's price. Both reads are always in the SAME multicall/block
+ * as each other and as the balance read they gate, never a separate,
+ * later, potentially-different-block call.
  */
+// Two calls per vault, always in this order (totalAssets() then asset()) -
+// see CALLS_PER_VAULT below, which every result-index calculation is keyed
+// off of. Both calls target the same vault address and are pushed into the
+// same flat array that verifyVaultsOnChain sends as ONE multicall pinned to
+// ONE block - extracted as its own pure function (no RPC involved) so this
+// batching shape is directly testable without a live/mocked chain call; see
+// verify-vault.test.ts.
+export const CALLS_PER_VAULT = 2;
+
+export function buildVaultMulticallCalls(vaultsOnChain: VerifiedVault[]) {
+  return vaultsOnChain.flatMap((v) => [
+    { address: v.vaultAddress as Address, abi: VAULT_ABI, functionName: "totalAssets" as const },
+    { address: v.vaultAddress as Address, abi: VAULT_ABI, functionName: "asset" as const },
+  ]);
+}
+
+// Pure, directly testable: whether a vault's live on-chain asset() result
+// identifies the same underlying asset as its configured
+// underlyingAsset.address. EVM addresses are not case-sensitive identity -
+// the mixed-case form is an EIP-55 checksum encoding, not a distinct
+// address - so this compares lowercased; a byte-for-byte comparison would
+// wrongly reject a genuinely matching address purely because viem/the RPC
+// node returned different capitalization than the config's own hand-typed
+// value.
+export function assetAddressMatchesConfig(onchainAssetAddress: string, configuredAddress: string): boolean {
+  return onchainAssetAddress.toLowerCase() === configuredAddress.toLowerCase();
+}
+
 async function verifyVaultsOnChain(
   chainSlug: string,
   vaultsOnChain: VerifiedVault[],
@@ -72,11 +115,7 @@ async function verifyVaultsOnChain(
     return vaultsOnChain.map((v) => ({ key: v.key, ok: false, error: `no RPC configured for chain "${chainSlug}"` }));
   }
 
-  const calls = vaultsOnChain.map((v) => ({
-    address: v.vaultAddress as Address,
-    abi: VAULT_ABI,
-    functionName: "totalAssets" as const,
-  }));
+  const calls = buildVaultMulticallCalls(vaultsOnChain);
 
   const chainRead = await withResilientClient(chainSlug, async (client) => {
     const head = await client.getBlockNumber();
@@ -100,10 +139,27 @@ async function verifyVaultsOnChain(
   const outcomes: VaultOutcome[] = [];
   for (let i = 0; i < vaultsOnChain.length; i++) {
     const vault = vaultsOnChain[i];
+    const totalAssetsResult = multicallResults[i * CALLS_PER_VAULT];
+    const assetResult = multicallResults[i * CALLS_PER_VAULT + 1];
+
     // A failed per-vault multicall result becomes `null`, never a
     // substituted/assumed value - computePoolTvl treats that as a hard
     // failure, same contract as a failed pool-token balanceOf.
-    const totalAssets = multicallResults[i]?.status === "success" ? (multicallResults[i].result as bigint) : null;
+    const totalAssets = totalAssetsResult?.status === "success" ? (totalAssetsResult.result as bigint) : null;
+    const onchainAssetAddress = assetResult?.status === "success" ? (assetResult.result as Address) : null;
+
+    if (onchainAssetAddress == null) {
+      outcomes.push({ key: vault.key, ok: false, error: "asset() read failed" });
+      continue;
+    }
+    if (!assetAddressMatchesConfig(onchainAssetAddress, vault.underlyingAsset.address)) {
+      outcomes.push({
+        key: vault.key,
+        ok: false,
+        error: `configured underlying asset ${vault.underlyingAsset.address} does not match this vault's on-chain asset() result ${onchainAssetAddress} - never substituted, config must be corrected`,
+      });
+      continue;
+    }
 
     const token: PoolTvlToken = {
       symbol: vault.underlyingAsset.symbol,
@@ -157,83 +213,43 @@ export interface VaultVerificationRecord {
   calculationVersion: string;
 }
 
-// The atomic write at the heart of recording one vault's verification -
-// structurally identical to recordPoolVerification (verify-pool.ts): the
-// upserted "latest value" (onchain_verifications) and the durable history
-// row (historical_observations, entityType "vault") commit together, in one
-// transaction, or neither does. The history write requires BOTH a vaultId
-// and a genuinely valid blockHash (VALID_BLOCK_HASH, imported from
-// verify-pool.ts rather than redefined) for the same reason pools require
-// it: an observation without real block identity can't be checked against a
-// reorg later. A skip is logged, never silent - see the else branch below.
+// The atomic write at the heart of recording one vault's verification. The
+// actual transaction logic lives in recordVerification (record-verification.ts)
+// - shared with recordPoolVerification (verify-pool.ts), since the two were
+// byte-for-byte identical except for which config/table each pulled its own
+// identifiers from. This wrapper's job is entity-specific: namespace
+// vaultKey with VAULT_VERIFICATION_KEY_PREFIX before it ever reaches the
+// shared onchain_verifications.key namespace (see that constant's own
+// comment for why - a bare vault key could otherwise collide with a pool
+// or protocol-TVL config key), and own this entity type's logging.
 export async function recordVaultVerification(record: VaultVerificationRecord): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
-      .insert(onchainVerifications)
-      .values({
-        key: record.vaultKey,
-        protocolId: record.protocolId,
-        chainId: record.chainId,
-        label: record.label,
-        poolAddress: record.vaultAddress,
-        tvlUsd: record.tvlUsdForVerification,
-        blockNumber: record.blockNumber,
-      })
-      .onConflictDoUpdate({
-        target: onchainVerifications.key,
-        set: {
-          protocolId: record.protocolId,
-          chainId: record.chainId,
-          tvlUsd: record.tvlUsdForVerification,
-          blockNumber: record.blockNumber,
-          verifiedAt: record.runTimestamp,
-        },
-      });
-
-    if (record.vaultId) {
-      const hasValidBlockHash = record.blockHash != null && VALID_BLOCK_HASH.test(record.blockHash);
-
-      if (hasValidBlockHash) {
-        await tx
-          .insert(historicalObservations)
-          .values({
-            chainId: record.chainId,
-            entityType: "vault",
-            entityId: record.vaultId,
-            metric: "tvl_usd",
-            value: record.tvlUsdForObservation,
-            timestamp: record.runTimestamp,
-            blockNumber: record.blockNumber,
-            blockHash: record.blockHash,
-            priceSource: record.priceSource,
-            priceRetrievedAt: record.priceRetrievedAt,
-            calculationInputs: record.calculationInputs,
-            source: "onchain-verification",
-            calculationVersion: record.calculationVersion,
-          })
-          // Same partial-index target discipline as recordPoolVerification -
-          // the "hash known" index always applies here since hasValidBlockHash
-          // guarantees a real hash.
-          .onConflictDoNothing({
-            target: [
-              historicalObservations.entityType,
-              historicalObservations.entityId,
-              historicalObservations.metric,
-              historicalObservations.blockNumber,
-              historicalObservations.blockHash,
-            ],
-            where: sql`${historicalObservations.blockNumber} is not null and ${historicalObservations.blockHash} is not null`,
-          });
-      } else {
-        logger.warn("skipping native vault TVL historical observation - block hash unavailable or invalid", {
-          component: "onchain",
-          vaultKey: record.vaultKey,
-          blockNumber: record.blockNumber,
-          blockHash: record.blockHash,
-        });
-      }
-    }
+  const outcome = await recordVerification({
+    entityType: "vault",
+    verificationKey: `${VAULT_VERIFICATION_KEY_PREFIX}${record.vaultKey}`,
+    protocolId: record.protocolId,
+    chainId: record.chainId,
+    label: record.label,
+    contractAddress: record.vaultAddress,
+    tvlUsdForVerification: record.tvlUsdForVerification,
+    blockNumber: record.blockNumber,
+    runTimestamp: record.runTimestamp,
+    entityId: record.vaultId,
+    tvlUsdForObservation: record.tvlUsdForObservation,
+    blockHash: record.blockHash,
+    priceSource: record.priceSource,
+    priceRetrievedAt: record.priceRetrievedAt,
+    calculationInputs: record.calculationInputs,
+    calculationVersion: record.calculationVersion,
   });
+
+  if (outcome === "skipped-invalid-hash") {
+    logger.warn("skipping native vault TVL historical observation - block hash unavailable or invalid", {
+      component: "onchain",
+      vaultKey: record.vaultKey,
+      blockNumber: record.blockNumber,
+      blockHash: record.blockHash,
+    });
+  }
 }
 
 export async function verifyAllVaults(): Promise<{ key: string; ok: boolean; error?: string }[]> {

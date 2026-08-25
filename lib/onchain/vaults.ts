@@ -1,5 +1,6 @@
 import { db } from "@/lib/database/client";
 import { chains, protocols, vaults } from "@/lib/database/schema";
+import { logger } from "@/lib/observability/logger";
 import { VERIFIED_VAULTS, type VerifiedVault } from "./config";
 
 // Keeps the `vaults` table in sync with VERIFIED_VAULTS - the exact
@@ -24,7 +25,24 @@ export async function syncVaultsFromConfig(vaultsToSync: VerifiedVault[] = VERIF
 
   for (const vault of vaultsToSync) {
     const chainId = chainIdBySlug.get(vault.chainSlug);
-    if (!chainId) continue;
+    if (!chainId) {
+      // Not thrown - a chain genuinely not seeded yet is an expected,
+      // recoverable state (the next sync run picks the vault up once the
+      // chain exists), matching syncPoolsFromConfig's own silent-skip
+      // behavior. But a silent skip with no signal at all made this hard to
+      // diagnose from the outside - logged so a config entry that's
+      // permanently skipped (e.g. a typo'd chainSlug that will never
+      // resolve) is actually observable instead of just quietly absent from
+      // `vaults` forever.
+      logger.warn("skipping vault sync - chain not tracked yet", {
+        component: "onchain",
+        vaultKey: vault.key,
+        chainSlug: vault.chainSlug,
+        label: vault.label,
+        vaultAddress: vault.vaultAddress,
+      });
+      continue;
+    }
     const protocolId = protocolIdBySlug.get(vault.protocolDefillamaSlug) ?? null;
 
     const [row] = await db

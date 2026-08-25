@@ -553,10 +553,15 @@ export const historicalObservations = pgTable(
     // entityType - recordVaultVerification (verify-vault.ts) enforces this
     // at the application layer the same way recordPoolVerification does,
     // and this is the database-level backstop. A separate constraint, not
-    // a widened version of the pool one: unlike that one, this needs no
-    // NOT VALID - there are no pre-existing "vault" rows to grandfather,
-    // since the entityType is brand new, so this is fully validated from
-    // creation.
+    // a widened version of the pool one. Added NOT VALID in the migration
+    // (0028, not expressible here) for a different reason than the pool
+    // constraint's own NOT VALID: there's no pre-existing "vault" row to
+    // grandfather (the entityType is brand new), but a validated ADD
+    // CONSTRAINT still scans and locks the whole table regardless of how
+    // few rows its condition applies to - on a historical_observations
+    // table that may hold a large number of real pool rows by deployment
+    // time, that's needless cost for a rule nothing yet violates. See
+    // migration 0028's own comment.
     check(
       "historical_observations_vault_tvl_requires_block_identity",
       sql`${table.entityType} <> 'vault' OR ${table.metric} <> 'tvl_usd' OR (${table.blockNumber} IS NOT NULL AND ${table.blockHash} IS NOT NULL AND ${table.blockHash} <> '')`,

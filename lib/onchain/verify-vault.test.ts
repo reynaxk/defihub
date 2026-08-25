@@ -13,17 +13,37 @@
 // verify-vault.integration.test.ts covers against a real database.
 import { describe, expect, it } from "vitest";
 import { computePoolTvl, type PoolTvlToken } from "./verify-pool";
+import { assetAddressMatchesConfig, buildVaultMulticallCalls, CALLS_PER_VAULT } from "./verify-vault";
+import { VERIFIED_VAULTS, type VerifiedVault } from "./config";
 
 function vaultToken(overrides: Partial<PoolTvlToken> = {}): PoolTvlToken {
   return { symbol: "DAI", decimals: 18, coingeckoId: "dai", ...overrides };
 }
 
 describe("computePoolTvl applied to a single-asset ERC-4626 vault (N=1)", () => {
-  it("computes TVL from one totalAssets() balance against one underlying price - the sDAI shape (18 decimals)", () => {
-    const token = vaultToken();
-    // 1,000,000 DAI (18 decimals) at $1.00.
-    const totalAssets = BigInt("1000000000000000000000000");
-    const result = computePoolTvl([token], [totalAssets], new Map([["dai", "1.00"]]));
+  it("computes TVL from one totalAssets() balance against one underlying price - using sDAI's actual VERIFIED_VAULTS config entry, not a hand-built token", () => {
+    // Exercises the exact same token shape verifyVaultsOnChain itself
+    // builds (see its own `const token: PoolTvlToken = {...}` from
+    // vault.underlyingAsset) - a config change to sDAI's decimals or
+    // coingeckoId would break this test too, unlike a fully hand-written
+    // PoolTvlToken that could silently drift out of sync with the real
+    // config.
+    const sdai = VERIFIED_VAULTS.find((v) => v.key === "sdai-ethereum");
+    if (!sdai) throw new Error("expected VERIFIED_VAULTS to contain the sdai-ethereum entry");
+
+    // Confirms the test is genuinely exercising sDAI's configured identity,
+    // not just an entry that happens to also be named DAI/18/dai.
+    expect(sdai.underlyingAsset.decimals).toBe(18);
+    expect(sdai.underlyingAsset.coingeckoId).toBe("dai");
+
+    const token: PoolTvlToken = {
+      symbol: sdai.underlyingAsset.symbol,
+      decimals: sdai.underlyingAsset.decimals,
+      coingeckoId: sdai.underlyingAsset.coingeckoId,
+    };
+    // 1,000,000 DAI at sDAI's configured 18 decimals, at $1.00.
+    const totalAssets = BigInt(1_000_000) * BigInt(10) ** BigInt(sdai.underlyingAsset.decimals);
+    const result = computePoolTvl([token], [totalAssets], new Map([[sdai.underlyingAsset.coingeckoId, "1.00"]]));
 
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.tvlUsd).toBe("1000000");
@@ -88,5 +108,72 @@ describe("computePoolTvl applied to a single-asset ERC-4626 vault (N=1)", () => 
 
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.tvlUsd).toBe("0");
+  });
+});
+
+describe("assetAddressMatchesConfig", () => {
+  it("returns true when the on-chain asset() result matches the configured underlying asset address exactly", () => {
+    expect(assetAddressMatchesConfig("0x6b175474e89094c44da98b954eedeac495271d0f", "0x6b175474e89094c44da98b954eedeac495271d0f")).toBe(
+      true,
+    );
+  });
+
+  it("returns true for a case-only difference - EVM addresses are not case-sensitive identity", () => {
+    // The exact DAI address, but with EIP-55 checksum capitalization -
+    // still the same address as the all-lowercase config value.
+    expect(assetAddressMatchesConfig("0x6B175474E89094C44Da98b954EedeAC495271d0F", "0x6b175474e89094c44da98b954eedeac495271d0f")).toBe(
+      true,
+    );
+  });
+
+  it("returns false for a genuinely different address, never silently accepting a mismatch", () => {
+    // sUSDe's real underlying (USDe), compared against sDAI's configured
+    // underlying (DAI) - two real, distinct, correctly-formatted addresses
+    // that must never be treated as a match.
+    expect(assetAddressMatchesConfig("0x4c9edd5852cd905f086c759e8383e09bff1e68b3", "0x6b175474e89094c44da98b954eedeac495271d0f")).toBe(
+      false,
+    );
+  });
+});
+
+describe("buildVaultMulticallCalls", () => {
+  const vaultA: VerifiedVault = {
+    key: "test-vault-a",
+    chainSlug: "ethereum",
+    protocolDefillamaSlug: "test-protocol",
+    label: "Test Vault A",
+    vaultAddress: "0x1111111111111111111111111111111111111a",
+    underlyingAsset: { address: "0x2222222222222222222222222222222222222b", symbol: "TOKA", decimals: 18, coingeckoId: "toka" },
+  };
+  const vaultB: VerifiedVault = {
+    ...vaultA,
+    key: "test-vault-b",
+    vaultAddress: "0x3333333333333333333333333333333333333c",
+  };
+
+  it("emits exactly totalAssets() immediately followed by asset(), both against the same vault address, for each vault", () => {
+    const calls = buildVaultMulticallCalls([vaultA, vaultB]);
+
+    expect(calls).toHaveLength(2 * CALLS_PER_VAULT);
+    expect(calls[0]).toMatchObject({ address: vaultA.vaultAddress, functionName: "totalAssets" });
+    expect(calls[1]).toMatchObject({ address: vaultA.vaultAddress, functionName: "asset" });
+    expect(calls[2]).toMatchObject({ address: vaultB.vaultAddress, functionName: "totalAssets" });
+    expect(calls[3]).toMatchObject({ address: vaultB.vaultAddress, functionName: "asset" });
+  });
+
+  it("produces the exact index math verifyVaultsOnChain relies on to pair each vault's two results back up (i * CALLS_PER_VAULT)", () => {
+    const vaults = [vaultA, vaultB];
+    const calls = buildVaultMulticallCalls(vaults);
+
+    for (let i = 0; i < vaults.length; i++) {
+      expect(calls[i * CALLS_PER_VAULT].address).toBe(vaults[i].vaultAddress);
+      expect(calls[i * CALLS_PER_VAULT].functionName).toBe("totalAssets");
+      expect(calls[i * CALLS_PER_VAULT + 1].address).toBe(vaults[i].vaultAddress);
+      expect(calls[i * CALLS_PER_VAULT + 1].functionName).toBe("asset");
+    }
+  });
+
+  it("returns an empty array for an empty vault list, never throwing", () => {
+    expect(buildVaultMulticallCalls([])).toEqual([]);
   });
 });

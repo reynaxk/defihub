@@ -343,13 +343,23 @@ to right now, via an injected reader (so it's unit-testable without a live
 RPC call — see `reorg.test.ts`). It returns one of three states, not a
 boolean — `"confirmed"`, `"reorged"`, or `"unknown"` (a transient read
 failure is never reported as a confirmed reorg). `readBlockHashOnChain` is
-the real, RPC-backed reader for production use. **Not yet wired into the
-verification cron or any scheduled check** — it exists as a tested,
-ready-to-use primitive, consistent with this codebase's "primitives first,
-one concrete example, no speculative scheduling" pattern elsewhere (e.g.
-`lib/indexing/events.ts`). Actually re-checking historical observations on
-a schedule is a reasonable next step, not something this change invents a
-cron for.
+the real, RPC-backed reader for production use.
+
+**Wired into scheduled work as of Phase 5.1, generalized to vaults in
+Phase 5.2.** `workers/onchain/recheck-reorgs.ts` runs on its own cron
+(`app/api/cron/recheck-reorgs`) and automatically rechecks recent
+block-hash-pinned `historical_observations` rows for both pool and vault
+entities, through this same `checkBlockHashStillCanonical` primitive — no
+separate check for each entity type. A row confirmed reorged away from
+canonical history is never deleted or rewritten; it's marked invalid via
+`historicalObservations.reorgInvalidatedAt` (set by `markObservationReorged`,
+`lib/database/queries/onchain-recheck.ts`), which excludes it from
+canonical results (`getPoolTvlHistory`/`getVaultTvlHistory`) while leaving
+every other provenance field untouched for debugging/audit. The legacy
+`VERIFIED_PROTOCOL_TVLS` entries (Lido, Aave) remain outside this recheck's
+coverage — they predate block-hash provenance entirely (`onchain_verifications`
+has no `blockHash` column), so there's nothing for a recheck to compare
+against; see `recheck-reorgs.ts`'s own module comment for that gap.
 
 ## Historical TVL bug (audit, root cause, fix)
 

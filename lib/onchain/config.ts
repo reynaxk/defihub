@@ -359,6 +359,17 @@ export const VERIFIED_PROTOCOL_TVLS: VerifiedProtocolTvl[] = [
 // config entry, not new code, which is the whole point of building this as
 // a real adapter rather than another one-off.
 //
+// Both `asset()` and `totalAssets()` are verified on-chain, every
+// verification run, in the same pinned multicall/block - not just
+// totalAssets(). Each entry's underlyingAsset.address below is the
+// *expected* identity, hand-confirmed once at config-authoring time (see
+// each entry's own comment); asset() is the ongoing, automatic check that
+// this hasn't drifted from what the config claims. A mismatch (compared
+// case-insensitively, since EVM addresses aren't case-sensitive identity)
+// fails that vault's verification explicitly - the on-chain result is
+// never substituted into the config, and the configured address is never
+// trusted without that live check confirming it.
+//
 // TVL calculation reuses computePoolTvl (verify-pool.ts) unmodified: an
 // ERC-4626 vault's TVL is exactly the N=1 case of "sum of balance * price
 // across tokens this contract holds" - totalAssets() standing in for a
@@ -426,3 +437,55 @@ export const VERIFIED_VAULTS: VerifiedVault[] = [
     },
   },
 ];
+
+// onchain_verifications.key (schema.ts) is one shared varchar(64) namespace
+// across every category above - a pool, protocol-TVL, or vault entry whose
+// `key` collides with another entry's (in the SAME category, or across
+// different ones) would silently overwrite that other entry's "latest
+// value" row every time either one's verification runs, with no error and
+// no signal anything was wrong (see record-verification.ts's own comment on
+// why vault keys are additionally namespaced with a "vault:" prefix - that
+// narrows the *accidental* collision surface, but doesn't replace an actual
+// uniqueness check against real config data). This validates the full
+// combined key set - across VERIFIED_POOLS, VERIFIED_PROTOCOL_TVLS, and
+// VERIFIED_VAULTS together, which also means within any single one of them
+// too - the moment this module is imported, so a duplicate key fails loudly
+// at startup/config-load time rather than as a silent data-overwrite
+// discovered later during a scheduled verification run.
+// `categories` defaults to the real config (production behavior, called
+// with no arguments below) and is only ever overridden by tests - same
+// override-for-testability shape as syncPoolsFromConfig's `poolsToSync` and
+// syncVaultsFromConfig's `vaultsToSync`, so the duplicate-detection logic
+// itself is directly testable against synthetic key sets without needing
+// to mutate the real VERIFIED_POOLS/VERIFIED_PROTOCOL_TVLS/VERIFIED_VAULTS
+// arrays to force a collision.
+export function assertUniqueVerificationKeys(
+  categories: readonly (readonly [string, readonly string[]])[] = [
+    ["VERIFIED_POOLS", VERIFIED_POOLS.map((p) => p.key)],
+    ["VERIFIED_PROTOCOL_TVLS", VERIFIED_PROTOCOL_TVLS.map((e) => e.key)],
+    ["VERIFIED_VAULTS", VERIFIED_VAULTS.map((v) => v.key)],
+  ],
+): void {
+  const seenInCategory = new Map<string, string>(); // key -> which category first claimed it
+
+  for (const [category, keys] of categories) {
+    for (const key of keys) {
+      const existingCategory = seenInCategory.get(key);
+      if (existingCategory) {
+        throw new Error(
+          `Duplicate verification key "${key}": already used by ${existingCategory}, also used by ${category}. ` +
+            "Every VERIFIED_POOLS/VERIFIED_PROTOCOL_TVLS/VERIFIED_VAULTS entry must have a key that's unique across " +
+            "all three lists combined - onchain_verifications.key is one shared namespace, and a collision would " +
+            "silently overwrite an unrelated entity's verification.",
+        );
+      }
+      seenInCategory.set(key, category);
+    }
+  }
+}
+
+// Runs at module-load time (not deferred to first use) so a duplicate key
+// fails as soon as this config is imported anywhere - the earliest point
+// possible, well before a scheduled verification job would otherwise
+// discover the collision by silently overwriting data.
+assertUniqueVerificationKeys();

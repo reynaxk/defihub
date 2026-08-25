@@ -1,17 +1,24 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull } from "drizzle-orm";
 import { db } from "@/lib/database/client";
-import { chains, historicalObservations, pools } from "@/lib/database/schema";
+import { chains, historicalObservations, pools, vaults } from "@/lib/database/schema";
 
 // Query support for workers/onchain/recheck-reorgs.ts. Deliberately scoped
-// to `pools`/`historical_observations` only - those are the only tables
-// that carry real block-hash provenance today. `onchain_verifications` (the
-// table VERIFIED_PROTOCOL_TVLS' 2 entries write to) has no blockHash column
-// at all, so there is nothing here for a protocol-TVL entry to be
-// rechecked against - see recheck-reorgs.ts's own module comment for why
-// that's a reported gap, not something this file works around.
+// to `pools`/`vaults`/`historical_observations` only - those are the only
+// entities that carry real block-hash provenance today. `onchain_verifications`
+// (the table VERIFIED_PROTOCOL_TVLS' 2 legacy entries write to) has no
+// blockHash column at all, so there is nothing here for one of those
+// entries to be rechecked against - see recheck-reorgs.ts's own module
+// comment for why that's a reported gap, not something this file works
+// around.
+//
+// "pool" and "vault" (Phase 5.2) are the two entityType values this
+// recheck job knows about - see historicalObservations' own schema.ts
+// comment for the full list of what entityType can refer to.
+export type RecheckEntityType = "pool" | "vault";
 
-export interface RecheckPoolEntity {
-  poolId: string;
+export interface RecheckEntity {
+  entityType: RecheckEntityType;
+  entityId: string;
   configKey: string;
   chainSlug: string;
 }
@@ -21,12 +28,25 @@ export interface RecheckPoolEntity {
 // any other way (see that table's own schema.ts comment) - so selecting
 // every row here already *is* "the verified pools," with no need to
 // reference VERIFIED_POOLS directly or filter further.
-export async function getVerifiedPoolEntities(): Promise<RecheckPoolEntity[]> {
-  return await db
-    .select({ poolId: pools.id, configKey: pools.configKey, chainSlug: chains.slug })
+export async function getVerifiedPoolEntities(): Promise<RecheckEntity[]> {
+  const rows = await db
+    .select({ id: pools.id, configKey: pools.configKey, chainSlug: chains.slug })
     .from(pools)
     .innerJoin(chains, eq(chains.id, pools.chainId))
     .orderBy(pools.configKey);
+  return rows.map((r) => ({ entityType: "pool" as const, entityId: r.id, configKey: r.configKey, chainSlug: r.chainSlug }));
+}
+
+// The exact structural twin of getVerifiedPoolEntities, for VERIFIED_VAULTS
+// (lib/onchain/config.ts) / `vaults` (kept in sync by
+// lib/onchain/vaults.ts's syncVaultsFromConfig) instead of pools.
+export async function getVerifiedVaultEntities(): Promise<RecheckEntity[]> {
+  const rows = await db
+    .select({ id: vaults.id, configKey: vaults.configKey, chainSlug: chains.slug })
+    .from(vaults)
+    .innerJoin(chains, eq(chains.id, vaults.chainId))
+    .orderBy(vaults.configKey);
+  return rows.map((r) => ({ entityType: "vault" as const, entityId: r.id, configKey: r.configKey, chainSlug: r.chainSlug }));
 }
 
 export interface RecheckCandidate {
@@ -35,13 +55,13 @@ export interface RecheckCandidate {
   blockHash: string;
 }
 
-// The observations for one pool that still need a reorg recheck this run -
-// bounded by `limit` *distinct block numbers* (see below for why rows
-// aren't the right unit to bound), so neither a long-paused job nor a pool
-// with months of history can turn one run into an unbounded amount of RPC
-// work.
+// The observations for one entity (a pool or a vault - see RecheckEntityType)
+// that still need a reorg recheck this run - bounded by `limit` *distinct
+// block numbers* (see below for why rows aren't the right unit to bound),
+// so neither a long-paused job nor an entity with months of history can
+// turn one run into an unbounded amount of RPC work.
 //
-// `afterBlockNumber == null` means this pool has no recheck cursor yet
+// `afterBlockNumber == null` means this entity has no recheck cursor yet
 // (recheck-reorgs.ts's first-ever run for it) - takes the `limit` most
 // *recent* block numbers rather than the oldest ones on record, so a cold
 // start checks what's actually current instead of replaying months-old,
@@ -68,22 +88,23 @@ export interface RecheckCandidate {
 // block number that appears in the result at all, never leaving an
 // unfetched sibling behind it.
 export async function getObservationsNeedingRecheck(
-  poolId: string,
+  entityType: RecheckEntityType,
+  entityId: string,
   afterBlockNumber: bigint | null,
   limit: number,
 ): Promise<RecheckCandidate[]> {
   // Both columns are nullable at the type level (a pre-blockHash-provenance
   // legacy row - see historicalObservations' own schema comment - could in
   // principle have a null blockNumber too), even though the
-  // historical_observations_pool_tvl_requires_block_identity CHECK
-  // constraint already guarantees both are set together for every
-  // entityType='pool'/metric='tvl_usd' row going forward. Filtering on both
+  // historical_observations_{pool,vault}_tvl_requires_block_identity CHECK
+  // constraints already guarantee both are set together for every
+  // tvl_usd row of either entityType going forward. Filtering on both
   // explicitly, rather than trusting the constraint implicitly, keeps this
   // query correct on its own terms and keeps toRecheckCandidate below able
   // to convert without a non-null assertion.
   const baseConditions = [
-    eq(historicalObservations.entityType, "pool"),
-    eq(historicalObservations.entityId, poolId),
+    eq(historicalObservations.entityType, entityType),
+    eq(historicalObservations.entityId, entityId),
     eq(historicalObservations.metric, "tvl_usd"),
     isNotNull(historicalObservations.blockNumber),
     isNotNull(historicalObservations.blockHash),

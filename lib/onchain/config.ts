@@ -342,3 +342,87 @@ export const VERIFIED_PROTOCOL_TVLS: VerifiedProtocolTvl[] = [
     coingeckoId: "usd-coin",
   },
 ];
+
+// ---------------------------------------------------------------------------
+// ERC-4626 tokenized vaults - Phase 5.2
+//
+// A third, genuinely reusable category (alongside AMM pools above and
+// single-value protocol accounting further up): ERC-4626 is a standardized
+// interface (EIP-4626) that any compliant vault implements identically -
+// `asset()` returns the one underlying token address, `totalAssets()`
+// returns that vault's total holdings of it, denominated in the
+// underlying's own smallest unit. Unlike VERIFIED_PROTOCOL_TVLS' "direct"
+// entries above (each hand-written against that specific protocol's own
+// function names - getTotalPooledEther(), totalSupply()), one adapter
+// (lib/onchain/verify-vault.ts) reads every entry here through the exact
+// same two function signatures - onboarding another compliant vault is a
+// config entry, not new code, which is the whole point of building this as
+// a real adapter rather than another one-off.
+//
+// TVL calculation reuses computePoolTvl (verify-pool.ts) unmodified: an
+// ERC-4626 vault's TVL is exactly the N=1 case of "sum of balance * price
+// across tokens this contract holds" - totalAssets() standing in for a
+// pool's balanceOf, and the vault's own contract address standing in for
+// the pool address. Same exact BigInt fixed-point arithmetic, same
+// explicit-failure-over-fabrication contract, not a reimplementation.
+//
+// Each entry's underlying asset is inlined (not a list, unlike
+// VerifiedPool.tokens) because ERC-4626 vaults are single-asset by
+// definition - there is no N-token case to support here.
+export interface VerifiedVault {
+  key: string;
+  chainSlug: string;
+  protocolDefillamaSlug: string;
+  label: string;
+  vaultAddress: string;
+  underlyingAsset: {
+    address: string;
+    symbol: string;
+    decimals: number;
+    coingeckoId: string;
+  };
+}
+
+export const VERIFIED_VAULTS: VerifiedVault[] = [
+  {
+    key: "sdai-ethereum",
+    chainSlug: "ethereum",
+    protocolDefillamaSlug: "sky",
+    label: "Savings Dai (sDAI) total assets",
+    // Cross-checked two independent ways, 2026-08-25: (1) Etherscan tags
+    // this contract "ERC-4626" directly and its own page states it wraps
+    // DAI via the Sky Protocol's Dai Savings Rate module; (2) the
+    // constructor arguments recorded on that same page show the wrapped
+    // asset address as an exact match for DAI's own well-known mainnet
+    // address (0x6b175474e89094c44da98b954eedeac495271d0f) - the
+    // underlyingAsset.address below.
+    vaultAddress: "0x83f20f44975d03b1b09e64809b757c47f942beea",
+    underlyingAsset: {
+      address: "0x6b175474e89094c44da98b954eedeac495271d0f",
+      symbol: "DAI",
+      decimals: 18,
+      coingeckoId: "dai",
+    },
+  },
+  {
+    key: "susde-ethereum",
+    chainSlug: "ethereum",
+    protocolDefillamaSlug: "ethena",
+    label: "Staked USDe (sUSDe) total assets",
+    // Cross-checked two independent ways, 2026-08-25: (1) Etherscan tags
+    // this contract "ERC-4626" directly; (2) the underlying asset address
+    // recorded in that contract's own constructor arguments/vault
+    // functions is an exact match for USDe's own address
+    // (0x4c9edd5852cd905f086c759e8383e09bff1e68b3) - the
+    // underlyingAsset.address below. coingeckoId matches this app's own
+    // existing usage for USDe (lib/database/queries/stablecoins.ts's
+    // KNOWN_STABLECOIN_IDS already tracks "ethena-usde").
+    vaultAddress: "0x9d39a5de30e57443bff2a8307a4256c8797a3497",
+    underlyingAsset: {
+      address: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3",
+      symbol: "USDe",
+      decimals: 18,
+      coingeckoId: "ethena-usde",
+    },
+  },
+];

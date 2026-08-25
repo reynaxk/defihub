@@ -148,7 +148,10 @@ const EXACT_NON_NEGATIVE_DECIMAL = /^\d+(\.\d+)?$/;
 // hash, whatever produced it. recordPoolVerification treats anything that
 // fails this the same as a genuinely missing hash: never persisted as
 // pool TVL provenance.
-const VALID_BLOCK_HASH = /^0x[0-9a-fA-F]{64}$/;
+// Exported so other native-verification write paths (verify-vault.ts) apply
+// the exact same real-hash validity gate, rather than each maintaining its
+// own copy of this regex.
+export const VALID_BLOCK_HASH = /^0x[0-9a-fA-F]{64}$/;
 
 // Pure - the actual "raw balance + decimals + USD price -> pool TVL" math,
 // split out from verifyPoolsOnChain so it's directly unit-testable with

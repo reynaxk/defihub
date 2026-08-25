@@ -346,6 +346,51 @@ export const poolTokens = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Vaults - Phase 5.2
+//
+// The canonical, queryable representation of lib/onchain/config.ts's
+// VERIFIED_VAULTS, exactly mirroring `pools` above (same
+// config-is-the-source-of-truth, human-curated-only, upsert-by-configKey
+// discipline - see that table's own comment; lib/onchain/vaults.ts's
+// syncVaultsFromConfig is the direct structural twin of syncPoolsFromConfig).
+// A separate table from `pools` rather than folding vaults into it: a
+// pool's TVL is "sum of this contract's own balances across N tokens"
+// (pool_tokens exists specifically for that N), while an ERC-4626 vault's
+// TVL is "one direct totalAssets() read against exactly one underlying
+// asset" - a genuinely different shape, not a special case of the same one.
+// Keeping them distinct tables (and a distinct historicalObservations
+// entityType, "vault") keeps `pools`/getVerifiedPools honestly describing
+// only AMM-shaped pools, rather than silently mixing two accounting models
+// under one name.
+// ---------------------------------------------------------------------------
+
+export const vaults = pgTable(
+  "vaults",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    // Matches VERIFIED_VAULTS' own `key`.
+    configKey: varchar("config_key", { length: 64 }).notNull().unique(),
+    chainId: uuid("chain_id")
+      .notNull()
+      .references(() => chains.id, { onDelete: "cascade" }),
+    protocolId: uuid("protocol_id").references(() => protocols.id, { onDelete: "set null" }),
+    label: text("label").notNull(),
+    address: varchar("address", { length: 128 }).notNull(),
+    // An ERC-4626 vault has exactly one underlying asset (the standard's
+    // own asset() function) - unlike pool_tokens' N-row shape for pools,
+    // this is inlined directly rather than needing a child table for a
+    // relationship that's always 1:1.
+    underlyingAddress: varchar("underlying_address", { length: 128 }).notNull(),
+    underlyingSymbol: varchar("underlying_symbol", { length: 32 }).notNull(),
+    underlyingDecimals: integer("underlying_decimals").notNull(),
+    underlyingCoingeckoId: varchar("underlying_coingecko_id", { length: 128 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex("vaults_chain_address_unique").on(table.chainId, table.address)],
+);
+
+// ---------------------------------------------------------------------------
 // Historical observations - Phase 4
 //
 // A generic, append-only time series for DeFiHub-native calculated metrics
@@ -361,8 +406,8 @@ export const poolTokens = pgTable(
 // polymorphic FK - Postgres has no clean native way to FK a column against
 // "whichever table entityType names," and a nullable FK column per
 // possible entity type doesn't scale as more entity types are added.
-// Consumers join back to the real table themselves using entityType to
-// pick which one (currently only "pool", referencing pools.id).
+// Consumers join back to the real table themselves using entityType to pick
+// which one ("pool" -> pools.id, or "vault" -> vaults.id as of Phase 5.2).
 // ---------------------------------------------------------------------------
 
 // The per-token snapshot an on-chain calculation actually used - enough to
@@ -503,6 +548,18 @@ export const historicalObservations = pgTable(
     check(
       "historical_observations_pool_tvl_requires_block_identity",
       sql`${table.entityType} <> 'pool' OR ${table.metric} <> 'tvl_usd' OR (${table.blockNumber} IS NOT NULL AND ${table.blockHash} IS NOT NULL AND ${table.blockHash} <> '')`,
+    ),
+    // Same rule as the pool constraint above, for Phase 5.2's new "vault"
+    // entityType - recordVaultVerification (verify-vault.ts) enforces this
+    // at the application layer the same way recordPoolVerification does,
+    // and this is the database-level backstop. A separate constraint, not
+    // a widened version of the pool one: unlike that one, this needs no
+    // NOT VALID - there are no pre-existing "vault" rows to grandfather,
+    // since the entityType is brand new, so this is fully validated from
+    // creation.
+    check(
+      "historical_observations_vault_tvl_requires_block_identity",
+      sql`${table.entityType} <> 'vault' OR ${table.metric} <> 'tvl_usd' OR (${table.blockNumber} IS NOT NULL AND ${table.blockHash} IS NOT NULL AND ${table.blockHash} <> '')`,
     ),
   ],
 );
@@ -835,6 +892,11 @@ export const poolsRelations = relations(pools, ({ one, many }) => ({
 
 export const poolTokensRelations = relations(poolTokens, ({ one }) => ({
   pool: one(pools, { fields: [poolTokens.poolId], references: [pools.id] }),
+}));
+
+export const vaultsRelations = relations(vaults, ({ one }) => ({
+  chain: one(chains, { fields: [vaults.chainId], references: [chains.id] }),
+  protocol: one(protocols, { fields: [vaults.protocolId], references: [protocols.id] }),
 }));
 
 export const historicalObservationsRelations = relations(historicalObservations, ({ one }) => ({

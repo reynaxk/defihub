@@ -5,6 +5,7 @@ import { getIndexingState, updateIndexingState } from "../../lib/indexing/state"
 import {
   getObservationsNeedingRecheck,
   getVerifiedPoolEntities,
+  getVerifiedTokenPriceEntities,
   getVerifiedVaultEntities,
   markObservationReorged,
   type RecheckEntity,
@@ -23,13 +24,17 @@ import { withSyncRun } from "../../lib/observability/sync-run";
 // Phase 5.2 generalized this job (previously pool-only) to also cover
 // VERIFIED_VAULTS' ERC-4626 entries (verify-vault.ts), which write
 // block-hash-pinned historical_observations rows the exact same way pools
-// do (entityType "vault" instead of "pool" - see RecheckEntity). No new
-// job, no new lock, no new cron: recheckOneEntity/runRecheck below operate
-// on a unified list of pool AND vault entities, tagged by entityType,
-// through the same indexingState checkpoints, the same advisory lock, and
-// the same checkBlockHashStillCanonical/reorgInvalidatedAt mechanics -
-// exactly the "do not create a separate indexing mechanism for the new TVL
-// sources" instruction this phase was built under.
+// do (entityType "vault" instead of "pool" - see RecheckEntity). Phase 5.3
+// generalized it a second time, the same way, for lib/onchain/pricing's
+// native reference-asset price observations (entityType "token", metric
+// "price_usd" instead of "tvl_usd" - see RecheckEntity's own `metric`
+// field). No new job, no new lock, no new cron: recheckOneEntity/runRecheck
+// below operate on a unified list of pool, vault, AND token entities,
+// tagged by entityType, through the same indexingState checkpoints, the
+// same advisory lock, and the same
+// checkBlockHashStillCanonical/reorgInvalidatedAt mechanics - exactly the
+// "do not create a separate indexing mechanism for the new [price] sources"
+// instruction both phases were built under.
 //
 // Deliberately reuses, rather than re-implements, every piece of existing
 // infrastructure this touches:
@@ -140,6 +145,9 @@ export interface ReorgRecheckOptions {
   // The vault-shaped twin of poolEntitiesOverride, for VERIFIED_VAULTS
   // entities.
   vaultEntitiesOverride?: { vaultId: string; configKey: string; chainSlug: string }[];
+  // The token-price-shaped twin, for Phase 5.3's native reference-asset
+  // price observations (entityType "token", metric "price_usd").
+  tokenEntitiesOverride?: { tokenId: string; configKey: string; chainSlug: string }[];
   // Test-only override for the block-hash reader, same DI shape
   // checkBlockHashStillCanonical itself already takes - avoids a live RPC
   // call in tests. Defaults to the real readBlockHashOnChain.
@@ -202,7 +210,7 @@ async function recheckOneEntity(
     const state = await getIndexingState(entity.chainSlug, component);
     const cursor = state?.lastProcessedBlock ?? null;
 
-    const candidates = await getObservationsNeedingRecheck(entity.entityType, entity.entityId, cursor, lookbackDepth);
+    const candidates = await getObservationsNeedingRecheck(entity.entityType, entity.entityId, entity.metric, cursor, lookbackDepth);
     if (candidates.length === 0) return null; // nothing to do - doesn't consume a batch slot, doesn't touch indexingState
 
     await updateIndexingState(entity.chainSlug, component, { status: "running", lastAttemptedSyncAt: new Date() });
@@ -402,25 +410,31 @@ async function runRecheck(options: ReorgRecheckOptions = {}): Promise<ReorgReche
       return null;
     }
 
-    // Pool and vault entities are gathered independently (they live in
-    // different tables - see getVerifiedPoolEntities/getVerifiedVaultEntities,
-    // queries/onchain-recheck.ts) but merged into one RecheckEntity[] before
-    // anything else runs, so batching, rotation, and chain filtering all
-    // apply uniformly across both kinds from this point on.
+    // Pool, vault, and token-price entities are gathered independently (they
+    // live in different tables/derivations - see
+    // getVerifiedPoolEntities/getVerifiedVaultEntities/
+    // getVerifiedTokenPriceEntities, queries/onchain-recheck.ts) but merged
+    // into one RecheckEntity[] before anything else runs, so batching,
+    // rotation, and chain filtering all apply uniformly across all three
+    // kinds from this point on.
     //
-    // Supplying *either* override puts this run in fully manual/test mode:
-    // the other kind defaults to an empty list, never a live query, so a
+    // Supplying *any one* override puts this run in fully manual/test mode:
+    // every other kind defaults to an empty list, never a live query, so a
     // test that only overrides pools can never have real production vaults
-    // (or vice versa) silently mixed into its entity set and counts. Only
-    // when NEITHER override is supplied does this fall through to real
-    // production behavior (both real queries).
-    const usingAnyOverride = options.poolEntitiesOverride !== undefined || options.vaultEntitiesOverride !== undefined;
+    // or token prices (or vice versa) silently mixed into its entity set and
+    // counts. Only when NONE of the three overrides is supplied does this
+    // fall through to real production behavior (all three real queries).
+    const usingAnyOverride =
+      options.poolEntitiesOverride !== undefined ||
+      options.vaultEntitiesOverride !== undefined ||
+      options.tokenEntitiesOverride !== undefined;
     const poolEntities: RecheckEntity[] = options.poolEntitiesOverride
       ? options.poolEntitiesOverride.map((e) => ({
           entityType: "pool" as const,
           entityId: e.poolId,
           configKey: e.configKey,
           chainSlug: e.chainSlug,
+          metric: "tvl_usd",
         }))
       : usingAnyOverride
         ? []
@@ -431,11 +445,23 @@ async function runRecheck(options: ReorgRecheckOptions = {}): Promise<ReorgReche
           entityId: e.vaultId,
           configKey: e.configKey,
           chainSlug: e.chainSlug,
+          metric: "tvl_usd",
         }))
       : usingAnyOverride
         ? []
         : await getVerifiedVaultEntities();
-    let entities: RecheckEntity[] = [...poolEntities, ...vaultEntities];
+    const tokenEntities: RecheckEntity[] = options.tokenEntitiesOverride
+      ? options.tokenEntitiesOverride.map((e) => ({
+          entityType: "token" as const,
+          entityId: e.tokenId,
+          configKey: e.configKey,
+          chainSlug: e.chainSlug,
+          metric: "price_usd",
+        }))
+      : usingAnyOverride
+        ? []
+        : await getVerifiedTokenPriceEntities();
+    let entities: RecheckEntity[] = [...poolEntities, ...vaultEntities, ...tokenEntities];
     if (options.chainSlugs) {
       const allowed = new Set(options.chainSlugs);
       entities = entities.filter((e) => allowed.has(e.chainSlug));

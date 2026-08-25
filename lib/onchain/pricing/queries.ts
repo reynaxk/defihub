@@ -1,0 +1,64 @@
+import { and, desc, eq, isNull } from "drizzle-orm";
+import { db } from "@/lib/database/client";
+import { chains, historicalObservations, tokens, type PriceSourceObservation } from "@/lib/database/schema";
+import type { PriceConfidence, PriceLabel } from "./types";
+
+export interface NativeTokenPrice {
+  priceUsd: string;
+  confidence: PriceConfidence;
+  label: PriceLabel;
+  blockNumber: number | null;
+  blockHash: string | null;
+  observedAt: Date;
+  sources: PriceSourceObservation[];
+}
+
+// The latest still-canonical (reorgInvalidatedAt IS NULL) native price for
+// one token, or null if this engine has never priced it. Reads
+// historicalObservations directly rather than through any "latest value"
+// cache table - see record-price-observation.ts's own module comment for
+// why none exists for prices - using the exact same
+// historical_observations_entity_idx (entityType, entityId, metric,
+// timestamp) index every other "give me the latest observation for this
+// entity" query in this app already relies on.
+export async function getNativeTokenPrice(chainSlug: string, address: string): Promise<NativeTokenPrice | null> {
+  const [row] = await db
+    .select({
+      value: historicalObservations.value,
+      confidence: historicalObservations.confidence,
+      priceLabel: historicalObservations.priceLabel,
+      blockNumber: historicalObservations.blockNumber,
+      blockHash: historicalObservations.blockHash,
+      timestamp: historicalObservations.timestamp,
+      calculationInputs: historicalObservations.calculationInputs,
+    })
+    .from(historicalObservations)
+    .innerJoin(tokens, eq(tokens.id, historicalObservations.entityId))
+    .innerJoin(chains, eq(chains.id, tokens.chainId))
+    .where(
+      and(
+        eq(chains.slug, chainSlug),
+        eq(tokens.address, address.toLowerCase()),
+        eq(historicalObservations.entityType, "token"),
+        eq(historicalObservations.metric, "price_usd"),
+        isNull(historicalObservations.reorgInvalidatedAt),
+      ),
+    )
+    .orderBy(desc(historicalObservations.timestamp))
+    .limit(1);
+
+  if (!row || row.confidence == null || row.priceLabel == null) return null;
+
+  return {
+    priceUsd: row.value,
+    confidence: row.confidence as PriceConfidence,
+    label: row.priceLabel as PriceLabel,
+    blockNumber: row.blockNumber != null ? Number(row.blockNumber) : null,
+    blockHash: row.blockHash,
+    observedAt: row.timestamp,
+    // entityType is filtered to "token" above - calculationInputs here is
+    // always the PriceSourceObservation[] shape (see schema.ts's own
+    // comment on why the column allows two shapes).
+    sources: (row.calculationInputs as PriceSourceObservation[] | null) ?? [],
+  };
+}

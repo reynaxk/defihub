@@ -192,14 +192,21 @@ immediately after fetching, before it ever reaches `computePoolTvl` -
 which itself takes prices as `Map<string, string>`, not
 `Map<string, number>`, so nothing downstream of that one conversion point
 touches a floating-point price at all. See
-[Exact-decimal precision](#exact-decimal-precision) below. A future
-on-chain price source (e.g., reading a DEX's own spot price or a Chainlink
-feed) only needs to implement the same `PriceProvider` interface and swap
-the instance constructed in `lib/providers/index.ts`; the TVL calculation
-itself doesn't change. Phase 4 doesn't attempt this — price discovery
-robust enough to trust over a free aggregator API is a substantially
-harder problem than reading a contract's own token balance, and out of
-scope for a foundation phase (see the spec's own "do not build a
+[Exact-decimal precision](#exact-decimal-precision) below. Phase 4 predicted
+a future on-chain price source could simply implement this same
+`PriceProvider` interface and swap the instance in `lib/providers/index.ts`.
+Phase 5.3's real price engine (`lib/onchain/pricing/`, see
+[Native price engine (Phase 5.3)](#native-price-engine-phase-53)) does not
+do that, deliberately: `PriceProvider.getPrices` returns one bare `number`
+per id, with no room for per-source provenance, confidence, or a genuine
+reject/aggregate decision — exactly the things that make an on-chain price
+trustworthy enough to use at all. Phase 5.3 instead built its own richer
+pipeline and integrates as a narrow, confidence-gated *override* into
+`verifyAllPools`'s existing price map, not as a drop-in `PriceProvider`
+implementation. Price discovery robust enough to trust over a free
+aggregator API is still a substantially harder problem than reading a
+contract's own token balance — this is a first, narrow, honestly-scoped
+attempt at it, not a general solution (see the spec's own "do not build a
 decentralized oracle network").
 
 ## Exact-decimal precision
@@ -612,6 +619,191 @@ call" (e.g. a vault that itself holds LP-wrapped positions rather than a
 single underlying asset), that's a genuinely different shape needing its
 own adapter, the same reasoning as the AMM section above.
 
+## Native price engine (Phase 5.3)
+
+Everything above (Phase 4 – 5.2) computes a native *balance* (a pool's own
+token holdings, a vault's `totalAssets()`) but still converts it to USD via
+CoinGecko — see [Price provider abstraction](#price-provider-abstraction)'s
+own "Phase 4 doesn't attempt this" note. Phase 5.3 is the first attempt at
+the other half: a small, honest, on-chain-derived USD price for a hand-
+curated set of *reference assets*, under `lib/onchain/pricing/`.
+
+```text
+lib/onchain/pricing/
+ ├── types.ts              PriceSourceKind, PriceConfidence, PriceLabel, CandidatePriceSource
+ ├── config.ts              REFERENCE_ASSETS - the hand-curated dependency graph (see below)
+ ├── reference-graph.ts     resolveReferenceOrder - topological sort + cycle detection
+ ├── uniswap-v2.ts          deriveV2Price - the one real, reusable AMM adapter
+ ├── aggregate.ts           staleness/outlier rejection, liquidity-weighted blend, confidence
+ ├── engine.ts              priceReferenceAssetsOnChain / resolveReferenceAssetOutcome
+ ├── tokens.ts              syncReferenceAssetTokens - keeps `tokens` rows in sync with config
+ ├── record-price-observation.ts   the atomic write (historical_observations only - see below)
+ ├── price-reference-assets.ts     priceAllReferenceAssets - the top-level entry point
+ ├── queries.ts             getNativeTokenPrice - latest still-canonical price for a token
+ └── tvl-integration.ts     the controlled TVL source-selection policy (see below)
+```
+
+### Why an on-chain reserve ratio needs a reference asset at all
+
+A Uniswap V2 pool's `getReserves()` gives an exact ratio — N units of token1
+per unit of token0 — never a USD value on its own. Converting that ratio to
+a USD price needs one further USD price for whichever side is being treated
+as the reference. That, in turn, needs its own reference, and so on — an
+on-chain reserve ratio alone can never bootstrap an absolute dollar value
+from nothing. Every real on-chain pricing system resolves this the same
+way: designate one asset's USD value by definition (an *anchor*), then
+derive everything else from real pools priced against it or against an
+already-derived asset. `REFERENCE_ASSETS` in `config.ts` does exactly this,
+Ethereum-only, for five assets:
+
+```text
+usdc-ethereum (anchor, $1.00 by definition)
+ ├── weth-ethereum   (from the real, already-verified USDC/WETH V2 pool)
+ │    └── wbtc-ethereum   (from the real WBTC/WETH V2 pool - a genuine two-level chain)
+ ├── usdt-ethereum   (from the real USDC/USDT V2 pool - NOT assumed $1.00)
+ └── dai-ethereum    (from the real DAI/USDC V2 pool - NOT assumed $1.00)
+```
+
+Every pool address above was independently verified two ways before being
+added: (1) called the real Uniswap V2 Factory's `getPair()` live on-chain to
+confirm the address, and (2) called `token0()`/`token1()` on the resulting
+pair to confirm which token is which (see each entry's own comment in
+`config.ts` for the exact addresses and reserve figures observed at
+verification time). USDC being the anchor is a **definitional choice, not a
+claim that its peg was independently verified on-chain** — this is stated
+plainly rather than glossed over; see
+[Known limitations](#known-limitations) below. USDT and DAI, by contrast,
+get a genuinely on-chain-derived price: their real pool's current reserve
+ratio against USDC, not an assumed 1:1 peg — at verification time both
+showed a small, real deviation from exactly $1.00, which is retained, not
+rounded away.
+
+`reference-graph.ts`'s `resolveReferenceOrder` turns this into an explicit,
+tested topological order (Kahn's algorithm) and throws if the graph is ever
+made circular — see `reference-graph.test.ts`'s dedicated cycle-detection
+cases. `engine.ts`'s `priceReferenceAssetsOnChain` then prices every
+reference asset on one chain in exactly the same batched, block-pinned way
+`verifyPoolsOnChain`/`verifyVaultsOnChain` already do (see
+[Native TVL calculation](#native-tvl-calculation) above): one multicall
+covering every configured pool's `getReserves()`/`token0()`/`token1()`, one
+`getBlockNumber()` fetched first and pinned to a confirmation-adjusted
+height, all inside one `withResilientClient` call. Every reference asset on
+a given chain is therefore priced from the exact same block.
+
+### Multiple sources, aggregation, and confidence
+
+If a token had more than one configured source pool, `aggregate.ts`'s
+`aggregatePrices` would (1) reject any source older than
+`PRICING_THRESHOLDS.MAX_SOURCE_AGE_MS`, (2) reject any surviving source
+whose price deviates more than `MAX_DEVIATION_FROM_MEDIAN_BPS` from the
+cross-source median as an outlier, then (3) compute a liquidity-weighted
+mean of what's left — never a naive average, so one shallow pool can't
+count as much as a much deeper one. Every source considered, included or
+rejected, is retained with its own reason in the observation's
+`calculation_inputs` (a `PriceSourceObservation[]`, `schema.ts`) — the
+answer to "why does DeFiHub think this token is worth $X" is always
+reconstructable from that one column. Today's real `REFERENCE_ASSETS`
+config has exactly one source pool per derived asset, so this multi-source
+path is real and tested (`aggregate.test.ts`) but not yet exercised in
+production — adding a second independently-verified pool for an existing
+asset is a config-only change, the same "config entry, not new code"
+pattern as adding a pool/vault.
+
+`classifyConfidence` (also `aggregate.ts`) is a fixed, deterministic
+decision tree — never a model — over included-source count, total
+liquidity, and cross-source agreement: `HIGH` requires 2+ comfortably-liquid
+sources agreeing within `HIGH_CONFIDENCE_AGREEMENT_BPS`; `MEDIUM` covers a
+single comfortably-liquid source (real and usable, but not independently
+corroborated) or multiple sources that disagree more than that; `LOW` is
+insufficient total liquidity; `INVALID` is zero surviving sources. The
+anchor (`usdc-ethereum`) is hand-classified `MEDIUM` — trustworthy by
+design, but explicitly never `HIGH`, since `HIGH` means "independently
+corroborated by multiple on-chain sources this run" and an anchor's price
+isn't corroborated by anything, it's declared. Every one of today's real
+derived assets (single-source) tops out at `MEDIUM` for the same reason —
+by design, not as a bug: `HIGH` is reserved for genuine multi-source
+agreement.
+
+### Provenance: extending `historical_observations`, not a new table
+
+Per this doc's own [Provenance & replay](#provenance--replay) precedent —
+prefer extending the existing generic observation table over adding a new
+one — a native token price is `historical_observations` with `entityType:
+"token"` (`entityId` → `tokens.id`), `metric: "price_usd"`. Two new nullable
+columns were added (`confidence`, `price_label`, migration
+`0030_token_price_confidence_and_label.sql`) because "is this price good
+enough to use for X" needs to be a plain, indexed `WHERE`-filterable column,
+not something unpacked from JSON every time — the same reasoning `blockHash`
+itself is a real column rather than being left inside `calculationInputs`.
+A third `NOT VALID` CHECK constraint (migration
+`0029_token_price_observation_provenance.sql`) requires real block identity
+for every `(entityType: "token", metric: "price_usd")` row, the same rule
+already enforced for pool/vault `tvl_usd` rows, added the same low-cost way
+(see [Reliability & security](#reliability--security) below).
+
+Unlike pools/vaults, a price observation deliberately does **not** also
+upsert into `onchain_verifications` — that table's `tvl_usd`/`poolAddress`
+columns are TVL-shaped, and there's no honest analog for "the latest price
+of a token." `getNativeTokenPrice` (`queries.ts`) reads the latest
+still-canonical `historical_observations` row directly instead, using the
+same `historical_observations_entity_idx` index every other "give me the
+latest observation" query in this app already relies on. See
+`record-price-observation.ts`'s own module comment for the full reasoning.
+
+### Reorg safety
+
+`workers/onchain/recheck-reorgs.ts` (Phase 5.1, generalized to vaults in
+Phase 5.2) was generalized a third time for token price observations, the
+exact same way: `RecheckEntityType` gained `"token"`,
+`getVerifiedTokenPriceEntities()` (`lib/database/queries/onchain-recheck.ts`)
+joins `historical_observations` → `tokens` → `chains` to find every token
+this engine has actually priced, and `getObservationsNeedingRecheck` now
+takes an explicit `metric` parameter (`"price_usd"` for tokens, `"tvl_usd"`
+for pools/vaults) rather than hardcoding one. No new job, no new lock, no
+new cron — the same `indexingState` checkpoints, the same advisory lock,
+the same `reorgInvalidatedAt` mechanics. A reorged price observation is
+marked invalidated, never deleted or overwritten, and `getNativeTokenPrice`
+excludes it from canonical results the same way `getPoolTvlHistory`/
+`getVaultTvlHistory` already do.
+
+### TVL integration: a controlled, confidence-gated override — not a replacement
+
+`lib/onchain/pricing/tvl-integration.ts`'s `resolveNativePriceOverrides` is
+wired into `verifyAllPools` (`verify-pool.ts`) only, right after CoinGecko's
+own prices are fetched: for any of a pool's own tokens whose `coingeckoId`
+matches a configured reference asset *and* has a `HIGH`/`MEDIUM`-confidence
+native price on record, that price silently overrides the CoinGecko one in
+the same `priceById` map `computePoolTvl` already consumes — `computePoolTvl`
+itself is completely unmodified. `LOW`/`INVALID`-confidence native prices
+are never used for this. The whole lookup is wrapped in its own try/catch:
+a failure here degrades to the CoinGecko price this pipeline already
+trusted before Phase 5.3 existed, never aborts a verification run that
+would otherwise have succeeded. Every pool's `historical_observations.priceSource`
+is tagged accordingly — `"onchain-pricing-engine"` if every token used a
+native override, the external provider's own name unchanged if none did, or
+`"hybrid:onchain-pricing-engine+coingecko"` if it's a genuine mix (see
+`PriceLabel`'s own comment on why a mix must never be mislabeled as either
+pure kind) — so the resulting TVL figure's provenance is always honest about
+what actually priced it. **Not** wired into `verifyAllVaults`: of the two
+configured vaults, only sDAI's underlying (DAI) is a configured reference
+asset, and the risk/benefit of touching the vault path for one partial case
+didn't clear the bar this round — a mechanical next step, not a gap hidden
+here.
+
+### What this is not
+
+Not a decentralized oracle network, not TWAP-based (spot reserve ratio at
+one pinned block, the same "this app's own live read" model pools/vaults
+already use), not multi-chain yet (Ethereum only — the graph/engine
+architecture is chain-agnostic, but every real `REFERENCE_ASSETS` entry
+needs its own independently-verified pool address before a second chain is
+added, the same standard of evidence every existing entry in this file
+already requires), and not wired into every price the app shows — only the
+five reference assets above, only where `verifyAllPools` already runs, only
+above the `MEDIUM` confidence bar. See
+[Known limitations](#known-limitations) below for the complete, honest
+accounting.
+
 ## Known limitations
 
 - Six verified pools across five chains, plus two verified ERC-4626 vaults
@@ -621,10 +813,17 @@ own adapter, the same reasoning as the AMM section above.
 - No protocol-level native TVL — see
   [Native TVL calculation](#native-tvl-calculation) above for why that
   would currently be dishonest, not just incomplete.
-- Price is still entirely external (CoinGecko) for both pools and vaults —
-  see [Price provider abstraction](#price-provider-abstraction). Only the
-  on-chain state (balances / `totalAssets()`) is DeFiHub-calculated; the
-  USD conversion is not.
+- Price is still entirely external (CoinGecko) for **vaults**, and for
+  **every pool token that isn't one of Phase 5.3's five reference assets**
+  (USDC/WETH/USDT/DAI/WBTC on Ethereum) — see
+  [Native price engine (Phase 5.3)](#native-price-engine-phase-53) and
+  [Price provider abstraction](#price-provider-abstraction). For the
+  reference assets themselves, on a pool where `verifyAllPools` runs, the
+  USD conversion is DeFiHub-computed from a real, verified on-chain reserve
+  ratio whenever confidence is `HIGH`/`MEDIUM`; below that bar, or for any
+  other token, it's still CoinGecko. Be precise about what "native pricing"
+  covers here: five hand-curated assets, one chain, one AMM adapter — not a
+  general on-chain price feed for arbitrary tokens.
 - `historical_observations` only has real depth from the point Phase 4
   shipped forward — there's no backfill of pre-Phase-4 verified-TVL history
   (the pre-existing `onchain_verifications` table only ever stored the

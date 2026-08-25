@@ -180,7 +180,13 @@ export async function getPoolTvlHistory(
     blockHash: r.blockHash,
     priceSource: r.priceSource,
     priceRetrievedAt: r.priceRetrievedAt,
-    calculationInputs: r.calculationInputs,
+    // entityType is filtered to "pool" above - calculationInputs here is
+    // always the pool/vault-balance shape, never Phase 5.3's
+    // PriceSourceObservation[] (entityType "token" only) that
+    // historicalObservations.calculationInputs' column type now also
+    // allows - the query's own filter is what guarantees this, not
+    // something the shared column type can express.
+    calculationInputs: r.calculationInputs as HistoricalObservationCalculationInput[] | null,
     source: r.source,
     calculationVersion: r.calculationVersion,
   }));

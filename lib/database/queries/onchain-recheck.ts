@@ -1,26 +1,33 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull } from "drizzle-orm";
 import { db } from "@/lib/database/client";
-import { chains, historicalObservations, pools, vaults } from "@/lib/database/schema";
+import { chains, historicalObservations, pools, tokens, vaults } from "@/lib/database/schema";
 
 // Query support for workers/onchain/recheck-reorgs.ts. Deliberately scoped
-// to `pools`/`vaults`/`historical_observations` only - those are the only
-// entities that carry real block-hash provenance today. `onchain_verifications`
-// (the table VERIFIED_PROTOCOL_TVLS' 2 legacy entries write to) has no
-// blockHash column at all, so there is nothing here for one of those
-// entries to be rechecked against - see recheck-reorgs.ts's own module
-// comment for why that's a reported gap, not something this file works
-// around.
+// to `pools`/`vaults`/`tokens`/`historical_observations` only - those are
+// the only entities that carry real block-hash provenance today.
+// `onchain_verifications` (the table VERIFIED_PROTOCOL_TVLS' 2 legacy
+// entries write to) has no blockHash column at all, so there is nothing
+// here for one of those entries to be rechecked against - see
+// recheck-reorgs.ts's own module comment for why that's a reported gap, not
+// something this file works around.
 //
-// "pool" and "vault" (Phase 5.2) are the two entityType values this
-// recheck job knows about - see historicalObservations' own schema.ts
-// comment for the full list of what entityType can refer to.
-export type RecheckEntityType = "pool" | "vault";
+// "pool", "vault" (Phase 5.2), and "token" (Phase 5.3) are the three
+// entityType values this recheck job knows about - see
+// historicalObservations' own schema.ts comment for the full list of what
+// entityType can refer to. Each entityType has exactly one recheckable
+// metric today (pool/vault: "tvl_usd", token: "price_usd") - `metric`
+// travels alongside entityType on RecheckEntity itself (populated by each
+// getVerifiedXEntities function below) rather than being re-derived from
+// entityType inside getObservationsNeedingRecheck, so that mapping stays
+// visible at the one place a caller actually needs it.
+export type RecheckEntityType = "pool" | "vault" | "token";
 
 export interface RecheckEntity {
   entityType: RecheckEntityType;
   entityId: string;
   configKey: string;
   chainSlug: string;
+  metric: string;
 }
 
 // `pools` is kept in exact sync with VERIFIED_POOLS by syncPoolsFromConfig
@@ -34,7 +41,7 @@ export async function getVerifiedPoolEntities(): Promise<RecheckEntity[]> {
     .from(pools)
     .innerJoin(chains, eq(chains.id, pools.chainId))
     .orderBy(pools.configKey);
-  return rows.map((r) => ({ entityType: "pool" as const, entityId: r.id, configKey: r.configKey, chainSlug: r.chainSlug }));
+  return rows.map((r) => ({ entityType: "pool" as const, entityId: r.id, configKey: r.configKey, chainSlug: r.chainSlug, metric: "tvl_usd" }));
 }
 
 // The exact structural twin of getVerifiedPoolEntities, for VERIFIED_VAULTS
@@ -46,7 +53,35 @@ export async function getVerifiedVaultEntities(): Promise<RecheckEntity[]> {
     .from(vaults)
     .innerJoin(chains, eq(chains.id, vaults.chainId))
     .orderBy(vaults.configKey);
-  return rows.map((r) => ({ entityType: "vault" as const, entityId: r.id, configKey: r.configKey, chainSlug: r.chainSlug }));
+  return rows.map((r) => ({ entityType: "vault" as const, entityId: r.id, configKey: r.configKey, chainSlug: r.chainSlug, metric: "tvl_usd" }));
+}
+
+// The token-price twin of getVerifiedPoolEntities/getVerifiedVaultEntities,
+// for Phase 5.3's native reference-asset pricing (lib/onchain/pricing/).
+// Unlike pools/vaults, there is no dedicated "which tokens does this engine
+// price" canonical table kept in sync with config - `tokens` already serves
+// that role for every discovered token, most of it via the unrelated
+// CoinGecko-driven workers/tokens/sync.ts. Deriving the recheckable set from
+// DISTINCT entityId among actual "token"/"price_usd" observations (rather
+// than re-reading lib/onchain/pricing/config.ts's REFERENCE_ASSETS directly)
+// keeps this query file's own dependency shape consistent with the rest of
+// it (a DB query file, not a config-importing one) and self-correcting: a
+// token stops being "verified" for recheck purposes the moment nothing has
+// priced it, with no separate cleanup step needed. `configKey` uses the
+// token's own address (not a hand-authored config key like pools/vaults
+// have - tokens don't have one) - unique per chain via
+// tokens_chain_address_unique, which is what this recheck job's own
+// indexingState component-key namespacing (recheck-reorgs.ts) actually
+// needs it for.
+export async function getVerifiedTokenPriceEntities(): Promise<RecheckEntity[]> {
+  const rows = await db
+    .selectDistinct({ id: tokens.id, address: tokens.address, chainSlug: chains.slug })
+    .from(historicalObservations)
+    .innerJoin(tokens, eq(tokens.id, historicalObservations.entityId))
+    .innerJoin(chains, eq(chains.id, tokens.chainId))
+    .where(and(eq(historicalObservations.entityType, "token"), eq(historicalObservations.metric, "price_usd")))
+    .orderBy(tokens.address);
+  return rows.map((r) => ({ entityType: "token" as const, entityId: r.id, configKey: r.address, chainSlug: r.chainSlug, metric: "price_usd" }));
 }
 
 export interface RecheckCandidate {
@@ -90,22 +125,27 @@ export interface RecheckCandidate {
 export async function getObservationsNeedingRecheck(
   entityType: RecheckEntityType,
   entityId: string,
+  // "tvl_usd" for pool/vault, "price_usd" for token (Phase 5.3) - see
+  // RecheckEntity's own `metric` field, which is what every real caller
+  // actually passes through here (recheck-reorgs.ts never hardcodes this
+  // itself).
+  metric: string,
   afterBlockNumber: bigint | null,
   limit: number,
 ): Promise<RecheckCandidate[]> {
   // Both columns are nullable at the type level (a pre-blockHash-provenance
   // legacy row - see historicalObservations' own schema comment - could in
   // principle have a null blockNumber too), even though the
-  // historical_observations_{pool,vault}_tvl_requires_block_identity CHECK
-  // constraints already guarantee both are set together for every
-  // tvl_usd row of either entityType going forward. Filtering on both
+  // historical_observations_{pool,vault,token}_..._requires_block_identity
+  // CHECK constraints already guarantee both are set together for every
+  // recheckable row of any entityType going forward. Filtering on both
   // explicitly, rather than trusting the constraint implicitly, keeps this
   // query correct on its own terms and keeps toRecheckCandidate below able
   // to convert without a non-null assertion.
   const baseConditions = [
     eq(historicalObservations.entityType, entityType),
     eq(historicalObservations.entityId, entityId),
-    eq(historicalObservations.metric, "tvl_usd"),
+    eq(historicalObservations.metric, metric),
     isNotNull(historicalObservations.blockNumber),
     isNotNull(historicalObservations.blockHash),
     // Once a recheck has determined a row's block was reorged away

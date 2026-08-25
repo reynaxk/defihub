@@ -1,0 +1,1 @@
+ALTER TABLE "historical_observations" ADD COLUMN "reorg_invalidated_at" timestamp with time zone;

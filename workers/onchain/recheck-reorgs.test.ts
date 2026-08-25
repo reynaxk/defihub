@@ -134,11 +134,17 @@ describe("recheckPoolTvlReorgs", () => {
       { observationId: obsId, blockNumber: "200", storedBlockHash: REAL_HASH_A, currentBlockHash: REAL_HASH_B },
     ]);
 
-    // The observation itself is never mutated or deleted - provenance is
-    // preserved exactly as recorded, per the task's own instruction not to
-    // invent a destructive reconciliation behavior.
+    // The observation's provenance is never mutated or deleted - every
+    // field it was written with (blockHash, blockNumber, value, ...) stays
+    // exactly as recorded, per the task's own instruction not to invent a
+    // destructive reconciliation behavior. The one thing that DOES change
+    // is reorgInvalidatedAt, set specifically so canonical history queries
+    // (getPoolTvlHistory - see pools.test.ts) stop returning this row,
+    // without ever rewriting or discarding it.
     const [row] = await db.select().from(historicalObservations).where(eq(historicalObservations.id, obsId));
     expect(row.blockHash).toBe(REAL_HASH_A);
+    expect(row.blockNumber).toBe("200");
+    expect(row.reorgInvalidatedAt).not.toBeNull();
 
     const state = await getState(chain.slug, pool.configKey);
     expect(state.status).toBe("error");
@@ -151,6 +157,18 @@ describe("recheckPoolTvlReorgs", () => {
     // But it is NOT a successful sync - a reorg means this run surfaced a
     // real problem, and must never be recorded as if everything checked out.
     expect(state.lastSuccessfulSyncAt).toBeNull();
+
+    // Repeated recheck is idempotent: an already-invalidated observation is
+    // excluded from future candidates (getObservationsNeedingRecheck), so a
+    // second run finds nothing left to do for this pool - no duplicate
+    // observation, no repeated invalidation, no corrupted checkpoint.
+    const second = await recheckPoolTvlReorgs({
+      poolEntitiesOverride: [{ poolId: pool.id, configKey: pool.configKey, chainSlug: chain.slug }],
+      readBlockHash: async () => REAL_HASH_B,
+    });
+    expect(second!.totalChecked).toBe(0);
+    const observations = await db.select().from(historicalObservations).where(eq(historicalObservations.entityId, pool.id));
+    expect(observations).toHaveLength(1);
   });
 
   it("treats an RPC failure (thrown error) as unknown - never confirmed or reorged - advances no cursor, and records no successful sync timestamp", async () => {
@@ -271,6 +289,86 @@ describe("recheckPoolTvlReorgs", () => {
     // unknown), so the whole block-500 group is fully resolved and the
     // cursor safely advances past it.
     expect(Number(state.lastProcessedBlock)).toBe(500);
+
+    // Only the reorged sibling is invalidated - its still-canonical sibling
+    // at the exact same block number is untouched, proving the marking is
+    // per-observation, not per-block-number.
+    const [rowA] = await db.select().from(historicalObservations).where(eq(historicalObservations.id, obsA));
+    const [rowB] = await db.select().from(historicalObservations).where(eq(historicalObservations.id, obsB));
+    expect(rowA.reorgInvalidatedAt).toBeNull();
+    expect(rowB.reorgInvalidatedAt).not.toBeNull();
+  });
+
+  it("with one sibling resolving cleanly and the other coming back unknown at the same block number, records exactly one unknown, never advances the cursor past that block, and leaves both siblings un-invalidated", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const pool = await makePool(chain.id);
+    createdPoolIds.push(pool.id);
+    // Same setup as the group test above (two observations sharing block
+    // 100 with different hashes), but this time the SECOND sibling checked
+    // reads back unknown (RPC couldn't currently verify it) instead of
+    // resolving to confirmed/reorged - this is the scenario the grouping
+    // logic must treat as "this whole block number stays unresolved," not
+    // "one out of two is good enough."
+    const obsA = await makeObservation(pool.id, chain.id, BigInt(100), REAL_HASH_A);
+    const obsB = await makeObservation(pool.id, chain.id, BigInt(100), REAL_HASH_B);
+
+    // Real processing order is (blockNumber, id) ascending - see
+    // getObservationsNeedingRecheck - so which of obsA/obsB is checked
+    // first depends on which uuid sorts first, not insertion order. The
+    // mock is built from that real order (not a hardcoded guess) so the
+    // first-processed sibling gets its own real stored hash back (resolves
+    // cleanly) and the second-processed one gets null (unknown),
+    // regardless of which observation that turns out to be - this exercises
+    // the actual grouping/ordering code, not a mocked-out final result.
+    const firstProcessedId = obsA < obsB ? obsA : obsB;
+    const firstProcessedHash = firstProcessedId === obsA ? REAL_HASH_A : REAL_HASH_B;
+    let callCount = 0;
+    const stats = await recheckPoolTvlReorgs({
+      poolEntitiesOverride: [{ poolId: pool.id, configKey: pool.configKey, chainSlug: chain.slug }],
+      readBlockHash: async () => {
+        callCount++;
+        return callCount === 1 ? firstProcessedHash : null;
+      },
+    });
+
+    expect(stats!.totalChecked).toBe(2);
+    expect(stats!.totalConfirmed).toBe(1);
+    expect(stats!.totalReorged).toBe(0);
+    expect(stats!.totalUnknown).toBe(1);
+
+    const state = await getState(chain.slug, pool.configKey);
+    // The group never fully resolved (one sibling unknown), so the cursor
+    // must not advance past block 100 at all.
+    expect(state.lastProcessedBlock).toBeNull();
+    expect(state.lastSuccessfulSyncAt).toBeNull();
+
+    // Neither sibling was marked reorged - the unresolved one is genuinely
+    // unresolved, not incorrectly treated as either canonical or reorged.
+    const [rowA] = await db.select().from(historicalObservations).where(eq(historicalObservations.id, obsA));
+    const [rowB] = await db.select().from(historicalObservations).where(eq(historicalObservations.id, obsB));
+    expect(rowA.reorgInvalidatedAt).toBeNull();
+    expect(rowB.reorgInvalidatedAt).toBeNull();
+
+    // A later run, once the read is reliable again, retries the whole
+    // group (including the sibling that already resolved once) and
+    // resolves it cleanly - no duplicate observations are ever created.
+    const secondProcessedHash = firstProcessedId === obsA ? REAL_HASH_B : REAL_HASH_A;
+    let retryCallCount = 0;
+    const retry = await recheckPoolTvlReorgs({
+      poolEntitiesOverride: [{ poolId: pool.id, configKey: pool.configKey, chainSlug: chain.slug }],
+      readBlockHash: async () => {
+        retryCallCount++;
+        return retryCallCount === 1 ? firstProcessedHash : secondProcessedHash;
+      },
+    });
+    expect(retry!.totalUnknown).toBe(0);
+    expect(retry!.totalConfirmed).toBe(2);
+    expect(retry!.totalReorged).toBe(0);
+    const retryState = await getState(chain.slug, pool.configKey);
+    expect(Number(retryState.lastProcessedBlock)).toBe(100);
+    const observations = await db.select().from(historicalObservations).where(eq(historicalObservations.entityId, pool.id));
+    expect(observations).toHaveLength(2);
   });
 
   it("respects the configured lookback depth using actual numeric block ordering, then picks up nothing further on a later run", async () => {
@@ -437,6 +535,61 @@ describe("recheckPoolTvlReorgs", () => {
 
     const okResult = stats!.perEntity.find((e) => e.poolKey === poolA.configKey);
     expect(okResult!.confirmed).toBe(1);
+
+    // The failure happened before recheckOneEntity's normal "running"
+    // update ever ran (getObservationsNeedingRecheck itself threw) - the
+    // attempt is still recorded, via the same catch that records the
+    // failure. Without this, the broken entity would look permanently
+    // never-attempted and would keep sorting first in every future run's
+    // least-recently-attempted ordering (see the dedicated rotation test
+    // below).
+    const brokenState = await getState(chain.slug, brokenConfigKey);
+    expect(brokenState).toBeDefined();
+    expect(brokenState.lastAttemptedSyncAt).not.toBeNull();
+    expect(brokenState.lastSuccessfulSyncAt).toBeNull();
+  });
+
+  it("still advances a failing entity's lastAttemptedSyncAt, so a repeatedly-failing entity does not starve the rotation forever", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const poolB = await makePool(chain.id);
+    const poolC = await makePool(chain.id);
+    createdPoolIds.push(poolB.id, poolC.id);
+    await makeObservation(poolB.id, chain.id, BigInt(20), REAL_HASH_B);
+    await makeObservation(poolC.id, chain.id, BigInt(30), REAL_HASH_C);
+
+    const brokenConfigKey = `broken-pool-${randomUUID()}`;
+    const brokenEntity = { poolId: "not-a-real-uuid", configKey: brokenConfigKey, chainSlug: chain.slug };
+    const entityB = { poolId: poolB.id, configKey: poolB.configKey, chainSlug: chain.slug };
+    const entityC = { poolId: poolC.id, configKey: poolC.configKey, chainSlug: chain.slug };
+
+    // Run 1: only the broken entity is in scope - it fails every time, but
+    // must still record a real attempt.
+    const first = await recheckPoolTvlReorgs({ poolEntitiesOverride: [brokenEntity], readBlockHash: async () => REAL_HASH_A });
+    expect(first!.entitiesFailed).toBe(1);
+    const afterFirst = await getState(chain.slug, brokenConfigKey);
+    expect(afterFirst.lastAttemptedSyncAt).not.toBeNull();
+
+    // Run 2: same broken entity fails again immediately - a second,
+    // strictly later attempt timestamp, not a stuck/frozen one.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await recheckPoolTvlReorgs({ poolEntitiesOverride: [brokenEntity], readBlockHash: async () => REAL_HASH_A });
+    expect(second!.entitiesFailed).toBe(1);
+    const afterSecond = await getState(chain.slug, brokenConfigKey);
+    expect(afterSecond.lastAttemptedSyncAt!.getTime()).toBeGreaterThan(afterFirst.lastAttemptedSyncAt!.getTime());
+
+    // Run 3: the broken entity now has two real, recent attempts behind
+    // it - entities B and C have never been attempted at all, so they sort
+    // ahead of it (least-recently-attempted first). batchSize=1 must pick
+    // one of the healthy entities, not retry the broken one a third time in
+    // a row.
+    const third = await recheckPoolTvlReorgs({
+      poolEntitiesOverride: [brokenEntity, entityB, entityC],
+      batchSize: 1,
+      readBlockHash: async () => REAL_HASH_B,
+    });
+    expect(third!.entitiesProcessed).toBe(1);
+    expect(third!.perEntity[0].poolKey).not.toBe(brokenConfigKey);
   });
 
   it("reports a lock-contended run as null, not an undifferentiated empty success", async () => {

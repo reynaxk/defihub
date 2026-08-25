@@ -2,7 +2,11 @@ import "dotenv/config";
 import postgres from "postgres";
 import { closeDb } from "../../lib/database/client";
 import { getIndexingState, updateIndexingState } from "../../lib/indexing/state";
-import { getObservationsNeedingRecheck, getVerifiedPoolEntities } from "../../lib/database/queries/onchain-recheck";
+import {
+  getObservationsNeedingRecheck,
+  getVerifiedPoolEntities,
+  markObservationReorged,
+} from "../../lib/database/queries/onchain-recheck";
 import { checkBlockHashStillCanonical, readBlockHashOnChain } from "../../lib/onchain/reorg";
 import { logger } from "../../lib/observability/logger";
 import { withSyncRun } from "../../lib/observability/sync-run";
@@ -36,14 +40,17 @@ import { withSyncRun } from "../../lib/observability/sync-run";
 // reported, not silently skipped or faked. See docs/native-data.md and this
 // task's own final report for that limitation.
 //
-// Similarly, a detected reorg is never used to delete or mutate a
-// historical_observations row: that table has no "this observation was
-// reorged" column (a schema change, out of scope here per the task's own
-// instruction to STOP and report rather than invent one), so the durable
-// record of "this was flagged" lives in this run's own sync_runs row and
-// structured logs, and in indexingState's per-entity `status`/`error`
-// fields - both real, existing, append-only-safe places to record it,
-// never a mutation of provenance data itself.
+// A detected reorg is never used to delete a historical_observations row,
+// or to touch any of its provenance fields (blockNumber, blockHash, value,
+// calculationInputs, priceSource, ...). The one thing that does change is
+// historicalObservations.reorgInvalidatedAt (see that column's own
+// schema.ts comment and markObservationReorged in queries/onchain-recheck.ts)
+// - set once, the moment a reorg is confirmed, purely so
+// getPoolTvlHistory/getPoolObservationCount (queries/pools.ts) can exclude
+// it from canonical results without ever rewriting or discarding the row
+// itself. The durable "why" - the specific hash mismatch this run found -
+// still lives in this run's own sync_runs row and structured logs, and in
+// indexingState's per-entity `status`/`error` fields, exactly as before.
 
 const RECHECK_COMPONENT_PREFIX = "reorg-recheck:pool:";
 
@@ -152,15 +159,25 @@ async function recheckOneEntity(
 ): Promise<ReorgRecheckEntityResult | null> {
   const component = `${RECHECK_COMPONENT_PREFIX}${entity.configKey}`;
 
-  const state = await getIndexingState(entity.chainSlug, component);
-  const cursor = state?.lastProcessedBlock ?? null;
-
-  const candidates = await getObservationsNeedingRecheck(entity.poolId, cursor, lookbackDepth);
-  if (candidates.length === 0) return null; // nothing to do - doesn't consume a batch slot, doesn't touch indexingState
-
-  await updateIndexingState(entity.chainSlug, component, { status: "running", lastAttemptedSyncAt: new Date() });
-
+  // The whole body - including getIndexingState/getObservationsNeedingRecheck,
+  // not just the processing loop below - is wrapped in this one try/catch so
+  // ANY failure for a selected entity (a broken lookup, a DB error reading
+  // the cursor, an RPC read, a write) reaches the same catch, which always
+  // records that an attempt was made (see lastAttemptedSyncAt in the catch
+  // below). Without this, a failure that happens before the "running" update
+  // further down - e.g. getObservationsNeedingRecheck itself throwing -
+  // would leave lastAttemptedSyncAt untouched, making that entity look
+  // permanently "least recently attempted" and starve every other entity by
+  // always sorting first in runRecheck's ordering.
   try {
+    const state = await getIndexingState(entity.chainSlug, component);
+    const cursor = state?.lastProcessedBlock ?? null;
+
+    const candidates = await getObservationsNeedingRecheck(entity.poolId, cursor, lookbackDepth);
+    if (candidates.length === 0) return null; // nothing to do - doesn't consume a batch slot, doesn't touch indexingState
+
+    await updateIndexingState(entity.chainSlug, component, { status: "running", lastAttemptedSyncAt: new Date() });
+
     // Candidates arrive ordered ascending by (blockNumber, id) - see
     // getObservationsNeedingRecheck, which also guarantees every
     // observation sharing a given blockNumber is present together (never
@@ -229,6 +246,13 @@ async function recheckOneEntity(
 
         if (check.status === "reorged") {
           result.reorged++;
+          // Excludes this row from canonical history (getPoolTvlHistory/
+          // getPoolObservationCount, queries/pools.ts) and from future
+          // recheck candidates (getObservationsNeedingRecheck already
+          // filters on this) - without touching or deleting the row itself.
+          // A throw here is caught by this function's own outer try/catch,
+          // same as any other failure in this loop.
+          await markObservationReorged(candidate.id, new Date());
           result.reorgedObservations.push({
             observationId: candidate.id,
             blockNumber: candidate.blockNumber.toString(),
@@ -288,15 +312,26 @@ async function recheckOneEntity(
 
     return result;
   } catch (err) {
-    // An unexpected failure partway through (not a "confirmed"/"reorged"/
-    // "unknown" outcome - those are handled above - but a genuine thrown
-    // error) must not leave this entity's indexingState stuck at "running"
-    // forever. Recorded here so the row reflects reality even though the
-    // caller (runRecheck) is the one that decides whether the overall run
-    // continues past this entity.
+    // An unexpected failure anywhere in the try above - including before
+    // the "running" update ever ran (e.g. getObservationsNeedingRecheck
+    // itself throwing) - must not leave this entity's indexingState stuck
+    // at "running" forever, AND must still record that an attempt happened.
+    // lastAttemptedSyncAt is written here unconditionally (not just status/
+    // error, which is all this used to set) specifically so a failure this
+    // early doesn't leave the entity looking never-attempted: runRecheck's
+    // least-recently-attempted ordering would otherwise keep selecting the
+    // same failing entity first on every run, starving every entity behind
+    // it. This never overwrites a *successful-completion* signal -
+    // lastSuccessfulSyncAt is untouched here, only lastAttemptedSyncAt (an
+    // attempt was made, whether or not it succeeded) - so this can't be
+    // confused with the run having actually completed.
     const message = err instanceof Error ? err.message : String(err);
     try {
-      await updateIndexingState(entity.chainSlug, component, { status: "error", error: message });
+      await updateIndexingState(entity.chainSlug, component, {
+        status: "error",
+        error: message,
+        lastAttemptedSyncAt: new Date(),
+      });
     } catch {
       // Best-effort - a secondary DB failure here must never mask the
       // original error being rethrown below.

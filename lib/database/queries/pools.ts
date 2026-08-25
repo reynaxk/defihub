@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, min } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, isNull, min } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import {
   chains,
@@ -144,6 +144,12 @@ export async function getPoolTvlHistory(
     eq(historicalObservations.entityType, "pool"),
     eq(historicalObservations.entityId, poolId),
     eq(historicalObservations.metric, "tvl_usd"),
+    // Excludes any observation workers/onchain/recheck-reorgs.ts has since
+    // determined was reorged off the canonical chain (reorgInvalidatedAt
+    // set - see that column's own schema.ts comment). The row itself is
+    // never deleted, only excluded from this canonical-history result -
+    // provenance stays queryable directly for debugging/audit.
+    isNull(historicalObservations.reorgInvalidatedAt),
   ];
   if (since) conditions.push(gte(historicalObservations.timestamp, since));
 
@@ -197,6 +203,7 @@ export async function getPoolObservationCount(poolId: string): Promise<{ count: 
         eq(historicalObservations.entityType, "pool"),
         eq(historicalObservations.entityId, poolId),
         eq(historicalObservations.metric, "tvl_usd"),
+        isNull(historicalObservations.reorgInvalidatedAt),
       ),
     );
 

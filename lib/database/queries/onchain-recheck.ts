@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, historicalObservations, pools } from "@/lib/database/schema";
 
@@ -87,6 +87,12 @@ export async function getObservationsNeedingRecheck(
     eq(historicalObservations.metric, "tvl_usd"),
     isNotNull(historicalObservations.blockNumber),
     isNotNull(historicalObservations.blockHash),
+    // Once a recheck has determined a row's block was reorged away
+    // (reorgInvalidatedAt set - see markObservationReorged below), its
+    // outcome is settled: there's nothing left to re-verify by reading the
+    // chain again, so it's excluded from future candidates the same way it's
+    // excluded from canonical history (getPoolTvlHistory, queries/pools.ts).
+    isNull(historicalObservations.reorgInvalidatedAt),
   ];
   const conditions =
     afterBlockNumber != null
@@ -124,6 +130,23 @@ export async function getObservationsNeedingRecheck(
     .orderBy(asc(historicalObservations.blockNumber), asc(historicalObservations.id));
 
   return rows.flatMap(toRecheckCandidate);
+}
+
+// Marks one historical_observations row as no longer canonical, without
+// touching or deleting anything else about it - every provenance field
+// (blockNumber, blockHash, value, calculationInputs, priceSource, ...) stays
+// exactly as originally recorded, so the row remains fully available for
+// debugging/audit (see reorgInvalidatedAt's own schema.ts comment for the
+// full reasoning). A single targeted UPDATE by primary key is naturally
+// idempotent - setting the same column on the same row again, if it were
+// ever attempted twice, just overwrites the timestamp with another
+// non-null value, never creates a duplicate or corrupts anything. In
+// practice it's never attempted twice: getObservationsNeedingRecheck
+// excludes an already-invalidated row from future candidates, so this only
+// ever runs once per observation, at the moment recheck-reorgs.ts first
+// determines its block was reorged away.
+export async function markObservationReorged(observationId: string, invalidatedAt: Date): Promise<void> {
+  await db.update(historicalObservations).set({ reorgInvalidatedAt: invalidatedAt }).where(eq(historicalObservations.id, observationId));
 }
 
 // The isNotNull filters above already guarantee both fields are non-null in

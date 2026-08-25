@@ -199,6 +199,76 @@ describe("recordVaultVerification atomicity", () => {
     const observations = await db.select().from(historicalObservations).where(eq(historicalObservations.entityId, vaultId));
     expect(observations).toHaveLength(0);
   });
+
+  it("refreshes label and poolAddress (not just the verification-specific fields) when the same verification key is reused with new metadata, never leaving current TVL associated with stale metadata", async () => {
+    const chainId = await makeChain();
+    const vaultKey = `metadata-refresh-vault-${randomUUID().slice(0, 8)}`;
+    const vaultId = randomUUID();
+
+    const addressA = `0xvault${randomUUID().slice(0, 8)}`;
+    await recordVaultVerification({
+      vaultKey,
+      protocolId: null,
+      chainId,
+      label: "Stale Label A",
+      vaultAddress: addressA,
+      tvlUsdForVerification: "1000.00",
+      blockNumber: "18000000",
+      runTimestamp: new Date("2026-01-01T00:00:00.000Z"),
+      vaultId,
+      tvlUsdForObservation: "1000.00000000",
+      blockHash: "0x" + "aa".repeat(32),
+      priceSource: "coingecko",
+      priceRetrievedAt: new Date("2026-01-01T00:00:00.000Z"),
+      calculationInputs: null,
+      calculationVersion: "erc4626-total-assets-v1",
+    });
+
+    const [afterFirstWrite] = await db
+      .select()
+      .from(onchainVerifications)
+      .where(eq(onchainVerifications.key, vaultVerificationKey(vaultKey)));
+    expect(afterFirstWrite.label).toBe("Stale Label A");
+    expect(afterFirstWrite.poolAddress).toBe(addressA);
+
+    // The exact same effective verification key, reused with different
+    // metadata - the scenario this fix targets: without refreshing
+    // label/poolAddress on conflict, the row below would keep reporting
+    // "Stale Label A" / addressA even though its tvlUsd/blockNumber now
+    // genuinely reflect a different vault entity's state.
+    const addressB = `0xvault${randomUUID().slice(0, 8)}`;
+    await recordVaultVerification({
+      vaultKey,
+      protocolId: null,
+      chainId,
+      label: "Fresh Label B",
+      vaultAddress: addressB,
+      tvlUsdForVerification: "2000.00",
+      blockNumber: "18000100",
+      runTimestamp: new Date("2026-01-02T00:00:00.000Z"),
+      vaultId,
+      tvlUsdForObservation: "2000.00000000",
+      blockHash: "0x" + "bb".repeat(32),
+      priceSource: "coingecko",
+      priceRetrievedAt: new Date("2026-01-02T00:00:00.000Z"),
+      calculationInputs: null,
+      calculationVersion: "erc4626-total-assets-v1",
+    });
+
+    const [afterSecondWrite] = await db
+      .select()
+      .from(onchainVerifications)
+      .where(eq(onchainVerifications.key, vaultVerificationKey(vaultKey)));
+
+    // The metadata this fix targets - refreshed to B, not stuck on stale A.
+    expect(afterSecondWrite.label).toBe("Fresh Label B");
+    expect(afterSecondWrite.poolAddress).toBe(addressB);
+    // The verification fields this conflict path already refreshed
+    // correctly before this fix - still correct afterwards.
+    expect(afterSecondWrite.tvlUsd).toBe("2000.00");
+    expect(afterSecondWrite.blockNumber).toBe("18000100");
+    expect(afterSecondWrite.verifiedAt.getTime()).toBe(new Date("2026-01-02T00:00:00.000Z").getTime());
+  });
 });
 
 describe("pool/vault verification identity collision", () => {

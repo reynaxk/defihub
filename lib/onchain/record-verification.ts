@@ -87,6 +87,8 @@ export async function recordVerification(record: VerificationWriteRecord): Promi
         set: {
           protocolId: record.protocolId,
           chainId: record.chainId,
+          label: record.label,
+          poolAddress: record.contractAddress,
           tvlUsd: record.tvlUsdForVerification,
           blockNumber: record.blockNumber,
           verifiedAt: record.runTimestamp,

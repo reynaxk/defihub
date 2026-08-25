@@ -32,6 +32,7 @@ const OBSERVATION_VALUE_DECIMALS = 8;
 const VAULT_ABI = parseAbi([
   "function totalAssets() view returns (uint256)",
   "function asset() view returns (address)",
+  "function decimals() view returns (uint8)",
 ]);
 
 interface VaultOutcome {
@@ -55,32 +56,36 @@ interface VaultOutcome {
  * would make the persisted blockNumber not actually correspond to the
  * state that produced tvlUsd.
  *
- * Each vault contributes two calls to the same pinned multicall -
- * totalAssets() and asset() - not just the first. The config's own
- * underlyingAsset.address (lib/onchain/config.ts) is the *expected*
- * identity, confirmed by hand at config-authoring time (see each entry's
- * own comment); this on-chain asset() read is the ongoing, automatic check
- * that the vault's real identity hasn't drifted from what the config
- * claims - a compromised/upgraded/misconfigured vault contract, or a
- * config entry that was simply wrong, is caught here as an explicit
- * failure for that vault rather than silently computing TVL against the
- * wrong asset's price. Both reads are always in the SAME multicall/block
- * as each other and as the balance read they gate, never a separate,
- * later, potentially-different-block call.
+ * Each vault contributes three calls to the same pinned multicall -
+ * totalAssets(), asset(), and decimals() - not just the first. The
+ * config's own underlyingAsset.address/decimals (lib/onchain/config.ts) are
+ * the *expected* identity, confirmed by hand at config-authoring time (see
+ * each entry's own comment); these on-chain reads are the ongoing,
+ * automatic checks that the vault's real identity hasn't drifted from what
+ * the config claims. asset() catches a compromised/upgraded/misconfigured
+ * vault contract or a wrong config entry outright; decimals() specifically
+ * guards computePoolTvl's own fixed-point math - totalAssets() is a raw
+ * on-chain integer, and computePoolTvl rescales it using
+ * vault.underlyingAsset.decimals (see resolveVaultOutcome below), so a
+ * decimals mismatch that went unchecked wouldn't fail loudly - it would
+ * silently produce a TVL wrong by a power of ten. All three reads are
+ * always in the SAME multicall/block as each other and as the balance read
+ * they gate, never a separate, later, potentially-different-block call.
  */
-// Two calls per vault, always in this order (totalAssets() then asset()) -
-// see CALLS_PER_VAULT below, which every result-index calculation is keyed
-// off of. Both calls target the same vault address and are pushed into the
-// same flat array that verifyVaultsOnChain sends as ONE multicall pinned to
-// ONE block - extracted as its own pure function (no RPC involved) so this
-// batching shape is directly testable without a live/mocked chain call; see
-// verify-vault.test.ts.
-export const CALLS_PER_VAULT = 2;
+// Three calls per vault, always in this order (totalAssets(), asset(),
+// decimals()) - see CALLS_PER_VAULT below, which every result-index
+// calculation is keyed off of. All three target the same vault address and
+// are pushed into the same flat array that verifyVaultsOnChain sends as ONE
+// multicall pinned to ONE block - extracted as its own pure function (no
+// RPC involved) so this batching shape is directly testable without a
+// live/mocked chain call; see verify-vault.test.ts.
+export const CALLS_PER_VAULT = 3;
 
 export function buildVaultMulticallCalls(vaultsOnChain: VerifiedVault[]) {
   return vaultsOnChain.flatMap((v) => [
     { address: v.vaultAddress as Address, abi: VAULT_ABI, functionName: "totalAssets" as const },
     { address: v.vaultAddress as Address, abi: VAULT_ABI, functionName: "asset" as const },
+    { address: v.vaultAddress as Address, abi: VAULT_ABI, functionName: "decimals" as const },
   ]);
 }
 
@@ -94,6 +99,96 @@ export function buildVaultMulticallCalls(vaultsOnChain: VerifiedVault[]) {
 // value.
 export function assetAddressMatchesConfig(onchainAssetAddress: string, configuredAddress: string): boolean {
   return onchainAssetAddress.toLowerCase() === configuredAddress.toLowerCase();
+}
+
+// Pure, directly testable: whether a vault's live on-chain decimals()
+// result matches its configured underlyingAsset.decimals. Unlike an
+// address, decimals has no encoding ambiguity to normalize away - a plain
+// equality check is the whole rule - but this is still named and exported
+// (rather than inlined) for the same reason assetAddressMatchesConfig is:
+// a clear, self-documenting name at the call site, and direct unit-test
+// coverage independent of resolveVaultOutcome's other branches.
+export function decimalsMatchConfig(onchainDecimals: number, configuredDecimals: number): boolean {
+  return onchainDecimals === configuredDecimals;
+}
+
+export interface DecodedVaultRead {
+  totalAssets: bigint | null;
+  onchainAssetAddress: Address | null;
+  onchainDecimals: number | null;
+}
+
+// The full per-vault decision chain - asset() read failure, asset()
+// mismatch, decimals() read failure, decimals() mismatch, then the actual
+// TVL calculation - extracted as its own pure function, parameterized by
+// already-decoded multicall results rather than making any RPC call
+// itself. This is what makes the mismatch paths (including the decimals
+// one added alongside CALLS_PER_VAULT above) directly unit-testable with
+// plain constructed inputs, the same "no live/mocked chain call needed"
+// approach this codebase already uses for computePoolTvl itself
+// (verify-pool.ts) - verifyVaultsOnChain below is now a thin wrapper that
+// does the real RPC read, decodes the three multicall results into a
+// DecodedVaultRead, and hands off to this function for everything else.
+export function resolveVaultOutcome(
+  vault: VerifiedVault,
+  decoded: DecodedVaultRead,
+  priceById: Map<string, string>,
+  blockNumber: bigint,
+  blockHash: string,
+): VaultOutcome {
+  if (decoded.onchainAssetAddress == null) {
+    return { key: vault.key, ok: false, error: "asset() read failed" };
+  }
+  if (!assetAddressMatchesConfig(decoded.onchainAssetAddress, vault.underlyingAsset.address)) {
+    return {
+      key: vault.key,
+      ok: false,
+      error: `configured underlying asset ${vault.underlyingAsset.address} does not match this vault's on-chain asset() result ${decoded.onchainAssetAddress} - never substituted, config must be corrected`,
+    };
+  }
+
+  if (decoded.onchainDecimals == null) {
+    return { key: vault.key, ok: false, error: "decimals() read failed" };
+  }
+  // Checked before computePoolTvl is ever called - a decimals mismatch
+  // must never reach the fixed-point rescaling math at all, since
+  // computePoolTvl has no way to know the configured decimals are wrong;
+  // it would just compute an exact answer to the wrong question, off by a
+  // power of ten. Never substituted: the on-chain value is used only to
+  // validate the config, never to silently correct it.
+  if (!decimalsMatchConfig(decoded.onchainDecimals, vault.underlyingAsset.decimals)) {
+    return {
+      key: vault.key,
+      ok: false,
+      error: `configured underlying decimals ${vault.underlyingAsset.decimals} does not match this vault's on-chain decimals() result ${decoded.onchainDecimals} for ${vault.underlyingAsset.address} - never substituted, config must be corrected`,
+    };
+  }
+
+  const token: PoolTvlToken = {
+    symbol: vault.underlyingAsset.symbol,
+    decimals: vault.underlyingAsset.decimals,
+    coingeckoId: vault.underlyingAsset.coingeckoId,
+  };
+  // An ERC-4626 vault's TVL is exactly the N=1 case of "sum of balance *
+  // price across the tokens this contract holds" - reusing computePoolTvl
+  // unmodified is what makes this genuinely the same exact-arithmetic
+  // engine, not a parallel reimplementation of it.
+  const result = computePoolTvl([token], [decoded.totalAssets], priceById);
+  if (!result.ok) {
+    return { key: vault.key, ok: false, error: result.error };
+  }
+
+  const calculationInputs: HistoricalObservationCalculationInput[] = [
+    {
+      symbol: token.symbol,
+      coingeckoId: token.coingeckoId,
+      decimals: token.decimals,
+      balanceRaw: decoded.totalAssets!.toString(),
+      priceUsd: priceById.get(token.coingeckoId)!,
+    },
+  ];
+
+  return { key: vault.key, ok: true, tvlUsd: result.tvlUsd, blockNumber, blockHash, calculationInputs };
 }
 
 async function verifyVaultsOnChain(
@@ -131,53 +226,20 @@ async function verifyVaultsOnChain(
     const vault = vaultsOnChain[i];
     const totalAssetsResult = multicallResults[i * CALLS_PER_VAULT];
     const assetResult = multicallResults[i * CALLS_PER_VAULT + 1];
+    const decimalsResult = multicallResults[i * CALLS_PER_VAULT + 2];
 
     // A failed per-vault multicall result becomes `null`, never a
-    // substituted/assumed value - computePoolTvl treats that as a hard
-    // failure, same contract as a failed pool-token balanceOf.
-    const totalAssets = totalAssetsResult?.status === "success" ? (totalAssetsResult.result as bigint) : null;
-    const onchainAssetAddress = assetResult?.status === "success" ? (assetResult.result as Address) : null;
-
-    if (onchainAssetAddress == null) {
-      outcomes.push({ key: vault.key, ok: false, error: "asset() read failed" });
-      continue;
-    }
-    if (!assetAddressMatchesConfig(onchainAssetAddress, vault.underlyingAsset.address)) {
-      outcomes.push({
-        key: vault.key,
-        ok: false,
-        error: `configured underlying asset ${vault.underlyingAsset.address} does not match this vault's on-chain asset() result ${onchainAssetAddress} - never substituted, config must be corrected`,
-      });
-      continue;
-    }
-
-    const token: PoolTvlToken = {
-      symbol: vault.underlyingAsset.symbol,
-      decimals: vault.underlyingAsset.decimals,
-      coingeckoId: vault.underlyingAsset.coingeckoId,
+    // substituted/assumed value - computePoolTvl (via resolveVaultOutcome)
+    // treats a null totalAssets as a hard failure, same contract as a
+    // failed pool-token balanceOf; resolveVaultOutcome itself treats a null
+    // asset/decimals the same way.
+    const decoded: DecodedVaultRead = {
+      totalAssets: totalAssetsResult?.status === "success" ? (totalAssetsResult.result as bigint) : null,
+      onchainAssetAddress: assetResult?.status === "success" ? (assetResult.result as Address) : null,
+      onchainDecimals: decimalsResult?.status === "success" ? (decimalsResult.result as number) : null,
     };
-    // An ERC-4626 vault's TVL is exactly the N=1 case of "sum of balance *
-    // price across the tokens this contract holds" - reusing
-    // computePoolTvl unmodified is what makes this genuinely the same
-    // exact-arithmetic engine, not a parallel reimplementation of it.
-    const result = computePoolTvl([token], [totalAssets], priceById);
 
-    if (!result.ok) {
-      outcomes.push({ key: vault.key, ok: false, error: result.error });
-      continue;
-    }
-
-    const calculationInputs: HistoricalObservationCalculationInput[] = [
-      {
-        symbol: token.symbol,
-        coingeckoId: token.coingeckoId,
-        decimals: token.decimals,
-        balanceRaw: totalAssets!.toString(),
-        priceUsd: priceById.get(token.coingeckoId)!,
-      },
-    ];
-
-    outcomes.push({ key: vault.key, ok: true, tvlUsd: result.tvlUsd, blockNumber, blockHash, calculationInputs });
+    outcomes.push(resolveVaultOutcome(vault, decoded, priceById, blockNumber, blockHash));
   }
 
   return outcomes;

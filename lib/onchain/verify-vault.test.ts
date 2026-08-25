@@ -13,7 +13,14 @@
 // verify-vault.integration.test.ts covers against a real database.
 import { describe, expect, it } from "vitest";
 import { computePoolTvl, type PoolTvlToken } from "./verify-pool";
-import { assetAddressMatchesConfig, buildVaultMulticallCalls, CALLS_PER_VAULT } from "./verify-vault";
+import {
+  assetAddressMatchesConfig,
+  buildVaultMulticallCalls,
+  CALLS_PER_VAULT,
+  decimalsMatchConfig,
+  resolveVaultOutcome,
+  type DecodedVaultRead,
+} from "./verify-vault";
 import { VERIFIED_VAULTS, type VerifiedVault } from "./config";
 
 function vaultToken(overrides: Partial<PoolTvlToken> = {}): PoolTvlToken {
@@ -151,17 +158,19 @@ describe("buildVaultMulticallCalls", () => {
     vaultAddress: "0x3333333333333333333333333333333333333c",
   };
 
-  it("emits exactly totalAssets() immediately followed by asset(), both against the same vault address, for each vault", () => {
+  it("emits exactly totalAssets(), asset(), then decimals(), all against the same vault address, for each vault", () => {
     const calls = buildVaultMulticallCalls([vaultA, vaultB]);
 
     expect(calls).toHaveLength(2 * CALLS_PER_VAULT);
     expect(calls[0]).toMatchObject({ address: vaultA.vaultAddress, functionName: "totalAssets" });
     expect(calls[1]).toMatchObject({ address: vaultA.vaultAddress, functionName: "asset" });
-    expect(calls[2]).toMatchObject({ address: vaultB.vaultAddress, functionName: "totalAssets" });
-    expect(calls[3]).toMatchObject({ address: vaultB.vaultAddress, functionName: "asset" });
+    expect(calls[2]).toMatchObject({ address: vaultA.vaultAddress, functionName: "decimals" });
+    expect(calls[3]).toMatchObject({ address: vaultB.vaultAddress, functionName: "totalAssets" });
+    expect(calls[4]).toMatchObject({ address: vaultB.vaultAddress, functionName: "asset" });
+    expect(calls[5]).toMatchObject({ address: vaultB.vaultAddress, functionName: "decimals" });
   });
 
-  it("produces the exact index math verifyVaultsOnChain relies on to pair each vault's two results back up (i * CALLS_PER_VAULT)", () => {
+  it("produces the exact index math verifyVaultsOnChain relies on to pair each vault's three results back up (i * CALLS_PER_VAULT)", () => {
     const vaults = [vaultA, vaultB];
     const calls = buildVaultMulticallCalls(vaults);
 
@@ -170,10 +179,105 @@ describe("buildVaultMulticallCalls", () => {
       expect(calls[i * CALLS_PER_VAULT].functionName).toBe("totalAssets");
       expect(calls[i * CALLS_PER_VAULT + 1].address).toBe(vaults[i].vaultAddress);
       expect(calls[i * CALLS_PER_VAULT + 1].functionName).toBe("asset");
+      expect(calls[i * CALLS_PER_VAULT + 2].address).toBe(vaults[i].vaultAddress);
+      expect(calls[i * CALLS_PER_VAULT + 2].functionName).toBe("decimals");
     }
   });
 
   it("returns an empty array for an empty vault list, never throwing", () => {
     expect(buildVaultMulticallCalls([])).toEqual([]);
+  });
+});
+
+describe("decimalsMatchConfig", () => {
+  it("returns true when the on-chain decimals() result matches the configured underlying decimals exactly", () => {
+    expect(decimalsMatchConfig(18, 18)).toBe(true);
+  });
+
+  it("returns false for a mismatched decimals value, never silently accepting it", () => {
+    // A real, plausible misconfiguration shape: config says 18 (as if DAI)
+    // but the live contract is actually a 6-decimals token (as if USDC) -
+    // exactly the powers-of-ten TVL error this check exists to catch.
+    expect(decimalsMatchConfig(6, 18)).toBe(false);
+  });
+});
+
+describe("resolveVaultOutcome", () => {
+  const vault: VerifiedVault = {
+    key: "test-vault",
+    chainSlug: "ethereum",
+    protocolDefillamaSlug: "test-protocol",
+    label: "Test Vault",
+    vaultAddress: "0x1111111111111111111111111111111111111a",
+    underlyingAsset: { address: "0x2222222222222222222222222222222222222b", symbol: "TOKA", decimals: 18, coingeckoId: "toka" },
+  };
+  const priceById = new Map([["toka", "1.00"]]);
+  const blockNumber = BigInt(12345);
+  const blockHash = "0xblockhash";
+
+  function decoded(overrides: Partial<DecodedVaultRead> = {}): DecodedVaultRead {
+    return {
+      totalAssets: BigInt("1000000000000000000000000"), // 1,000,000 TOKA at 18 decimals
+      onchainAssetAddress: vault.underlyingAsset.address as `0x${string}`,
+      onchainDecimals: vault.underlyingAsset.decimals,
+      ...overrides,
+    };
+  }
+
+  it("succeeds and computes a real TVL when asset() and decimals() both match the configured values", () => {
+    const outcome = resolveVaultOutcome(vault, decoded(), priceById, blockNumber, blockHash);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.tvlUsd).toBe("1000000");
+    expect(outcome.blockNumber).toBe(blockNumber);
+    expect(outcome.blockHash).toBe(blockHash);
+  });
+
+  it("fails explicitly, never computing or returning a tvlUsd, when the on-chain decimals() result does not match the configured decimals - the powers-of-ten TVL error this whole check exists to prevent", () => {
+    const outcome = resolveVaultOutcome(vault, decoded({ onchainDecimals: 6 }), priceById, blockNumber, blockHash);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.tvlUsd).toBeUndefined();
+    expect(outcome.error).toContain(String(vault.underlyingAsset.decimals));
+    expect(outcome.error).toContain("6");
+    expect(outcome.error).toMatch(/decimals/);
+  });
+
+  it("fails explicitly, never fabricating a value, when the decimals() read itself failed (null)", () => {
+    const outcome = resolveVaultOutcome(vault, decoded({ onchainDecimals: null }), priceById, blockNumber, blockHash);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.tvlUsd).toBeUndefined();
+    expect(outcome.error).toMatch(/decimals\(\) read failed/);
+  });
+
+  it("still fails on an asset() mismatch, checked before decimals() is ever considered", () => {
+    const outcome = resolveVaultOutcome(
+      vault,
+      decoded({ onchainAssetAddress: "0x9999999999999999999999999999999999999d" }),
+      priceById,
+      blockNumber,
+      blockHash,
+    );
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.tvlUsd).toBeUndefined();
+    expect(outcome.error).toMatch(/does not match this vault's on-chain asset\(\) result/);
+  });
+
+  it("still fails when the asset() read itself failed (null), before decimals() is ever considered", () => {
+    const outcome = resolveVaultOutcome(vault, decoded({ onchainAssetAddress: null }), priceById, blockNumber, blockHash);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.tvlUsd).toBeUndefined();
+    expect(outcome.error).toMatch(/asset\(\) read failed/);
+  });
+
+  it("still fails explicitly when totalAssets() itself failed (null), even though asset() and decimals() both matched", () => {
+    const outcome = resolveVaultOutcome(vault, decoded({ totalAssets: null }), priceById, blockNumber, blockHash);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.tvlUsd).toBeUndefined();
+    expect(outcome.error).toMatch(/balance read failed/);
   });
 });

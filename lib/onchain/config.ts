@@ -1,3 +1,5 @@
+import { ONCHAIN_VERIFICATION_KEY_MAX_LENGTH, vaultVerificationKey } from "./verification-key";
+
 // The hand-picked set of on-chain reads this feature verifies. Deliberately
 // a fixed, short list - not auto-discovered - since each entry needs a human
 // to have confirmed the contract address, chain, and TVL math actually apply.
@@ -440,52 +442,83 @@ export const VERIFIED_VAULTS: VerifiedVault[] = [
 
 // onchain_verifications.key (schema.ts) is one shared varchar(64) namespace
 // across every category above - a pool, protocol-TVL, or vault entry whose
-// `key` collides with another entry's (in the SAME category, or across
-// different ones) would silently overwrite that other entry's "latest
-// value" row every time either one's verification runs, with no error and
-// no signal anything was wrong (see record-verification.ts's own comment on
-// why vault keys are additionally namespaced with a "vault:" prefix - that
-// narrows the *accidental* collision surface, but doesn't replace an actual
-// uniqueness check against real config data). This validates the full
-// combined key set - across VERIFIED_POOLS, VERIFIED_PROTOCOL_TVLS, and
-// VERIFIED_VAULTS together, which also means within any single one of them
-// too - the moment this module is imported, so a duplicate key fails loudly
-// at startup/config-load time rather than as a silent data-overwrite
-// discovered later during a scheduled verification run.
+// *effective persisted key* collides with another entry's (in the SAME
+// category, or across different ones) would silently overwrite that other
+// entry's "latest value" row every time either one's verification runs,
+// with no error and no signal anything was wrong. Deliberately validates
+// the EFFECTIVE key - what actually reaches onchain_verifications.key -
+// not each entry's raw config `key`: a vault's raw key is namespaced with
+// vaultVerificationKey (verification-key.ts, "vault:" prefix) before it's
+// ever written, so comparing raw keys alone would miss two real failure
+// modes - (1) a vault's raw key colliding, after namespacing, with some
+// other category's bare key (e.g. a pool key that happens to literally be
+// "vault:something" also used as a vault's raw key), and (2) a vault's raw
+// key that's individually well under 64 characters but pushes past the
+// column limit once the 6-character prefix is added - a bug this exact
+// codebase already hit once, as a test-only issue, before this fix. Pools
+// and legacy VERIFIED_PROTOCOL_TVLS entries are written bare/unprefixed
+// (verify-pool.ts / verify-protocol-tvl.ts), so their effective key is
+// their raw key unchanged - `toEffectiveKey` defaults to identity for them.
+export interface VerificationKeyCategory {
+  category: string;
+  rawKeys: readonly string[];
+  // Computes what this category's raw key actually becomes once persisted
+  // into onchain_verifications.key. Vaults pass vaultVerificationKey here -
+  // the exact same function recordVaultVerification (verify-vault.ts) and
+  // getVerifiedVaults' join (lib/database/queries/vaults.ts) already use -
+  // so this validation can never silently drift from what's actually
+  // written/read.
+  toEffectiveKey?: (rawKey: string) => string;
+}
+
 // `categories` defaults to the real config (production behavior, called
 // with no arguments below) and is only ever overridden by tests - same
 // override-for-testability shape as syncPoolsFromConfig's `poolsToSync` and
-// syncVaultsFromConfig's `vaultsToSync`, so the duplicate-detection logic
-// itself is directly testable against synthetic key sets without needing
-// to mutate the real VERIFIED_POOLS/VERIFIED_PROTOCOL_TVLS/VERIFIED_VAULTS
-// arrays to force a collision.
+// syncVaultsFromConfig's `vaultsToSync`, so the duplicate/length-detection
+// logic itself is directly testable against synthetic key sets without
+// needing to mutate the real VERIFIED_POOLS/VERIFIED_PROTOCOL_TVLS/
+// VERIFIED_VAULTS arrays to force a failure.
 export function assertUniqueVerificationKeys(
-  categories: readonly (readonly [string, readonly string[]])[] = [
-    ["VERIFIED_POOLS", VERIFIED_POOLS.map((p) => p.key)],
-    ["VERIFIED_PROTOCOL_TVLS", VERIFIED_PROTOCOL_TVLS.map((e) => e.key)],
-    ["VERIFIED_VAULTS", VERIFIED_VAULTS.map((v) => v.key)],
+  categories: readonly VerificationKeyCategory[] = [
+    { category: "VERIFIED_POOLS", rawKeys: VERIFIED_POOLS.map((p) => p.key) },
+    { category: "VERIFIED_PROTOCOL_TVLS", rawKeys: VERIFIED_PROTOCOL_TVLS.map((e) => e.key) },
+    { category: "VERIFIED_VAULTS", rawKeys: VERIFIED_VAULTS.map((v) => v.key), toEffectiveKey: vaultVerificationKey },
   ],
 ): void {
-  const seenInCategory = new Map<string, string>(); // key -> which category first claimed it
+  const seenEffectiveKey = new Map<string, string>(); // effective key -> which category first claimed it
 
-  for (const [category, keys] of categories) {
-    for (const key of keys) {
-      const existingCategory = seenInCategory.get(key);
-      if (existingCategory) {
+  for (const { category, rawKeys, toEffectiveKey = (rawKey: string) => rawKey } of categories) {
+    for (const rawKey of rawKeys) {
+      const effectiveKey = toEffectiveKey(rawKey);
+      const rawKeyNote = effectiveKey === rawKey ? "" : ` (raw key "${rawKey}")`;
+
+      if (effectiveKey.length > ONCHAIN_VERIFICATION_KEY_MAX_LENGTH) {
         throw new Error(
-          `Duplicate verification key "${key}": already used by ${existingCategory}, also used by ${category}. ` +
-            "Every VERIFIED_POOLS/VERIFIED_PROTOCOL_TVLS/VERIFIED_VAULTS entry must have a key that's unique across " +
-            "all three lists combined - onchain_verifications.key is one shared namespace, and a collision would " +
-            "silently overwrite an unrelated entity's verification.",
+          `Effective verification key "${effectiveKey}"${rawKeyNote} from ${category} is ${effectiveKey.length} ` +
+            `characters, exceeding onchain_verifications.key's varchar(${ONCHAIN_VERIFICATION_KEY_MAX_LENGTH}) column ` +
+            "limit. Shorten the raw key in the config - never truncate or hash it here, which would silently change " +
+            "the identity a future lookup needs to match against.",
         );
       }
-      seenInCategory.set(key, category);
+
+      const existingCategory = seenEffectiveKey.get(effectiveKey);
+      if (existingCategory) {
+        throw new Error(
+          `Duplicate effective verification key "${effectiveKey}"${rawKeyNote}: already used by ${existingCategory}, ` +
+            `also used by ${category}. Every VERIFIED_POOLS/VERIFIED_PROTOCOL_TVLS/VERIFIED_VAULTS entry must have an ` +
+            "effective persisted key (after any category-specific namespacing, e.g. a vault's \"vault:\" prefix) " +
+            "that's unique across all three lists combined - onchain_verifications.key is one shared namespace, and " +
+            "a collision would silently overwrite an unrelated entity's verification.",
+        );
+      }
+      seenEffectiveKey.set(effectiveKey, category);
     }
   }
 }
 
-// Runs at module-load time (not deferred to first use) so a duplicate key
-// fails as soon as this config is imported anywhere - the earliest point
-// possible, well before a scheduled verification job would otherwise
-// discover the collision by silently overwriting data.
+// Runs at module-load time (not deferred to first use) so a duplicate or
+// oversized key fails as soon as this config is imported anywhere - the
+// earliest point possible, well before a scheduled verification job would
+// otherwise discover the problem as a silent data-overwrite or a runtime
+// database error.
 assertUniqueVerificationKeys();

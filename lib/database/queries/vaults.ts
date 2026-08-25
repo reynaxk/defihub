@@ -8,6 +8,7 @@ import {
   vaults,
   type HistoricalObservationCalculationInput,
 } from "@/lib/database/schema";
+import { VAULT_VERIFICATION_KEY_PREFIX } from "@/lib/onchain/verification-key";
 
 // Phase 5.2's "DeFiHub internal data interface" for ERC-4626 vault TVL -
 // the exact structural twin of lib/database/queries/pools.ts, applied to
@@ -22,12 +23,14 @@ import {
 // vault configKey used directly as that key could otherwise collide with an
 // unrelated pool/protocol-TVL entry that happens to share the same string,
 // silently joining this query to the wrong entity's verification.
-// getVerifiedVaults' join below reads the exact same "vault:" prefix
-// lib/onchain/verify-vault.ts's recordVaultVerification writes - kept as a
-// plain literal in both places (not a shared import) since this query
-// layer deliberately doesn't depend on lib/onchain/* in production code;
-// if either one changes, the other must change with it.
-const VAULT_VERIFICATION_KEY_PREFIX = "vault:";
+// getVerifiedVaults' join below reads the exact same prefix
+// lib/onchain/verify-vault.ts's recordVaultVerification writes (via
+// vaultVerificationKey) and lib/onchain/config.ts's
+// assertUniqueVerificationKeys validates against - imported from
+// lib/onchain/verification-key.ts, a dependency-free leaf module with no
+// imports of its own, so pulling a single constant from it here doesn't
+// create any risk of a cycle back into the onchain write path.
+
 
 export interface VerifiedVaultListItem {
   id: string;

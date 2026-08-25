@@ -138,16 +138,6 @@ export function priceToExactDecimalString(price: number): string {
 
 const EXACT_NON_NEGATIVE_DECIMAL = /^\d+(\.\d+)?$/;
 
-// A real EVM block hash is always exactly 32 bytes (64 hex characters)
-// after the 0x prefix - a shorter/malformed/empty string is never a real
-// hash, whatever produced it. recordPoolVerification treats anything that
-// fails this the same as a genuinely missing hash: never persisted as
-// pool TVL provenance.
-// Exported so other native-verification write paths (verify-vault.ts) apply
-// the exact same real-hash validity gate, rather than each maintaining its
-// own copy of this regex.
-export const VALID_BLOCK_HASH = /^0x[0-9a-fA-F]{64}$/;
-
 // Pure - the actual "raw balance + decimals + USD price -> pool TVL" math,
 // split out from verifyPoolsOnChain so it's directly unit-testable with
 // plain numbers, no RPC/multicall involved. `balances[i] === null` means

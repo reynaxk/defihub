@@ -5,7 +5,7 @@ import {
   onchainVerifications,
   type HistoricalObservationCalculationInput,
 } from "@/lib/database/schema";
-import { VALID_BLOCK_HASH } from "./verify-pool";
+import { VALID_BLOCK_HASH } from "./verification-key";
 
 // The atomic write shared by recordPoolVerification (verify-pool.ts) and
 // recordVaultVerification (verify-vault.ts) - both functions' transaction

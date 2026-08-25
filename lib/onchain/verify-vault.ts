@@ -8,19 +8,9 @@ import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { logger } from "@/lib/observability/logger";
 import { computePoolTvl, priceToExactDecimalString, roundExactDecimal, type PoolTvlToken } from "./verify-pool";
 import { recordVerification } from "./record-verification";
+import { vaultVerificationKey } from "./verification-key";
 import { VERIFIED_VAULTS, type VerifiedVault } from "./config";
 import { syncVaultsFromConfig } from "./vaults";
-
-// onchain_verifications.key is one shared namespace across pools, vaults,
-// and the legacy VERIFIED_PROTOCOL_TVLS entries (see
-// record-verification.ts's own comment) - vault keys are namespaced with
-// this prefix specifically to make an accidental collision with a pool or
-// protocol-TVL config key structurally impossible, rather than merely
-// unlikely. Must match the identical prefix used in getVerifiedVaults'
-// join (lib/database/queries/vaults.ts) - kept as a plain literal in both
-// places (not a shared import) since the query layer deliberately doesn't
-// depend on lib/onchain/* in production code.
-const VAULT_VERIFICATION_KEY_PREFIX = "vault:";
 
 // Phase 5.2: a genuinely reusable ERC-4626 adapter, structurally mirroring
 // verify-pool.ts throughout (same block-pinning discipline, same
@@ -218,14 +208,17 @@ export interface VaultVerificationRecord {
 // - shared with recordPoolVerification (verify-pool.ts), since the two were
 // byte-for-byte identical except for which config/table each pulled its own
 // identifiers from. This wrapper's job is entity-specific: namespace
-// vaultKey with VAULT_VERIFICATION_KEY_PREFIX before it ever reaches the
-// shared onchain_verifications.key namespace (see that constant's own
-// comment for why - a bare vault key could otherwise collide with a pool
-// or protocol-TVL config key), and own this entity type's logging.
+// vaultKey via vaultVerificationKey (verification-key.ts) before it ever
+// reaches the shared onchain_verifications.key namespace (see that
+// function's own comment for why - a bare vault key could otherwise
+// collide with a pool or protocol-TVL config key, and
+// lib/onchain/config.ts's assertUniqueVerificationKeys validates every
+// vault's *effective* key through this exact same function, so the two can
+// never silently drift apart), and own this entity type's logging.
 export async function recordVaultVerification(record: VaultVerificationRecord): Promise<void> {
   const outcome = await recordVerification({
     entityType: "vault",
-    verificationKey: `${VAULT_VERIFICATION_KEY_PREFIX}${record.vaultKey}`,
+    verificationKey: vaultVerificationKey(record.vaultKey),
     protocolId: record.protocolId,
     chainId: record.chainId,
     label: record.label,

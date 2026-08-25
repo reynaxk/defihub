@@ -5,7 +5,9 @@ import { getIndexingState, updateIndexingState } from "../../lib/indexing/state"
 import {
   getObservationsNeedingRecheck,
   getVerifiedPoolEntities,
+  getVerifiedVaultEntities,
   markObservationReorged,
+  type RecheckEntity,
 } from "../../lib/database/queries/onchain-recheck";
 import { checkBlockHashStillCanonical, readBlockHashOnChain } from "../../lib/onchain/reorg";
 import { logger } from "../../lib/observability/logger";
@@ -18,6 +20,17 @@ import { withSyncRun } from "../../lib/observability/sync-run";
 // pinned to a block hash at write time, but nothing ever checks whether
 // that block later got reorged off the canonical chain.
 //
+// Phase 5.2 generalized this job (previously pool-only) to also cover
+// VERIFIED_VAULTS' ERC-4626 entries (verify-vault.ts), which write
+// block-hash-pinned historical_observations rows the exact same way pools
+// do (entityType "vault" instead of "pool" - see RecheckEntity). No new
+// job, no new lock, no new cron: recheckOneEntity/runRecheck below operate
+// on a unified list of pool AND vault entities, tagged by entityType,
+// through the same indexingState checkpoints, the same advisory lock, and
+// the same checkBlockHashStillCanonical/reorgInvalidatedAt mechanics -
+// exactly the "do not create a separate indexing mechanism for the new TVL
+// sources" instruction this phase was built under.
+//
 // Deliberately reuses, rather than re-implements, every piece of existing
 // infrastructure this touches:
 //   - lib/onchain/reorg.ts (checkBlockHashStillCanonical, readBlockHashOnChain) - unmodified
@@ -27,18 +40,20 @@ import { withSyncRun } from "../../lib/observability/sync-run";
 //   - lib/observability/{logger,sync-run}.ts - unmodified
 //   - the advisory-lock-guards-a-cron pattern from workers/retention/rollup.ts
 //
-// Scope, and a real gap this surfaces rather than papers over: only the 6
-// VERIFIED_POOLS entries (lib/onchain/config.ts) have anything to recheck
-// against. recordPoolVerification (verify-pool.ts) pins a real blockHash
-// into historical_observations for those; verifyAllProtocolTvls
-// (verify-protocol-tvl.ts) never writes to historical_observations at all,
-// and onchain_verifications (the table it does write) has no blockHash
-// column (schema.ts) - so the 2 VERIFIED_PROTOCOL_TVLS entries (Lido, Aave)
-// have zero block-hash provenance anywhere to check. Giving them a fake or
-// best-effort recheck would be worse than admitting the gap: this job
-// covers exactly the 6 reads that have real provenance, and the other 2 are
-// reported, not silently skipped or faked. See docs/native-data.md and this
-// task's own final report for that limitation.
+// Scope, and a real gap this surfaces rather than papers over: only
+// VERIFIED_POOLS and VERIFIED_VAULTS entries (lib/onchain/config.ts) have
+// anything to recheck against. recordPoolVerification (verify-pool.ts) and
+// recordVaultVerification (verify-vault.ts) both pin a real blockHash into
+// historical_observations; verifyAllProtocolTvls (verify-protocol-tvl.ts) -
+// the legacy "direct"/"supply-times-rate" reads (Lido, Aave) predating
+// Phase 5.2 - never writes to historical_observations at all, and
+// onchain_verifications (the table it does write) has no blockHash column
+// (schema.ts), so those 2 entries have zero block-hash provenance anywhere
+// to check. Giving them a fake or best-effort recheck would be worse than
+// admitting the gap: this job covers exactly the reads that have real
+// provenance, and the legacy 2 are reported, not silently skipped or
+// faked. See docs/native-data.md and this task's own final report for that
+// limitation.
 //
 // A detected reorg is never used to delete a historical_observations row,
 // or to touch any of its provenance fields (blockNumber, blockHash, value,
@@ -46,13 +61,20 @@ import { withSyncRun } from "../../lib/observability/sync-run";
 // historicalObservations.reorgInvalidatedAt (see that column's own
 // schema.ts comment and markObservationReorged in queries/onchain-recheck.ts)
 // - set once, the moment a reorg is confirmed, purely so
-// getPoolTvlHistory/getPoolObservationCount (queries/pools.ts) can exclude
-// it from canonical results without ever rewriting or discarding the row
-// itself. The durable "why" - the specific hash mismatch this run found -
+// getPoolTvlHistory/getPoolObservationCount (queries/pools.ts) and their
+// vault twins getVaultTvlHistory/getVaultObservationCount (queries/vaults.ts)
+// can exclude it from canonical results without ever rewriting or
+// discarding the row itself. The durable "why" - the specific hash mismatch
+// this run found -
 // still lives in this run's own sync_runs row and structured logs, and in
 // indexingState's per-entity `status`/`error` fields, exactly as before.
 
-const RECHECK_COMPONENT_PREFIX = "reorg-recheck:pool:";
+// The full indexingState `component` key is
+// `${RECHECK_COMPONENT_PREFIX}:${entityType}:${configKey}` - for entityType
+// "pool" that reproduces the exact string Phase 5.1 already used
+// ("reorg-recheck:pool:X"), so existing pool checkpoints keep working
+// unchanged; "vault" entities get their own, equally namespaced, series.
+const RECHECK_COMPONENT_PREFIX = "reorg-recheck";
 
 // Small enough that a normal run (currently 6 real pools) completes in one
 // pass; large enough to have headroom once Phase 5's protocol-adapter work
@@ -104,14 +126,20 @@ const LOCK_IDLE_TIMEOUT_SECONDS = 90;
 export interface ReorgRecheckOptions {
   batchSize?: number;
   lookbackDepth?: number;
-  // Restricts which chains' pools get considered this run. Omitted = every
-  // chain a verified pool exists on.
+  // Restricts which chains' pools/vaults get considered this run. Omitted =
+  // every chain a verified pool or vault exists on.
   chainSlugs?: string[];
   // Test-only override, same shape/purpose as syncPoolsFromConfig's
   // `poolsToSync` param (lib/onchain/pools.ts) - lets a test exercise
   // batch/lookback/multi-chain behavior against synthetic entities instead
-  // of the real 6-pool VERIFIED_POOLS config.
+  // of the real VERIFIED_POOLS config. Kept in this pool-specific shape
+  // (rather than the more general RecheckEntity) so every existing Phase
+  // 5.1 test keeps working unchanged - internally mapped to RecheckEntity
+  // alongside vaultEntitiesOverride below.
   poolEntitiesOverride?: { poolId: string; configKey: string; chainSlug: string }[];
+  // The vault-shaped twin of poolEntitiesOverride, for VERIFIED_VAULTS
+  // entities.
+  vaultEntitiesOverride?: { vaultId: string; configKey: string; chainSlug: string }[];
   // Test-only override for the block-hash reader, same DI shape
   // checkBlockHashStillCanonical itself already takes - avoids a live RPC
   // call in tests. Defaults to the real readBlockHashOnChain.
@@ -126,7 +154,8 @@ export interface ReorgedObservation {
 }
 
 export interface ReorgRecheckEntityResult {
-  poolKey: string;
+  entityType: RecheckEntity["entityType"];
+  entityKey: string;
   chainSlug: string;
   checked: number;
   confirmed: number;
@@ -153,11 +182,11 @@ export interface ReorgRecheckStats {
 }
 
 async function recheckOneEntity(
-  entity: { poolId: string; configKey: string; chainSlug: string },
+  entity: RecheckEntity,
   lookbackDepth: number,
   readBlockHash: (chainSlug: string, blockNumber: bigint) => Promise<string | null>,
 ): Promise<ReorgRecheckEntityResult | null> {
-  const component = `${RECHECK_COMPONENT_PREFIX}${entity.configKey}`;
+  const component = `${RECHECK_COMPONENT_PREFIX}:${entity.entityType}:${entity.configKey}`;
 
   // The whole body - including getIndexingState/getObservationsNeedingRecheck,
   // not just the processing loop below - is wrapped in this one try/catch so
@@ -173,7 +202,7 @@ async function recheckOneEntity(
     const state = await getIndexingState(entity.chainSlug, component);
     const cursor = state?.lastProcessedBlock ?? null;
 
-    const candidates = await getObservationsNeedingRecheck(entity.poolId, cursor, lookbackDepth);
+    const candidates = await getObservationsNeedingRecheck(entity.entityType, entity.entityId, cursor, lookbackDepth);
     if (candidates.length === 0) return null; // nothing to do - doesn't consume a batch slot, doesn't touch indexingState
 
     await updateIndexingState(entity.chainSlug, component, { status: "running", lastAttemptedSyncAt: new Date() });
@@ -200,7 +229,8 @@ async function recheckOneEntity(
     }
 
     const result: ReorgRecheckEntityResult = {
-      poolKey: entity.configKey,
+      entityType: entity.entityType,
+      entityKey: entity.configKey,
       chainSlug: entity.chainSlug,
       checked: 0,
       confirmed: 0,
@@ -237,7 +267,8 @@ async function recheckOneEntity(
           result.confirmed++;
           logger.info("reorg recheck: observation still canonical", {
             component: "onchain-reorg-recheck",
-            poolKey: entity.configKey,
+            entityType: entity.entityType,
+            entityKey: entity.configKey,
             chain: entity.chainSlug,
             blockNumber: candidate.blockNumber.toString(),
           });
@@ -261,7 +292,8 @@ async function recheckOneEntity(
           });
           logger.warn("reorg recheck: observation no longer canonical - chain reorged past this block", {
             component: "onchain-reorg-recheck",
-            poolKey: entity.configKey,
+            entityType: entity.entityType,
+            entityKey: entity.configKey,
             chain: entity.chainSlug,
             blockNumber: candidate.blockNumber.toString(),
             storedBlockHash: candidate.blockHash,
@@ -276,7 +308,8 @@ async function recheckOneEntity(
         result.unknown++;
         logger.warn("reorg recheck: inconclusive - could not read current block hash", {
           component: "onchain-reorg-recheck",
-          poolKey: entity.configKey,
+          entityType: entity.entityType,
+          entityKey: entity.configKey,
           chain: entity.chainSlug,
           blockNumber: candidate.blockNumber.toString(),
           error: readError,
@@ -369,7 +402,40 @@ async function runRecheck(options: ReorgRecheckOptions = {}): Promise<ReorgReche
       return null;
     }
 
-    let entities = options.poolEntitiesOverride ?? (await getVerifiedPoolEntities());
+    // Pool and vault entities are gathered independently (they live in
+    // different tables - see getVerifiedPoolEntities/getVerifiedVaultEntities,
+    // queries/onchain-recheck.ts) but merged into one RecheckEntity[] before
+    // anything else runs, so batching, rotation, and chain filtering all
+    // apply uniformly across both kinds from this point on.
+    //
+    // Supplying *either* override puts this run in fully manual/test mode:
+    // the other kind defaults to an empty list, never a live query, so a
+    // test that only overrides pools can never have real production vaults
+    // (or vice versa) silently mixed into its entity set and counts. Only
+    // when NEITHER override is supplied does this fall through to real
+    // production behavior (both real queries).
+    const usingAnyOverride = options.poolEntitiesOverride !== undefined || options.vaultEntitiesOverride !== undefined;
+    const poolEntities: RecheckEntity[] = options.poolEntitiesOverride
+      ? options.poolEntitiesOverride.map((e) => ({
+          entityType: "pool" as const,
+          entityId: e.poolId,
+          configKey: e.configKey,
+          chainSlug: e.chainSlug,
+        }))
+      : usingAnyOverride
+        ? []
+        : await getVerifiedPoolEntities();
+    const vaultEntities: RecheckEntity[] = options.vaultEntitiesOverride
+      ? options.vaultEntitiesOverride.map((e) => ({
+          entityType: "vault" as const,
+          entityId: e.vaultId,
+          configKey: e.configKey,
+          chainSlug: e.chainSlug,
+        }))
+      : usingAnyOverride
+        ? []
+        : await getVerifiedVaultEntities();
+    let entities: RecheckEntity[] = [...poolEntities, ...vaultEntities];
     if (options.chainSlugs) {
       const allowed = new Set(options.chainSlugs);
       entities = entities.filter((e) => allowed.has(e.chainSlug));
@@ -383,10 +449,13 @@ async function runRecheck(options: ReorgRecheckOptions = {}): Promise<ReorgReche
     // entity count would always process the same leading entities every
     // run and starve the rest indefinitely. A small extra read per entity
     // (recheckOneEntity below re-reads the same row) - an acceptable cost
-    // at this app's real entity count (currently 6).
+    // at this app's real entity count (currently 8: 6 pools + 2 vaults).
     const withLastAttempt = await Promise.all(
       entities.map(async (entity) => {
-        const state = await getIndexingState(entity.chainSlug, `${RECHECK_COMPONENT_PREFIX}${entity.configKey}`);
+        const state = await getIndexingState(
+          entity.chainSlug,
+          `${RECHECK_COMPONENT_PREFIX}:${entity.entityType}:${entity.configKey}`,
+        );
         return { entity, lastAttemptedAt: state?.lastAttemptedSyncAt?.getTime() ?? 0 };
       }),
     );
@@ -432,14 +501,16 @@ async function runRecheck(options: ReorgRecheckOptions = {}): Promise<ReorgReche
         const message = err instanceof Error ? err.message : String(err);
         logger.error("reorg recheck: entity failed - continuing with remaining entities", {
           component: "onchain-reorg-recheck",
-          poolKey: entity.configKey,
+          entityType: entity.entityType,
+          entityKey: entity.configKey,
           chain: entity.chainSlug,
           error: message,
         });
         stats.entitiesProcessed++;
         stats.entitiesFailed++;
         stats.perEntity.push({
-          poolKey: entity.configKey,
+          entityType: entity.entityType,
+          entityKey: entity.configKey,
           chainSlug: entity.chainSlug,
           checked: 0,
           confirmed: 0,
@@ -504,7 +575,7 @@ export async function recheckPoolTvlReorgs(options?: ReorgRecheckOptions): Promi
           totalReorged: stats.totalReorged,
           totalUnknown: stats.totalUnknown,
           reorgedObservations: stats.perEntity.flatMap((e) =>
-            e.reorgedObservations.map((o) => ({ poolKey: e.poolKey, chain: e.chainSlug, ...o })),
+            e.reorgedObservations.map((o) => ({ entityType: e.entityType, entityKey: e.entityKey, chain: e.chainSlug, ...o })),
           ),
         },
       },

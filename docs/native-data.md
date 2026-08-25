@@ -343,13 +343,23 @@ to right now, via an injected reader (so it's unit-testable without a live
 RPC call — see `reorg.test.ts`). It returns one of three states, not a
 boolean — `"confirmed"`, `"reorged"`, or `"unknown"` (a transient read
 failure is never reported as a confirmed reorg). `readBlockHashOnChain` is
-the real, RPC-backed reader for production use. **Not yet wired into the
-verification cron or any scheduled check** — it exists as a tested,
-ready-to-use primitive, consistent with this codebase's "primitives first,
-one concrete example, no speculative scheduling" pattern elsewhere (e.g.
-`lib/indexing/events.ts`). Actually re-checking historical observations on
-a schedule is a reasonable next step, not something this change invents a
-cron for.
+the real, RPC-backed reader for production use.
+
+**Wired into scheduled work as of Phase 5.1, generalized to vaults in
+Phase 5.2.** `workers/onchain/recheck-reorgs.ts` runs on its own cron
+(`app/api/cron/recheck-reorgs`) and automatically rechecks recent
+block-hash-pinned `historical_observations` rows for both pool and vault
+entities, through this same `checkBlockHashStillCanonical` primitive — no
+separate check for each entity type. A row confirmed reorged away from
+canonical history is never deleted or rewritten; it's marked invalid via
+`historicalObservations.reorgInvalidatedAt` (set by `markObservationReorged`,
+`lib/database/queries/onchain-recheck.ts`), which excludes it from
+canonical results (`getPoolTvlHistory`/`getVaultTvlHistory`) while leaving
+every other provenance field untouched for debugging/audit. The legacy
+`VERIFIED_PROTOCOL_TVLS` entries (Lido, Aave) remain outside this recheck's
+coverage — they predate block-hash provenance entirely (`onchain_verifications`
+has no `blockHash` column), so there's nothing for a recheck to compare
+against; see `recheck-reorgs.ts`'s own module comment for that gap.
 
 ## Historical TVL bug (audit, root cause, fix)
 
@@ -581,28 +591,69 @@ different accounting shape inside the same function — see
 happens when a shape gets force-fit into the wrong category (a
 ~29%-understated figure that took real investigation to catch).
 
+## How to add another verified ERC-4626 vault
+
+ERC-4626 (`VERIFIED_VAULTS` in `lib/onchain/config.ts`, `lib/onchain/verify-vault.ts`,
+Phase 5.2) is a third, genuinely reusable category — a standardized
+interface (`asset()`, `totalAssets()`) every compliant vault implements
+identically, unlike `VERIFIED_PROTOCOL_TVLS`' "direct" entries below (each
+hand-written against that specific protocol's own function names). Adding
+another compliant vault is a config entry, not new code: append to
+`VERIFIED_VAULTS` with the same standard of evidence as a pool entry (the
+vault address AND its `asset()` result both independently confirmed, e.g.
+via a block explorer tagging the contract "ERC-4626" and cross-checking the
+underlying address against the constructor arguments — see the existing
+sDAI/sUSDe entries' comments). `syncVaultsFromConfig()` (called from every
+`verifyAllVaults()` run) picks it up automatically. TVL calculation reuses
+`computePoolTvl` unmodified (the N=1 case of "sum of balance × price across
+the tokens this contract holds") — do not write new arithmetic for a vault
+entry; if a vault's real accounting isn't "one direct `totalAssets()`
+call" (e.g. a vault that itself holds LP-wrapped positions rather than a
+single underlying asset), that's a genuinely different shape needing its
+own adapter, the same reasoning as the AMM section above.
+
 ## Known limitations
 
-- Six verified pools across five chains — a proof of concept, not
-  meaningful DEX coverage. See `VERIFIED_POOLS` in `lib/onchain/config.ts`
-  for the current list.
+- Six verified pools across five chains, plus two verified ERC-4626 vaults
+  on Ethereum — a proof of concept, not meaningful DEX or vault coverage.
+  See `VERIFIED_POOLS`/`VERIFIED_VAULTS` in `lib/onchain/config.ts` for the
+  current lists.
 - No protocol-level native TVL — see
   [Native TVL calculation](#native-tvl-calculation) above for why that
   would currently be dishonest, not just incomplete.
-- Price is still entirely external (CoinGecko) — see
-  [Price provider abstraction](#price-provider-abstraction).
+- Price is still entirely external (CoinGecko) for both pools and vaults —
+  see [Price provider abstraction](#price-provider-abstraction). Only the
+  on-chain state (balances / `totalAssets()`) is DeFiHub-calculated; the
+  USD conversion is not.
 - `historical_observations` only has real depth from the point Phase 4
   shipped forward — there's no backfill of pre-Phase-4 verified-TVL history
   (the pre-existing `onchain_verifications` table only ever stored the
-  latest value, so there was nothing to backfill from).
-- No UI surfaces `historical_observations` yet (no pool-TVL history chart)
-  — deliberately deferred to avoid a UI change beyond what Phase 4's scope
-  calls for; the query layer (`getPoolTvlHistory`) is ready for one.
-- Lending/vault-style protocols (exchange-rate and debt accounting, not a
-  single contract balance or a single accounting call) remain explicitly
-  out of scope — see `lib/onchain/config.ts`'s own category boundary
-  discussion.
-- `checkBlockHashStillCanonical` (see [Provenance & replay](#provenance--replay))
-  is a tested, standalone utility, not an automated check — nothing
-  currently re-verifies an old observation's pinned block against the
-  chain's current state on a schedule.
+  latest value, so there was nothing to backfill from). Vaults (Phase 5.2)
+  have the same limitation from their own start date - there is no
+  event-log-based historical backfill for either entity type; only the
+  live indexing path (a fresh observation each scheduled run) is
+  implemented. See `lib/indexing/events.ts`'s own "foundation only, not a
+  shipped indexer" scoping for why a real backfill isn't attempted yet.
+- No UI surfaces `historical_observations` yet (no pool/vault-TVL history
+  chart) — deliberately deferred to avoid a UI change beyond scope; the
+  query layer (`getPoolTvlHistory`/`getVaultTvlHistory`) is ready for one.
+  The existing `OnchainVerificationCard` (protocol detail page) does
+  already surface the *latest* value for both pools and vaults, with no
+  changes needed - it reads `onchain_verifications` generically.
+- Lending/borrowing markets (exchange-rate and debt accounting across
+  multiple reserves, not a single contract balance or a single accounting
+  call) remain explicitly out of scope — see `lib/onchain/config.ts`'s own
+  category boundary discussion. ERC-4626 vaults are not an exception to
+  this: they're supported because `totalAssets()` is one direct,
+  unambiguous call, the same shape as the existing "direct" protocol-TVL
+  reads, not because vault-shaped contracts as a class are now in scope.
+- `checkBlockHashStillCanonical` is no longer just a tested, standalone
+  utility - `workers/onchain/recheck-reorgs.ts` (Phase 5.1, generalized to
+  vaults in Phase 5.2) wires it into a real, scheduled recheck of every
+  pool's and vault's recent block-hash-pinned observations, marking a
+  detected reorg via `historicalObservations.reorgInvalidatedAt` (excluded
+  from `getPoolTvlHistory`/`getVaultTvlHistory` without ever deleting the
+  row). The two legacy `VERIFIED_PROTOCOL_TVLS` entries (Lido, Aave) still
+  have no block-hash provenance at all - `onchain_verifications` has no
+  `blockHash` column - so they remain outside this recheck's coverage; see
+  `recheck-reorgs.ts`'s own module comment.

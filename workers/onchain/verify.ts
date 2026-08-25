@@ -2,12 +2,13 @@ import "dotenv/config";
 import { closeDb } from "../../lib/database/client";
 import { verifyAllPools } from "../../lib/onchain/verify-pool";
 import { verifyAllProtocolTvls } from "../../lib/onchain/verify-protocol-tvl";
+import { verifyAllVaults } from "../../lib/onchain/verify-vault";
 import { logger } from "../../lib/observability/logger";
 import { withSyncRun } from "../../lib/observability/sync-run";
 
 export async function verifyOnchain(): Promise<void> {
   await withSyncRun("onchain", async () => {
-    const results = [...(await verifyAllPools()), ...(await verifyAllProtocolTvls())];
+    const results = [...(await verifyAllPools()), ...(await verifyAllProtocolTvls()), ...(await verifyAllVaults())];
     let ok = 0;
     for (const r of results) {
       if (r.ok) {

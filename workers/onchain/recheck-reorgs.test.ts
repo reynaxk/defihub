@@ -12,7 +12,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import postgres from "postgres";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
-import { chains, historicalObservations, indexingState, pools } from "@/lib/database/schema";
+import { chains, historicalObservations, indexingState, pools, vaults } from "@/lib/database/schema";
 import { REORG_RECHECK_ADVISORY_LOCK_KEY, recheckPoolTvlReorgs } from "./recheck-reorgs";
 
 const REAL_HASH_A = `0x${"a".repeat(64)}`;
@@ -38,13 +38,37 @@ async function makePool(chainId: string) {
   return pool;
 }
 
-async function makeObservation(poolId: string, chainId: string, blockNumber: bigint, blockHash: string) {
+async function makeVault(chainId: string) {
+  const configKey = `test-recheck-vault-${randomUUID()}`;
+  const [vault] = await db
+    .insert(vaults)
+    .values({
+      configKey,
+      chainId,
+      label: "Test recheck vault",
+      address: `0xvault${randomUUID().slice(0, 8)}`,
+      underlyingAddress: `0xunderlying${randomUUID().slice(0, 8)}`,
+      underlyingSymbol: "DAI",
+      underlyingDecimals: 18,
+      underlyingCoingeckoId: "dai",
+    })
+    .returning({ id: vaults.id, configKey: vaults.configKey });
+  return vault;
+}
+
+async function makeObservation(
+  entityId: string,
+  chainId: string,
+  blockNumber: bigint,
+  blockHash: string,
+  entityType: "pool" | "vault" = "pool",
+) {
   const [row] = await db
     .insert(historicalObservations)
     .values({
       chainId,
-      entityType: "pool",
-      entityId: poolId,
+      entityType,
+      entityId,
       metric: "tvl_usd",
       value: "100.00000000",
       timestamp: new Date(),
@@ -56,32 +80,37 @@ async function makeObservation(poolId: string, chainId: string, blockNumber: big
   return row.id;
 }
 
-async function getState(chainSlug: string, configKey: string) {
+async function getState(chainSlug: string, configKey: string, entityType: "pool" | "vault" = "pool") {
   const [state] = await db
     .select()
     .from(indexingState)
-    .where(and(eq(indexingState.chainSlug, chainSlug), eq(indexingState.component, `reorg-recheck:pool:${configKey}`)));
+    .where(and(eq(indexingState.chainSlug, chainSlug), eq(indexingState.component, `reorg-recheck:${entityType}:${configKey}`)));
   return state;
 }
 
 describe("recheckPoolTvlReorgs", () => {
   const createdChainIds: string[] = [];
   const createdPoolIds: string[] = [];
+  const createdVaultIds: string[] = [];
 
   afterEach(async () => {
     // historical_observations.entityId and indexing_state.chainSlug are
     // plain columns, not FKs (see historicalObservations' own schema
     // comment on why entityType/entityId is deliberately not a real FK) -
-    // deleting the chain (which cascades to `pools`) does NOT clean these
-    // up, so both need explicit cleanup here.
+    // deleting the chain (which cascades to `pools`/`vaults`) does NOT
+    // clean these up, so both need explicit cleanup here.
     if (createdPoolIds.length > 0) {
       await db.delete(historicalObservations).where(inArray(historicalObservations.entityId, createdPoolIds));
+    }
+    if (createdVaultIds.length > 0) {
+      await db.delete(historicalObservations).where(inArray(historicalObservations.entityId, createdVaultIds));
     }
     for (const chainId of createdChainIds) {
       const [chain] = await db.select({ slug: chains.slug }).from(chains).where(eq(chains.id, chainId));
       if (chain) await db.delete(indexingState).where(eq(indexingState.chainSlug, chain.slug));
     }
     createdPoolIds.splice(0);
+    createdVaultIds.splice(0);
     for (const id of createdChainIds.splice(0)) await db.delete(chains).where(eq(chains.id, id));
   });
 
@@ -474,11 +503,11 @@ describe("recheckPoolTvlReorgs", () => {
 
     const first = await recheckPoolTvlReorgs({ poolEntitiesOverride: entities, batchSize: 1, readBlockHash: async () => REAL_HASH_A });
     expect(first!.entitiesProcessed).toBe(1);
-    const firstProcessedKey = first!.perEntity[0].poolKey;
+    const firstProcessedKey = first!.perEntity[0].entityKey;
 
     const second = await recheckPoolTvlReorgs({ poolEntitiesOverride: entities, batchSize: 1, readBlockHash: async () => REAL_HASH_A });
     expect(second!.entitiesProcessed).toBe(1);
-    const secondProcessedKey = second!.perEntity[0].poolKey;
+    const secondProcessedKey = second!.perEntity[0].entityKey;
 
     // Least-recently-attempted ordering (persisted in indexingState, read
     // fresh each run) means the entity processed first is no longer the
@@ -488,7 +517,7 @@ describe("recheckPoolTvlReorgs", () => {
     expect(secondProcessedKey).not.toBe(firstProcessedKey);
 
     const third = await recheckPoolTvlReorgs({ poolEntitiesOverride: entities, batchSize: 1, readBlockHash: async () => REAL_HASH_A });
-    const thirdProcessedKey = third!.perEntity[0].poolKey;
+    const thirdProcessedKey = third!.perEntity[0].entityKey;
     // By the third run, all three entities have had exactly one attempt
     // each - confirms actual rotation across the full entity set, not just
     // alternation between two of the three.
@@ -528,12 +557,12 @@ describe("recheckPoolTvlReorgs", () => {
     expect(stats!.totalConfirmed).toBe(1); // poolA: stored hash matches
     expect(stats!.totalReorged).toBe(1); // poolC: stored hash (C) no longer matches the injected reader's (A)
 
-    const failedResult = stats!.perEntity.find((e) => e.poolKey === brokenConfigKey);
+    const failedResult = stats!.perEntity.find((e) => e.entityKey === brokenConfigKey);
     expect(failedResult).toBeDefined();
     expect(failedResult!.error).toBeTruthy();
     expect(failedResult!.checked).toBe(0);
 
-    const okResult = stats!.perEntity.find((e) => e.poolKey === poolA.configKey);
+    const okResult = stats!.perEntity.find((e) => e.entityKey === poolA.configKey);
     expect(okResult!.confirmed).toBe(1);
 
     // The failure happened before recheckOneEntity's normal "running"
@@ -589,7 +618,7 @@ describe("recheckPoolTvlReorgs", () => {
       readBlockHash: async () => REAL_HASH_B,
     });
     expect(third!.entitiesProcessed).toBe(1);
-    expect(third!.perEntity[0].poolKey).not.toBe(brokenConfigKey);
+    expect(third!.perEntity[0].entityKey).not.toBe(brokenConfigKey);
   });
 
   it("reports a lock-contended run as null, not an undifferentiated empty success", async () => {
@@ -651,12 +680,123 @@ describe("recheckPoolTvlReorgs", () => {
 
     expect(stats!.entitiesConsidered).toBe(1);
     expect(stats!.perEntity).toHaveLength(1);
-    expect(stats!.perEntity[0].poolKey).toBe(poolA.configKey);
+    expect(stats!.perEntity[0].entityKey).toBe(poolA.configKey);
 
     const stateB = await db
       .select()
       .from(indexingState)
       .where(and(eq(indexingState.chainSlug, chainB.slug), eq(indexingState.component, `reorg-recheck:pool:${poolB.configKey}`)));
     expect(stateB).toHaveLength(0);
+  });
+
+  // Phase 5.2: the same job, generalized to also cover vault entities
+  // (VERIFIED_VAULTS/verify-vault.ts) alongside pools - vaultEntitiesOverride
+  // mirrors poolEntitiesOverride's exact shape/purpose.
+
+  it("discovers and rechecks a vault entity exactly like a pool entity, tagging results with entityType \"vault\"", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const vault = await makeVault(chain.id);
+    createdVaultIds.push(vault.id);
+    await makeObservation(vault.id, chain.id, BigInt(100), REAL_HASH_A, "vault");
+
+    const stats = await recheckPoolTvlReorgs({
+      vaultEntitiesOverride: [{ vaultId: vault.id, configKey: vault.configKey, chainSlug: chain.slug }],
+      readBlockHash: async () => REAL_HASH_A,
+    });
+
+    expect(stats!.totalConfirmed).toBe(1);
+    expect(stats!.perEntity[0].entityType).toBe("vault");
+    expect(stats!.perEntity[0].entityKey).toBe(vault.configKey);
+
+    const state = await getState(chain.slug, vault.configKey, "vault");
+    expect(state.status).toBe("idle");
+    expect(Number(state.lastProcessedBlock)).toBe(100);
+    expect(state.lastSuccessfulSyncAt).not.toBeNull();
+  });
+
+  it("detects a reorg for a vault observation and marks it invalidated, the same as it would for a pool", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const vault = await makeVault(chain.id);
+    createdVaultIds.push(vault.id);
+    const obsId = await makeObservation(vault.id, chain.id, BigInt(200), REAL_HASH_A, "vault");
+
+    const stats = await recheckPoolTvlReorgs({
+      vaultEntitiesOverride: [{ vaultId: vault.id, configKey: vault.configKey, chainSlug: chain.slug }],
+      readBlockHash: async () => REAL_HASH_B,
+    });
+
+    expect(stats!.totalReorged).toBe(1);
+    expect(stats!.perEntity[0].reorgedObservations[0].observationId).toBe(obsId);
+
+    const [row] = await db.select().from(historicalObservations).where(eq(historicalObservations.id, obsId));
+    expect(row.reorgInvalidatedAt).not.toBeNull();
+    expect(row.blockHash).toBe(REAL_HASH_A); // provenance untouched, same as the pool case
+
+    const state = await getState(chain.slug, vault.configKey, "vault");
+    expect(state.status).toBe("error");
+    expect(state.lastSuccessfulSyncAt).toBeNull();
+  });
+
+  it("processes pools and vaults together in one run, keeping each entity's own checkpoint independent - and the pool's checkpoint key is byte-identical to Phase 5.1's own format", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const pool = await makePool(chain.id);
+    const vault = await makeVault(chain.id);
+    createdPoolIds.push(pool.id);
+    createdVaultIds.push(vault.id);
+    await makeObservation(pool.id, chain.id, BigInt(10), REAL_HASH_A);
+    await makeObservation(vault.id, chain.id, BigInt(20), REAL_HASH_B, "vault");
+
+    const stats = await recheckPoolTvlReorgs({
+      poolEntitiesOverride: [{ poolId: pool.id, configKey: pool.configKey, chainSlug: chain.slug }],
+      vaultEntitiesOverride: [{ vaultId: vault.id, configKey: vault.configKey, chainSlug: chain.slug }],
+      readBlockHash: async (_chain, blockNumber) => (Number(blockNumber) === 10 ? REAL_HASH_A : REAL_HASH_B),
+    });
+
+    expect(stats!.entitiesConsidered).toBe(2);
+    expect(stats!.entitiesProcessed).toBe(2);
+    expect(stats!.totalConfirmed).toBe(2);
+    const poolResult = stats!.perEntity.find((e) => e.entityType === "pool");
+    const vaultResult = stats!.perEntity.find((e) => e.entityType === "vault");
+    expect(poolResult?.entityKey).toBe(pool.configKey);
+    expect(vaultResult?.entityKey).toBe(vault.configKey);
+
+    // The pool's indexingState component is exactly "reorg-recheck:pool:X" -
+    // the same string Phase 5.1 already wrote to production before this
+    // generalization existed - so no existing checkpoint is silently
+    // orphaned by this change.
+    const [poolState] = await db
+      .select()
+      .from(indexingState)
+      .where(and(eq(indexingState.chainSlug, chain.slug), eq(indexingState.component, `reorg-recheck:pool:${pool.configKey}`)));
+    expect(poolState).toBeDefined();
+    const [vaultState] = await db
+      .select()
+      .from(indexingState)
+      .where(and(eq(indexingState.chainSlug, chain.slug), eq(indexingState.component, `reorg-recheck:vault:${vault.configKey}`)));
+    expect(vaultState).toBeDefined();
+  });
+
+  it("never mixes real production vaults into a pool-only override run, and never mixes real production pools into a vault-only override run", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const pool = await makePool(chain.id);
+    createdPoolIds.push(pool.id);
+    await makeObservation(pool.id, chain.id, BigInt(30), REAL_HASH_A);
+
+    // Only poolEntitiesOverride is supplied - vaultEntitiesOverride is
+    // omitted, which must default to an empty list, never a live query
+    // against the real `vaults` table (which may well have real
+    // VERIFIED_VAULTS-derived rows in this same database).
+    const stats = await recheckPoolTvlReorgs({
+      poolEntitiesOverride: [{ poolId: pool.id, configKey: pool.configKey, chainSlug: chain.slug }],
+      readBlockHash: async () => REAL_HASH_A,
+    });
+
+    expect(stats!.entitiesConsidered).toBe(1);
+    expect(stats!.perEntity).toHaveLength(1);
+    expect(stats!.perEntity[0].entityType).toBe("pool");
   });
 });

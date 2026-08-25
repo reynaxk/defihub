@@ -57,8 +57,8 @@ const DEFAULT_BATCH_SIZE = 20;
 // runs every 30 min - vercel.json), 5 comfortably covers a missed run or
 // two. Also doubles as the cold-start window size (see
 // getObservationsNeedingRecheck) - a brand-new (chainSlug, component) cursor
-// checks the 5 most recent observations, not the pool's entire history back
-// to Phase 4's merge.
+// checks the 5 most recent distinct block numbers, not the pool's entire
+// history back to Phase 4's merge.
 const DEFAULT_LOOKBACK_DEPTH = 5;
 
 // Arbitrary key, unique among this app's advisory-lock users - the only
@@ -74,9 +74,25 @@ const DEFAULT_LOOKBACK_DEPTH = 5;
 // reserved just for the lock (never used for any other query), is the
 // smallest mechanism that actually protects the real risk here (a slow run
 // overlapping the next scheduled tick), at the cost of an explicit
-// acquire/release instead of an automatic transaction-scoped release - the
-// `finally` below is what makes that safe.
+// acquire/release instead of an automatic transaction-scoped release - see
+// runRecheck's try/finally below for what makes that safe.
 export const REORG_RECHECK_ADVISORY_LOCK_KEY = 851902733;
+
+// connect_timeout matches this job's own fail-fast philosophy (see
+// RpcUnavailableError's bounded retries) - a lock-only connection should
+// fail quickly, not hang. idle_timeout is deliberately NOT the main app
+// pool's 20s (lib/database/client.ts) despite "consistent where possible":
+// this connection issues exactly two queries (lock, then much later
+// unlock) with this job's entire RPC-calling duration sitting idle in
+// between - a 20s idle_timeout would routinely fire mid-job and drop the
+// connection before the unlock ever runs. 90s comfortably exceeds this
+// job's own cron maxDuration (60s, see the route file), so it never fires
+// during a normal run; if something still hangs long enough to hit it,
+// Postgres itself releases a session-scoped advisory lock automatically on
+// disconnect, so a dropped connection here still can't leave the lock
+// stuck.
+const LOCK_CONNECTION_TIMEOUT_SECONDS = 10;
+const LOCK_IDLE_TIMEOUT_SECONDS = 90;
 
 export interface ReorgRecheckOptions {
   batchSize?: number;
@@ -110,12 +126,18 @@ export interface ReorgRecheckEntityResult {
   reorged: number;
   unknown: number;
   reorgedObservations: ReorgedObservation[];
+  // Set only when this entity threw and processing moved on to the next
+  // one (see runRecheck's per-entity try/catch) - checked/confirmed/etc.
+  // all stay 0 in that case, since nothing about this entity was actually
+  // resolved this run.
+  error?: string;
 }
 
 export interface ReorgRecheckStats {
   entitiesConsidered: number;
   entitiesProcessed: number;
   entitiesSkippedBatchLimit: number;
+  entitiesFailed: number;
   totalChecked: number;
   totalConfirmed: number;
   totalReorged: number;
@@ -138,98 +160,149 @@ async function recheckOneEntity(
 
   await updateIndexingState(entity.chainSlug, component, { status: "running", lastAttemptedSyncAt: new Date() });
 
-  const result: ReorgRecheckEntityResult = {
-    poolKey: entity.configKey,
-    chainSlug: entity.chainSlug,
-    checked: 0,
-    confirmed: 0,
-    reorged: 0,
-    unknown: 0,
-    reorgedObservations: [],
-  };
+  try {
+    // Candidates arrive ordered ascending by (blockNumber, id) - see
+    // getObservationsNeedingRecheck, which also guarantees every
+    // observation sharing a given blockNumber is present together (never
+    // split across a limit boundary). Grouping by blockNumber here, and
+    // only advancing the cursor once a WHOLE group resolves cleanly, is
+    // what keeps that guarantee meaningful: the reorg-aware identity model
+    // deliberately allows two observations for the same pool to share a
+    // blockNumber with different blockHash values (same block number,
+    // different chain history), so a cursor that advanced on the first
+    // sibling alone could silently strand the second one behind a `> `
+    // comparison that never revisits it - and if one sibling in a group
+    // reads back "unknown" while another resolves cleanly, the group as a
+    // whole must still be treated as unresolved (never advance past a
+    // block number this run couldn't fully confirm).
+    const groups: { blockNumber: bigint; items: typeof candidates }[] = [];
+    for (const candidate of candidates) {
+      const lastGroup = groups[groups.length - 1];
+      if (lastGroup && lastGroup.blockNumber === candidate.blockNumber) lastGroup.items.push(candidate);
+      else groups.push({ blockNumber: candidate.blockNumber, items: [candidate] });
+    }
 
-  let newCursor: bigint | null = null;
-  let stoppedOnUnknown = false;
-
-  for (const candidate of candidates) {
-    // Captures the underlying failure message for logging without changing
-    // checkBlockHashStillCanonical's own contract or behavior at all - it
-    // still receives and reacts to the same throw exactly as Phase 4 built
-    // it (reorg.ts is not modified by this task).
-    let readError: string | null = null;
-    const reader = async (blockNumber: bigint) => {
-      try {
-        return await readBlockHash(entity.chainSlug, blockNumber);
-      } catch (err) {
-        readError = err instanceof Error ? err.message : String(err);
-        throw err;
-      }
+    const result: ReorgRecheckEntityResult = {
+      poolKey: entity.configKey,
+      chainSlug: entity.chainSlug,
+      checked: 0,
+      confirmed: 0,
+      reorged: 0,
+      unknown: 0,
+      reorgedObservations: [],
     };
 
-    const check = await checkBlockHashStillCanonical(candidate.blockNumber, candidate.blockHash, reader);
-    result.checked++;
+    let newCursor: bigint | null = null;
+    let stoppedOnUnknown = false;
 
-    if (check.status === "confirmed") {
-      result.confirmed++;
-      newCursor = candidate.blockNumber;
-      logger.info("reorg recheck: observation still canonical", {
-        component: "onchain-reorg-recheck",
-        poolKey: entity.configKey,
-        chain: entity.chainSlug,
-        blockNumber: candidate.blockNumber.toString(),
-      });
-      continue;
+    for (const group of groups) {
+      let groupHasUnknown = false;
+
+      for (const candidate of group.items) {
+        // Captures the underlying failure message for logging without
+        // changing checkBlockHashStillCanonical's own contract or behavior
+        // at all - it still receives and reacts to the same throw exactly
+        // as Phase 4 built it (reorg.ts is not modified by this task).
+        let readError: string | null = null;
+        const reader = async (blockNumber: bigint) => {
+          try {
+            return await readBlockHash(entity.chainSlug, blockNumber);
+          } catch (err) {
+            readError = err instanceof Error ? err.message : String(err);
+            throw err;
+          }
+        };
+
+        const check = await checkBlockHashStillCanonical(candidate.blockNumber, candidate.blockHash, reader);
+        result.checked++;
+
+        if (check.status === "confirmed") {
+          result.confirmed++;
+          logger.info("reorg recheck: observation still canonical", {
+            component: "onchain-reorg-recheck",
+            poolKey: entity.configKey,
+            chain: entity.chainSlug,
+            blockNumber: candidate.blockNumber.toString(),
+          });
+          continue;
+        }
+
+        if (check.status === "reorged") {
+          result.reorged++;
+          result.reorgedObservations.push({
+            observationId: candidate.id,
+            blockNumber: candidate.blockNumber.toString(),
+            storedBlockHash: candidate.blockHash,
+            currentBlockHash: check.currentBlockHash,
+          });
+          logger.warn("reorg recheck: observation no longer canonical - chain reorged past this block", {
+            component: "onchain-reorg-recheck",
+            poolKey: entity.configKey,
+            chain: entity.chainSlug,
+            blockNumber: candidate.blockNumber.toString(),
+            storedBlockHash: candidate.blockHash,
+            currentBlockHash: check.currentBlockHash,
+          });
+          continue;
+        }
+
+        // "unknown" - never treated as confirmed or reorged (see
+        // checkBlockHashStillCanonical). Marks this whole group unresolved;
+        // the outer loop below stops before advancing the cursor past it.
+        result.unknown++;
+        logger.warn("reorg recheck: inconclusive - could not read current block hash", {
+          component: "onchain-reorg-recheck",
+          poolKey: entity.configKey,
+          chain: entity.chainSlug,
+          blockNumber: candidate.blockNumber.toString(),
+          error: readError,
+        });
+        groupHasUnknown = true;
+      }
+
+      if (groupHasUnknown) {
+        stoppedOnUnknown = true;
+        break;
+      }
+      // Every observation sharing this block number resolved (confirmed or
+      // reorged, never unknown) - safe to advance the cursor to it.
+      newCursor = group.blockNumber;
     }
 
-    if (check.status === "reorged") {
-      result.reorged++;
-      newCursor = candidate.blockNumber;
-      result.reorgedObservations.push({
-        observationId: candidate.id,
-        blockNumber: candidate.blockNumber.toString(),
-        storedBlockHash: candidate.blockHash,
-        currentBlockHash: check.currentBlockHash,
-      });
-      logger.warn("reorg recheck: observation no longer canonical - chain reorged past this block", {
-        component: "onchain-reorg-recheck",
-        poolKey: entity.configKey,
-        chain: entity.chainSlug,
-        blockNumber: candidate.blockNumber.toString(),
-        storedBlockHash: candidate.blockHash,
-        currentBlockHash: check.currentBlockHash,
-      });
-      continue;
-    }
-
-    // "unknown" - never treated as confirmed or reorged (see
-    // checkBlockHashStillCanonical), and never advanced past: the next run
-    // retries this exact observation instead of silently accepting an
-    // inconclusive read as resolved.
-    result.unknown++;
-    logger.warn("reorg recheck: inconclusive - could not read current block hash", {
-      component: "onchain-reorg-recheck",
-      poolKey: entity.configKey,
-      chain: entity.chainSlug,
-      blockNumber: candidate.blockNumber.toString(),
-      error: readError,
+    const hadReorg = result.reorged > 0;
+    // Only a genuinely, fully successful pass - every candidate group
+    // resolved, nothing reorged - counts as "last successful sync." A
+    // reorg or an inconclusive RPC read means this run did not cleanly
+    // complete, and must never be recorded as if it had.
+    const succeeded = !stoppedOnUnknown && !hadReorg;
+    await updateIndexingState(entity.chainSlug, component, {
+      status: succeeded ? "idle" : "error",
+      error: hadReorg
+        ? `reorg detected in ${result.reorged} observation(s) - see sync_runs/logs for this run`
+        : stoppedOnUnknown
+          ? "RPC read failed while rechecking - will retry next run"
+          : null,
+      ...(succeeded ? { lastSuccessfulSyncAt: new Date() } : {}),
+      ...(newCursor != null ? { lastProcessedBlock: newCursor } : {}),
     });
-    stoppedOnUnknown = true;
-    break;
+
+    return result;
+  } catch (err) {
+    // An unexpected failure partway through (not a "confirmed"/"reorged"/
+    // "unknown" outcome - those are handled above - but a genuine thrown
+    // error) must not leave this entity's indexingState stuck at "running"
+    // forever. Recorded here so the row reflects reality even though the
+    // caller (runRecheck) is the one that decides whether the overall run
+    // continues past this entity.
+    const message = err instanceof Error ? err.message : String(err);
+    try {
+      await updateIndexingState(entity.chainSlug, component, { status: "error", error: message });
+    } catch {
+      // Best-effort - a secondary DB failure here must never mask the
+      // original error being rethrown below.
+    }
+    throw err;
   }
-
-  const hadReorg = result.reorged > 0;
-  await updateIndexingState(entity.chainSlug, component, {
-    status: stoppedOnUnknown || hadReorg ? "error" : "idle",
-    error: hadReorg
-      ? `reorg detected in ${result.reorged} observation(s) - see sync_runs/logs for this run`
-      : stoppedOnUnknown
-        ? "RPC read failed while rechecking - will retry next run"
-        : null,
-    lastSuccessfulSyncAt: new Date(),
-    ...(newCursor != null ? { lastProcessedBlock: newCursor } : {}),
-  });
-
-  return result;
 }
 
 // Returns null when another invocation already holds the lock (mirrors
@@ -243,7 +316,12 @@ async function runRecheck(options: ReorgRecheckOptions = {}): Promise<ReorgReche
 
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL is not set");
-  const lockConn = postgres(connectionString, { max: 1, prepare: false });
+  const lockConn = postgres(connectionString, {
+    max: 1,
+    prepare: false,
+    connect_timeout: LOCK_CONNECTION_TIMEOUT_SECONDS,
+    idle_timeout: LOCK_IDLE_TIMEOUT_SECONDS,
+  });
   let locked = false;
 
   try {
@@ -262,10 +340,29 @@ async function runRecheck(options: ReorgRecheckOptions = {}): Promise<ReorgReche
       entities = entities.filter((e) => allowed.has(e.chainSlug));
     }
 
+    // Ordered least-recently-attempted first, using indexingState's own
+    // persisted lastAttemptedSyncAt (never-attempted entities sort first,
+    // via the ?? 0 fallback) - not an in-memory rotation, so this stays
+    // correct across process restarts and serverless cold starts. Without
+    // this, a fixed entity order combined with a batchSize smaller than the
+    // entity count would always process the same leading entities every
+    // run and starve the rest indefinitely. A small extra read per entity
+    // (recheckOneEntity below re-reads the same row) - an acceptable cost
+    // at this app's real entity count (currently 6).
+    const withLastAttempt = await Promise.all(
+      entities.map(async (entity) => {
+        const state = await getIndexingState(entity.chainSlug, `${RECHECK_COMPONENT_PREFIX}${entity.configKey}`);
+        return { entity, lastAttemptedAt: state?.lastAttemptedSyncAt?.getTime() ?? 0 };
+      }),
+    );
+    withLastAttempt.sort((a, b) => a.lastAttemptedAt - b.lastAttemptedAt);
+    entities = withLastAttempt.map((w) => w.entity);
+
     const stats: ReorgRecheckStats = {
       entitiesConsidered: entities.length,
       entitiesProcessed: 0,
       entitiesSkippedBatchLimit: 0,
+      entitiesFailed: 0,
       totalChecked: 0,
       totalConfirmed: 0,
       totalReorged: 0,
@@ -288,7 +385,37 @@ async function runRecheck(options: ReorgRecheckOptions = {}): Promise<ReorgReche
         continue;
       }
 
-      const result = await recheckOneEntity(entity, lookbackDepth, readBlockHash);
+      let result: ReorgRecheckEntityResult | null;
+      try {
+        result = await recheckOneEntity(entity, lookbackDepth, readBlockHash);
+      } catch (err) {
+        // One entity's failure must never abort the run for the rest -
+        // recheckOneEntity has already recorded the failure into this
+        // entity's own indexingState row (see its own catch block); this
+        // records it into this run's own stats/perEntity and moves on to
+        // the next entity.
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error("reorg recheck: entity failed - continuing with remaining entities", {
+          component: "onchain-reorg-recheck",
+          poolKey: entity.configKey,
+          chain: entity.chainSlug,
+          error: message,
+        });
+        stats.entitiesProcessed++;
+        stats.entitiesFailed++;
+        stats.perEntity.push({
+          poolKey: entity.configKey,
+          chainSlug: entity.chainSlug,
+          checked: 0,
+          confirmed: 0,
+          reorged: 0,
+          unknown: 0,
+          reorgedObservations: [],
+          error: message,
+        });
+        continue;
+      }
+
       if (result === null) continue; // nothing needed rechecking - doesn't consume the batch budget
 
       stats.entitiesProcessed++;
@@ -301,10 +428,19 @@ async function runRecheck(options: ReorgRecheckOptions = {}): Promise<ReorgReche
 
     return stats;
   } finally {
-    if (locked) {
-      await lockConn`select pg_advisory_unlock(${REORG_RECHECK_ADVISORY_LOCK_KEY})`;
+    // The unlock is isolated in its own try so that if it throws (e.g. the
+    // connection already dropped), lockConn.end() below still always runs -
+    // a leaked connection would otherwise be possible if unlock itself
+    // failed before reaching end(). Postgres also releases a session-scoped
+    // advisory lock automatically on disconnect, so a failed unlock here
+    // still can't leave the lock permanently stuck even in that case.
+    try {
+      if (locked) {
+        await lockConn`select pg_advisory_unlock(${REORG_RECHECK_ADVISORY_LOCK_KEY})`;
+      }
+    } finally {
+      await lockConn.end();
     }
-    await lockConn.end();
   }
 }
 
@@ -323,11 +459,12 @@ export async function recheckPoolTvlReorgs(options?: ReorgRecheckOptions): Promi
       result: stats,
       stats: {
         recordsProcessed: stats.totalChecked,
-        errorCount: stats.totalReorged + stats.totalUnknown,
+        errorCount: stats.totalReorged + stats.totalUnknown + stats.entitiesFailed,
         metadata: {
           entitiesConsidered: stats.entitiesConsidered,
           entitiesProcessed: stats.entitiesProcessed,
           entitiesSkippedBatchLimit: stats.entitiesSkippedBatchLimit,
+          entitiesFailed: stats.entitiesFailed,
           totalConfirmed: stats.totalConfirmed,
           totalReorged: stats.totalReorged,
           totalUnknown: stats.totalUnknown,
@@ -336,11 +473,13 @@ export async function recheckPoolTvlReorgs(options?: ReorgRecheckOptions): Promi
           ),
         },
       },
-      // "partial" whenever anything is reorged or inconclusive - lets the
-      // health view distinguish "every rechecked observation is still
-      // canonical" from "something needs attention," matching
-      // workers/onchain/verify.ts's own success-vs-partial convention.
-      outcome: stats.totalReorged + stats.totalUnknown > 0 ? ("partial" as const) : ("success" as const),
+      // "partial" whenever anything is reorged, inconclusive, or an entity
+      // outright failed - lets the health view distinguish "every
+      // rechecked observation is still canonical" from "something needs
+      // attention," matching workers/onchain/verify.ts's own
+      // success-vs-partial convention.
+      outcome:
+        stats.totalReorged + stats.totalUnknown + stats.entitiesFailed > 0 ? ("partial" as const) : ("success" as const),
     };
   });
 }

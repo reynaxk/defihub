@@ -39,17 +39,29 @@ async function makePool(chainId: string) {
 }
 
 async function makeObservation(poolId: string, chainId: string, blockNumber: bigint, blockHash: string) {
-  await db.insert(historicalObservations).values({
-    chainId,
-    entityType: "pool",
-    entityId: poolId,
-    metric: "tvl_usd",
-    value: "100.00000000",
-    timestamp: new Date(),
-    blockNumber: blockNumber.toString(),
-    blockHash,
-    source: "test",
-  });
+  const [row] = await db
+    .insert(historicalObservations)
+    .values({
+      chainId,
+      entityType: "pool",
+      entityId: poolId,
+      metric: "tvl_usd",
+      value: "100.00000000",
+      timestamp: new Date(),
+      blockNumber: blockNumber.toString(),
+      blockHash,
+      source: "test",
+    })
+    .returning({ id: historicalObservations.id });
+  return row.id;
+}
+
+async function getState(chainSlug: string, configKey: string) {
+  const [state] = await db
+    .select()
+    .from(indexingState)
+    .where(and(eq(indexingState.chainSlug, chainSlug), eq(indexingState.component, `reorg-recheck:pool:${configKey}`)));
+  return state;
 }
 
 describe("recheckPoolTvlReorgs", () => {
@@ -77,7 +89,7 @@ describe("recheckPoolTvlReorgs", () => {
     await closeDb();
   });
 
-  it("reports confirmed and advances the cursor when the stored hash still matches the canonical chain", async () => {
+  it("reports confirmed, advances the cursor, and records a successful sync timestamp when the stored hash still matches the canonical chain", async () => {
     const chain = await makeChain();
     createdChainIds.push(chain.id);
     const pool = await makePool(chain.id);
@@ -93,36 +105,23 @@ describe("recheckPoolTvlReorgs", () => {
     expect(stats!.totalConfirmed).toBe(1);
     expect(stats!.totalReorged).toBe(0);
     expect(stats!.totalUnknown).toBe(0);
+    expect(stats!.entitiesFailed).toBe(0);
     expect(stats!.entitiesProcessed).toBe(1);
 
-    const [state] = await db
-      .select()
-      .from(indexingState)
-      .where(and(eq(indexingState.chainSlug, chain.slug), eq(indexingState.component, `reorg-recheck:pool:${pool.configKey}`)));
+    const state = await getState(chain.slug, pool.configKey);
     expect(state.status).toBe("idle");
     expect(state.error).toBeNull();
     expect(Number(state.lastProcessedBlock)).toBe(100);
+    // A genuinely, fully successful run must record its completion.
+    expect(state.lastSuccessfulSyncAt).not.toBeNull();
   });
 
-  it("detects a reorg when the stored hash no longer matches the canonical chain, and identifies the affected observation", async () => {
+  it("detects a reorg, identifies the affected observation, and does not record a successful sync timestamp", async () => {
     const chain = await makeChain();
     createdChainIds.push(chain.id);
     const pool = await makePool(chain.id);
     createdPoolIds.push(pool.id);
-    const [obs] = await db
-      .insert(historicalObservations)
-      .values({
-        chainId: chain.id,
-        entityType: "pool",
-        entityId: pool.id,
-        metric: "tvl_usd",
-        value: "100.00000000",
-        timestamp: new Date(),
-        blockNumber: "200",
-        blockHash: REAL_HASH_A,
-        source: "test",
-      })
-      .returning({ id: historicalObservations.id });
+    const obsId = await makeObservation(pool.id, chain.id, BigInt(200), REAL_HASH_A);
 
     const stats = await recheckPoolTvlReorgs({
       poolEntitiesOverride: [{ poolId: pool.id, configKey: pool.configKey, chainSlug: chain.slug }],
@@ -132,19 +131,16 @@ describe("recheckPoolTvlReorgs", () => {
     expect(stats!.totalReorged).toBe(1);
     expect(stats!.totalConfirmed).toBe(0);
     expect(stats!.perEntity[0].reorgedObservations).toEqual([
-      { observationId: obs.id, blockNumber: "200", storedBlockHash: REAL_HASH_A, currentBlockHash: REAL_HASH_B },
+      { observationId: obsId, blockNumber: "200", storedBlockHash: REAL_HASH_A, currentBlockHash: REAL_HASH_B },
     ]);
 
     // The observation itself is never mutated or deleted - provenance is
     // preserved exactly as recorded, per the task's own instruction not to
     // invent a destructive reconciliation behavior.
-    const [row] = await db.select().from(historicalObservations).where(eq(historicalObservations.id, obs.id));
+    const [row] = await db.select().from(historicalObservations).where(eq(historicalObservations.id, obsId));
     expect(row.blockHash).toBe(REAL_HASH_A);
 
-    const [state] = await db
-      .select()
-      .from(indexingState)
-      .where(and(eq(indexingState.chainSlug, chain.slug), eq(indexingState.component, `reorg-recheck:pool:${pool.configKey}`)));
+    const state = await getState(chain.slug, pool.configKey);
     expect(state.status).toBe("error");
     expect(state.error).toMatch(/reorg detected/);
     // A detected reorg is still a *resolved* check (we now know the answer)
@@ -152,9 +148,12 @@ describe("recheckPoolTvlReorgs", () => {
     // forever with no new information; the durable record of the finding
     // lives in this run's sync_runs row and structured logs instead.
     expect(Number(state.lastProcessedBlock)).toBe(200);
+    // But it is NOT a successful sync - a reorg means this run surfaced a
+    // real problem, and must never be recorded as if everything checked out.
+    expect(state.lastSuccessfulSyncAt).toBeNull();
   });
 
-  it("treats an RPC failure as unknown - never as confirmed or reorged - and does not advance the cursor", async () => {
+  it("treats an RPC failure (thrown error) as unknown - never confirmed or reorged - advances no cursor, and records no successful sync timestamp", async () => {
     const chain = await makeChain();
     createdChainIds.push(chain.id);
     const pool = await makePool(chain.id);
@@ -172,14 +171,13 @@ describe("recheckPoolTvlReorgs", () => {
     expect(stats!.totalConfirmed).toBe(0);
     expect(stats!.totalReorged).toBe(0);
 
-    const [state] = await db
-      .select()
-      .from(indexingState)
-      .where(and(eq(indexingState.chainSlug, chain.slug), eq(indexingState.component, `reorg-recheck:pool:${pool.configKey}`)));
+    const state = await getState(chain.slug, pool.configKey);
     expect(state.status).toBe("error");
     expect(state.error).toMatch(/RPC read failed/);
     // Never advanced - an inconclusive read must be retried, not accepted.
     expect(state.lastProcessedBlock).toBeNull();
+    // Not a successful sync - the run could not confirm anything.
+    expect(state.lastSuccessfulSyncAt).toBeNull();
 
     // A later run, once the RPC read succeeds, picks the exact same
     // observation back up (the cursor never moved past it) instead of
@@ -189,6 +187,30 @@ describe("recheckPoolTvlReorgs", () => {
       readBlockHash: async () => REAL_HASH_A,
     });
     expect(retry!.totalConfirmed).toBe(1);
+    const retryState = await getState(chain.slug, pool.configKey);
+    expect(retryState.lastSuccessfulSyncAt).not.toBeNull();
+  });
+
+  it("treats an inconclusive read (reader returns null, no throw) the same as a failure - unknown, no cursor advance, no successful sync timestamp", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const pool = await makePool(chain.id);
+    createdPoolIds.push(pool.id);
+    await makeObservation(pool.id, chain.id, BigInt(350), REAL_HASH_A);
+
+    const stats = await recheckPoolTvlReorgs({
+      poolEntitiesOverride: [{ poolId: pool.id, configKey: pool.configKey, chainSlug: chain.slug }],
+      readBlockHash: async () => null,
+    });
+
+    expect(stats!.totalUnknown).toBe(1);
+    expect(stats!.totalConfirmed).toBe(0);
+    expect(stats!.totalReorged).toBe(0);
+
+    const state = await getState(chain.slug, pool.configKey);
+    expect(state.status).toBe("error");
+    expect(state.lastProcessedBlock).toBeNull();
+    expect(state.lastSuccessfulSyncAt).toBeNull();
   });
 
   it("is idempotent - running the same recheck twice creates no duplicate observations or checkpoint rows", async () => {
@@ -215,6 +237,82 @@ describe("recheckPoolTvlReorgs", () => {
       .from(indexingState)
       .where(and(eq(indexingState.chainSlug, chain.slug), eq(indexingState.component, `reorg-recheck:pool:${pool.configKey}`)));
     expect(stateRows).toHaveLength(1);
+  });
+
+  it("checks every observation sharing a block number - a shared block number never lets a sibling with a different hash be skipped", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const pool = await makePool(chain.id);
+    createdPoolIds.push(pool.id);
+    // Two observations at the SAME block number with different hashes -
+    // the reorg-aware identity model deliberately allows this (same block
+    // number, different chain history). lookbackDepth is deliberately 1:
+    // under the old row-level LIMIT, this would have fetched only one of
+    // the two siblings and then advanced the cursor past block 500,
+    // permanently stranding the other - the fixed, block-number-bounded
+    // query must still return both.
+    const obsA = await makeObservation(pool.id, chain.id, BigInt(500), REAL_HASH_A);
+    const obsB = await makeObservation(pool.id, chain.id, BigInt(500), REAL_HASH_B);
+
+    const stats = await recheckPoolTvlReorgs({
+      poolEntitiesOverride: [{ poolId: pool.id, configKey: pool.configKey, chainSlug: chain.slug }],
+      lookbackDepth: 1,
+      readBlockHash: async () => REAL_HASH_A, // matches obsA only - obsB's stored hash is now stale
+    });
+
+    expect(stats!.totalChecked).toBe(2);
+    expect(stats!.totalConfirmed).toBe(1);
+    expect(stats!.totalReorged).toBe(1);
+    expect(stats!.perEntity[0].reorgedObservations.map((o) => o.observationId)).toEqual([obsB]);
+    expect(obsA).not.toBe(obsB);
+
+    const state = await getState(chain.slug, pool.configKey);
+    // Both siblings resolved (one confirmed, one reorged - neither
+    // unknown), so the whole block-500 group is fully resolved and the
+    // cursor safely advances past it.
+    expect(Number(state.lastProcessedBlock)).toBe(500);
+  });
+
+  it("respects the configured lookback depth using actual numeric block ordering, then picks up nothing further on a later run", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const pool = await makePool(chain.id);
+    createdPoolIds.push(pool.id);
+    await makeObservation(pool.id, chain.id, BigInt(9), REAL_HASH_A);
+    await makeObservation(pool.id, chain.id, BigInt(10), REAL_HASH_B);
+    await makeObservation(pool.id, chain.id, BigInt(100), REAL_HASH_C);
+    await makeObservation(pool.id, chain.id, BigInt(1000), REAL_HASH_D);
+
+    const hashByBlock: Record<number, string> = { 9: REAL_HASH_A, 10: REAL_HASH_B, 100: REAL_HASH_C, 1000: REAL_HASH_D };
+    const entity = { poolId: pool.id, configKey: pool.configKey, chainSlug: chain.slug };
+
+    const first = await recheckPoolTvlReorgs({
+      poolEntitiesOverride: [entity],
+      lookbackDepth: 2,
+      readBlockHash: async (_chain, blockNumber) => hashByBlock[Number(blockNumber)],
+    });
+
+    // Cold start with lookbackDepth 2 must select the 2 numerically highest
+    // block numbers - 100 and 1000 - not the 2 lexically-last ("9", "10" if
+    // ever compared as strings, or ordered by insertion). Only 2 checks
+    // means blocks 9 and 10 were excluded; the cursor landing at exactly
+    // 1000 (not 10) is what proves numeric, not lexical/insertion, ordering
+    // actually selected 100 and 1000.
+    expect(first!.totalChecked).toBe(2);
+    expect(first!.perEntity[0].confirmed).toBe(2);
+
+    const state = await getState(chain.slug, pool.configKey);
+    expect(Number(state.lastProcessedBlock)).toBe(1000);
+
+    // Blocks 9 and 10 predate the cursor now, so a later run never revisits
+    // them - lookbackDepth bounds the cold-start window, it doesn't promise
+    // eventual full coverage of pre-cursor history.
+    const second = await recheckPoolTvlReorgs({
+      poolEntitiesOverride: [entity],
+      lookbackDepth: 2,
+      readBlockHash: async (_chain, blockNumber) => hashByBlock[Number(blockNumber)],
+    });
+    expect(second!.totalChecked).toBe(0);
   });
 
   it("respects the configured batch size, leaving entities beyond it untouched for the next run", async () => {
@@ -259,74 +357,86 @@ describe("recheckPoolTvlReorgs", () => {
     expect(touchedStates).toHaveLength(1);
   });
 
-  it("respects the configured lookback depth, then picks up the remainder on a later run", async () => {
+  it("rotates which entity gets processed across repeated runs when batchSize is smaller than the entity count, preventing starvation", async () => {
     const chain = await makeChain();
     createdChainIds.push(chain.id);
-    const pool = await makePool(chain.id);
-    createdPoolIds.push(pool.id);
-    await makeObservation(pool.id, chain.id, BigInt(1), REAL_HASH_A);
-    await makeObservation(pool.id, chain.id, BigInt(2), REAL_HASH_B);
-    await makeObservation(pool.id, chain.id, BigInt(3), REAL_HASH_C);
-    await makeObservation(pool.id, chain.id, BigInt(4), REAL_HASH_D);
+    const poolA = await makePool(chain.id);
+    const poolB = await makePool(chain.id);
+    const poolC = await makePool(chain.id);
+    createdPoolIds.push(poolA.id, poolB.id, poolC.id);
+    await makeObservation(poolA.id, chain.id, BigInt(10), REAL_HASH_A);
+    await makeObservation(poolB.id, chain.id, BigInt(20), REAL_HASH_B);
+    await makeObservation(poolC.id, chain.id, BigInt(30), REAL_HASH_C);
 
-    const hashByBlock: Record<number, string> = { 1: REAL_HASH_A, 2: REAL_HASH_B, 3: REAL_HASH_C, 4: REAL_HASH_D };
-    const entity = { poolId: pool.id, configKey: pool.configKey, chainSlug: chain.slug };
+    const entities = [
+      { poolId: poolA.id, configKey: poolA.configKey, chainSlug: chain.slug },
+      { poolId: poolB.id, configKey: poolB.configKey, chainSlug: chain.slug },
+      { poolId: poolC.id, configKey: poolC.configKey, chainSlug: chain.slug },
+    ];
 
-    const first = await recheckPoolTvlReorgs({
-      poolEntitiesOverride: [entity],
-      lookbackDepth: 2,
-      readBlockHash: async (_chain, blockNumber) => hashByBlock[Number(blockNumber)],
-    });
-    // Cold start with lookbackDepth 2 takes the 2 *most recent* (blocks 3
-    // and 4), not the oldest.
-    expect(first!.totalChecked).toBe(2);
-    expect(first!.perEntity[0].confirmed).toBe(2);
+    const first = await recheckPoolTvlReorgs({ poolEntitiesOverride: entities, batchSize: 1, readBlockHash: async () => REAL_HASH_A });
+    expect(first!.entitiesProcessed).toBe(1);
+    const firstProcessedKey = first!.perEntity[0].poolKey;
 
-    const [state] = await db
-      .select()
-      .from(indexingState)
-      .where(and(eq(indexingState.chainSlug, chain.slug), eq(indexingState.component, `reorg-recheck:pool:${pool.configKey}`)));
-    expect(Number(state.lastProcessedBlock)).toBe(4);
+    const second = await recheckPoolTvlReorgs({ poolEntitiesOverride: entities, batchSize: 1, readBlockHash: async () => REAL_HASH_A });
+    expect(second!.entitiesProcessed).toBe(1);
+    const secondProcessedKey = second!.perEntity[0].poolKey;
 
-    // Blocks 1 and 2 predate the cursor now, so a later run never revisits
-    // them - lookbackDepth bounds the cold-start window, it doesn't promise
-    // eventual full coverage of pre-cursor history.
-    const second = await recheckPoolTvlReorgs({
-      poolEntitiesOverride: [entity],
-      lookbackDepth: 2,
-      readBlockHash: async (_chain, blockNumber) => hashByBlock[Number(blockNumber)],
-    });
-    expect(second!.totalChecked).toBe(0);
+    // Least-recently-attempted ordering (persisted in indexingState, read
+    // fresh each run) means the entity processed first is no longer the
+    // least-recently-attempted on the next run - a fixed leading entity
+    // would otherwise starve the other two forever whenever batchSize is
+    // smaller than the entity count.
+    expect(secondProcessedKey).not.toBe(firstProcessedKey);
+
+    const third = await recheckPoolTvlReorgs({ poolEntitiesOverride: entities, batchSize: 1, readBlockHash: async () => REAL_HASH_A });
+    const thirdProcessedKey = third!.perEntity[0].poolKey;
+    // By the third run, all three entities have had exactly one attempt
+    // each - confirms actual rotation across the full entity set, not just
+    // alternation between two of the three.
+    expect(new Set([firstProcessedKey, secondProcessedKey, thirdProcessedKey]).size).toBe(3);
   });
 
-  it("restricts rechecking to the selected chains when chainSlugs is provided", async () => {
-    const chainA = await makeChain();
-    const chainB = await makeChain();
-    createdChainIds.push(chainA.id, chainB.id);
-    const poolA = await makePool(chainA.id);
-    const poolB = await makePool(chainB.id);
-    createdPoolIds.push(poolA.id, poolB.id);
-    await makeObservation(poolA.id, chainA.id, BigInt(50), REAL_HASH_A);
-    await makeObservation(poolB.id, chainB.id, BigInt(60), REAL_HASH_B);
+  it("continues processing remaining entities when one entity's recheck throws, and records the failure without aborting the run", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const poolA = await makePool(chain.id);
+    const poolC = await makePool(chain.id);
+    createdPoolIds.push(poolA.id, poolC.id);
+    await makeObservation(poolA.id, chain.id, BigInt(10), REAL_HASH_A);
+    await makeObservation(poolC.id, chain.id, BigInt(30), REAL_HASH_C);
+
+    const brokenConfigKey = `broken-pool-${randomUUID()}`;
+    const entities = [
+      { poolId: poolA.id, configKey: poolA.configKey, chainSlug: chain.slug },
+      // Not a real UUID - makes getObservationsNeedingRecheck's query
+      // throw for this entity alone (a genuine per-entity failure, unlike
+      // an RPC "unknown" which checkBlockHashStillCanonical already
+      // absorbs without ever throwing - see the "inconclusive read" test
+      // above), proving one bad entity doesn't abort the rest of the run.
+      { poolId: "not-a-real-uuid", configKey: brokenConfigKey, chainSlug: chain.slug },
+      { poolId: poolC.id, configKey: poolC.configKey, chainSlug: chain.slug },
+    ];
 
     const stats = await recheckPoolTvlReorgs({
-      poolEntitiesOverride: [
-        { poolId: poolA.id, configKey: poolA.configKey, chainSlug: chainA.slug },
-        { poolId: poolB.id, configKey: poolB.configKey, chainSlug: chainB.slug },
-      ],
-      chainSlugs: [chainA.slug],
+      poolEntitiesOverride: entities,
       readBlockHash: async () => REAL_HASH_A,
     });
 
-    expect(stats!.entitiesConsidered).toBe(1);
-    expect(stats!.perEntity).toHaveLength(1);
-    expect(stats!.perEntity[0].poolKey).toBe(poolA.configKey);
+    expect(stats!.entitiesFailed).toBe(1);
+    // All 3 were attempted - A and C succeeded despite the broken entity
+    // between them in processing order.
+    expect(stats!.entitiesProcessed).toBe(3);
+    expect(stats!.totalConfirmed).toBe(1); // poolA: stored hash matches
+    expect(stats!.totalReorged).toBe(1); // poolC: stored hash (C) no longer matches the injected reader's (A)
 
-    const stateB = await db
-      .select()
-      .from(indexingState)
-      .where(and(eq(indexingState.chainSlug, chainB.slug), eq(indexingState.component, `reorg-recheck:pool:${poolB.configKey}`)));
-    expect(stateB).toHaveLength(0);
+    const failedResult = stats!.perEntity.find((e) => e.poolKey === brokenConfigKey);
+    expect(failedResult).toBeDefined();
+    expect(failedResult!.error).toBeTruthy();
+    expect(failedResult!.checked).toBe(0);
+
+    const okResult = stats!.perEntity.find((e) => e.poolKey === poolA.configKey);
+    expect(okResult!.confirmed).toBe(1);
   });
 
   it("reports a lock-contended run as null, not an undifferentiated empty success", async () => {
@@ -365,5 +475,35 @@ describe("recheckPoolTvlReorgs", () => {
       await connA.end();
       await connB.end();
     }
+  });
+
+  it("restricts rechecking to the selected chains when chainSlugs is provided", async () => {
+    const chainA = await makeChain();
+    const chainB = await makeChain();
+    createdChainIds.push(chainA.id, chainB.id);
+    const poolA = await makePool(chainA.id);
+    const poolB = await makePool(chainB.id);
+    createdPoolIds.push(poolA.id, poolB.id);
+    await makeObservation(poolA.id, chainA.id, BigInt(50), REAL_HASH_A);
+    await makeObservation(poolB.id, chainB.id, BigInt(60), REAL_HASH_B);
+
+    const stats = await recheckPoolTvlReorgs({
+      poolEntitiesOverride: [
+        { poolId: poolA.id, configKey: poolA.configKey, chainSlug: chainA.slug },
+        { poolId: poolB.id, configKey: poolB.configKey, chainSlug: chainB.slug },
+      ],
+      chainSlugs: [chainA.slug],
+      readBlockHash: async () => REAL_HASH_A,
+    });
+
+    expect(stats!.entitiesConsidered).toBe(1);
+    expect(stats!.perEntity).toHaveLength(1);
+    expect(stats!.perEntity[0].poolKey).toBe(poolA.configKey);
+
+    const stateB = await db
+      .select()
+      .from(indexingState)
+      .where(and(eq(indexingState.chainSlug, chainB.slug), eq(indexingState.component, `reorg-recheck:pool:${poolB.configKey}`)));
+    expect(stateB).toHaveLength(0);
   });
 });

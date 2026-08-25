@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, historicalObservations, pools } from "@/lib/database/schema";
 
@@ -36,23 +36,37 @@ export interface RecheckCandidate {
 }
 
 // The observations for one pool that still need a reorg recheck this run -
-// bounded by `limit` on both branches (see recheck-reorgs.ts's own
-// lookbackDepth), so neither a long-paused job nor a pool with months of
-// history can turn one run into an unbounded amount of RPC work.
+// bounded by `limit` *distinct block numbers* (see below for why rows
+// aren't the right unit to bound), so neither a long-paused job nor a pool
+// with months of history can turn one run into an unbounded amount of RPC
+// work.
 //
 // `afterBlockNumber == null` means this pool has no recheck cursor yet
 // (recheck-reorgs.ts's first-ever run for it) - takes the `limit` most
-// *recent* observations (DESC + LIMIT, re-sorted ascending for the caller,
-// same shape as getPoolTvlHistory) rather than the oldest ones on record,
-// so a cold start checks what's actually current instead of replaying
-// months-old, long-since-buried history. Once a cursor exists,
-// `afterBlockNumber` bounds the query directly and results are already in
-// blockNumber order with no re-sort needed.
+// *recent* block numbers rather than the oldest ones on record, so a cold
+// start checks what's actually current instead of replaying months-old,
+// long-since-buried history. Once a cursor exists, `afterBlockNumber`
+// bounds the query directly.
 //
 // blockHash IS NOT NULL is a real filter, not a formality:
 // recordPoolVerification only ever writes a blockHash-less observation when
 // the hash it read was missing/malformed (see its own comment), and a row
 // with no hash has nothing this job could compare against the chain.
+//
+// `limit` bounds distinct block numbers, not raw rows: the reorg-aware
+// identity model this app uses deliberately allows two observations for
+// the same pool to share a blockNumber with different blockHash values
+// (see this file's own module comment - that's exactly what "same block
+// number, different chain history" means). A row-level LIMIT could cut a
+// shared block number's sibling rows in half; whichever sibling landed
+// outside that batch would then be permanently skipped once
+// recheck-reorgs.ts advanced its cursor past that block number, since a
+// `blockNumber > cursor` comparison never revisits it. Selecting whole
+// block numbers first, then every row for the selected numbers with no
+// further row limit, guarantees a block number's entire sibling set always
+// arrives together - the caller can then safely advance its cursor to any
+// block number that appears in the result at all, never leaving an
+// unfetched sibling behind it.
 export async function getObservationsNeedingRecheck(
   poolId: string,
   afterBlockNumber: bigint | null,
@@ -74,35 +88,41 @@ export async function getObservationsNeedingRecheck(
     isNotNull(historicalObservations.blockNumber),
     isNotNull(historicalObservations.blockHash),
   ];
+  const conditions =
+    afterBlockNumber != null
+      ? [...baseConditions, gt(historicalObservations.blockNumber, afterBlockNumber.toString())]
+      : baseConditions;
 
-  if (afterBlockNumber != null) {
-    const rows = await db
-      .select({
-        id: historicalObservations.id,
-        blockNumber: historicalObservations.blockNumber,
-        blockHash: historicalObservations.blockHash,
-      })
-      .from(historicalObservations)
-      .where(and(...baseConditions, gt(historicalObservations.blockNumber, afterBlockNumber.toString())))
-      .orderBy(asc(historicalObservations.blockNumber))
-      .limit(limit);
+  const blockNumberRows = await db
+    .selectDistinct({ blockNumber: historicalObservations.blockNumber })
+    .from(historicalObservations)
+    .where(and(...conditions))
+    .orderBy(
+      afterBlockNumber != null
+        ? asc(historicalObservations.blockNumber)
+        : desc(historicalObservations.blockNumber),
+    )
+    .limit(limit);
 
-    return rows.flatMap(toRecheckCandidate);
-  }
+  const blockNumbers = blockNumberRows.flatMap((r) => (r.blockNumber != null ? [r.blockNumber] : []));
+  if (blockNumbers.length === 0) return [];
 
-  const recent = db
+  // No LIMIT here on purpose (see the module comment above) - every row for
+  // every selected block number, however many that turns out to be.
+  // `id` is a secondary sort key purely to make same-blockNumber sibling
+  // order deterministic across runs (uuid comparison order is arbitrary but
+  // stable, unlike relying on the database's unspecified default row order
+  // for ties) - it carries no meaning about which sibling is "more canonical."
+  const rows = await db
     .select({
       id: historicalObservations.id,
       blockNumber: historicalObservations.blockNumber,
       blockHash: historicalObservations.blockHash,
     })
     .from(historicalObservations)
-    .where(and(...baseConditions))
-    .orderBy(desc(historicalObservations.blockNumber))
-    .limit(limit)
-    .as("recent");
+    .where(and(...baseConditions, inArray(historicalObservations.blockNumber, blockNumbers)))
+    .orderBy(asc(historicalObservations.blockNumber), asc(historicalObservations.id));
 
-  const rows = await db.select().from(recent).orderBy(asc(recent.blockNumber));
   return rows.flatMap(toRecheckCandidate);
 }
 

@@ -1,0 +1,2 @@
+DROP INDEX "swap_events_pool_tx_log_unique";--> statement-breakpoint
+CREATE UNIQUE INDEX "swap_events_pool_tx_log_hash_unique" ON "swap_events" USING btree ("pool_id","transaction_hash","log_index","block_hash");

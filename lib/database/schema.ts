@@ -478,6 +478,39 @@ export interface PriceSourceObservation {
   exclusionReason?: string;
 }
 
+// Phase 5.4: the provenance behind one volume_usd or fees_usd observation
+// (entityType "pool" - see historicalObservations below). A single
+// aggregate record, not an array like the two types above: a volume/fee
+// figure summarizes one indexing run's swap_events for one pool, not a
+// per-token or per-source breakdown - see
+// lib/onchain/volume/record-volume-observation.ts, which builds this
+// directly from the same aggregation that produced `value`. Every field
+// here answers "why is this number what it is" - see Phase 5.4's own
+// provenance requirement (docs/native-data.md, "Native volume/fee engine").
+export interface VolumeCalculationInput {
+  eventType: "Swap";
+  sourceContract: string; // the pool's own address
+  sourceChainSlug: string;
+  fromBlock: string;
+  toBlock: string;
+  swapCount: number;
+  // A swap this run found but couldn't price (see "partial data" - Phase
+  // 5.4's own instruction to never silently zero a missing price) is
+  // excluded from `value` but still counted here, so the observation
+  // itself is honest about being partial rather than silently
+  // under-reporting with no indication anything was missing.
+  pricedSwapCount: number;
+  unpricedSwapCount: number;
+  token0: { symbol: string; coingeckoId: string; decimals: number; priceUsd: string | null; priceSource: string | null };
+  token1: { symbol: string; coingeckoId: string; decimals: number; priceUsd: string | null; priceSource: string | null };
+  // Populated by lib/onchain/volume/quality.ts's checks - never causes this
+  // row to be withheld or a value to be altered, only recorded alongside it
+  // (Phase 5.4's "mark suspicious, never delete" rule). Omitted (not `[]`)
+  // when no check flagged anything, so an empty array in stored data always
+  // means "checked, nothing found" rather than "not checked."
+  qualityFlags?: string[];
+}
+
 export const historicalObservations = pgTable(
   "historical_observations",
   {
@@ -507,12 +540,17 @@ export const historicalObservations = pgTable(
     // replayable: the exact inputs, and where/when they came from.
     priceSource: varchar("price_source", { length: 64 }),
     priceRetrievedAt: timestamp("price_retrieved_at", { withTimezone: true }),
-    // Two distinct shapes share this one column, picked by entityType/metric
-    // (see PriceSourceObservation's own comment for why a second table isn't
-    // needed for this): HistoricalObservationCalculationInput[] for
-    // entityType "pool"/"vault", metric "tvl_usd"; PriceSourceObservation[]
-    // for entityType "token", metric "price_usd" (Phase 5.3).
-    calculationInputs: jsonb("calculation_inputs").$type<HistoricalObservationCalculationInput[] | PriceSourceObservation[]>(),
+    // Three distinct shapes share this one column, picked by entityType/
+    // metric (see PriceSourceObservation's own comment for why a second
+    // table isn't needed for this): HistoricalObservationCalculationInput[]
+    // for entityType "pool"/"vault", metric "tvl_usd";
+    // PriceSourceObservation[] for entityType "token", metric "price_usd"
+    // (Phase 5.3); VolumeCalculationInput (a single object, not an array -
+    // see its own comment) for entityType "pool", metric "volume_usd" /
+    // "fees_usd" (Phase 5.4).
+    calculationInputs: jsonb("calculation_inputs").$type<
+      HistoricalObservationCalculationInput[] | PriceSourceObservation[] | VolumeCalculationInput
+    >(),
     // e.g. "onchain-verification" - which subsystem computed this, for the
     // native-vs-external provenance distinction (never label externally-
     // sourced data as DeFiHub-native, or vice versa).
@@ -658,6 +696,103 @@ export const historicalObservations = pgTable(
       "historical_observations_token_price_requires_block_identity",
       sql`${table.entityType} <> 'token' OR ${table.metric} <> 'price_usd' OR (${table.blockNumber} IS NOT NULL AND ${table.blockHash} IS NOT NULL AND ${table.blockHash} <> '')`,
     ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Swap events (Phase 5.4) - raw, per-transaction on-chain trade records.
+//
+// A genuinely different shape from historicalObservations above, which is
+// why this is a new table rather than another entityType/metric pair on
+// that one (see this repo's own "prefer extending existing structures"
+// rule, lib/database schema conventions): historicalObservations is a
+// periodic-snapshot model (one row per entity+metric+timestamp); a swap is
+// a discrete, high-frequency, per-transaction event with its own natural
+// identity (transactionHash + logIndex) that no snapshot-shaped row can
+// represent. Volume/fee AGGREGATES computed FROM these raw events are
+// themselves periodic and DO reuse historicalObservations (entityType
+// "pool", metric "volume_usd" / "fees_usd") - see
+// lib/onchain/volume/record-volume-observation.ts.
+//
+// Deliberately keeps zero USD/price data - a swap_events row is pure
+// on-chain truth (raw token amounts, block/tx identity), independent of
+// whether pricing succeeds or even exists for these tokens. This is what
+// lets raw event data remain available even when USD normalization fails
+// (see lib/onchain/volume/engine.ts's own comment on this).
+export const swapEvents = pgTable(
+  "swap_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    chainId: uuid("chain_id")
+      .notNull()
+      .references(() => chains.id, { onDelete: "cascade" }),
+    poolId: uuid("pool_id")
+      .notNull()
+      .references(() => pools.id, { onDelete: "cascade" }),
+    // e.g. "uniswap-v2" - which decoder/volume-math this event was
+    // produced by, the same purpose as PriceSourceObservation.sourceKind
+    // above (Phase 5.3) - extensible union at the application layer, plain
+    // varchar at the schema layer since jsonb-adjacent enums don't buy
+    // anything here that a documented string doesn't already give.
+    sourceKind: varchar("source_kind", { length: 32 }).notNull(),
+    transactionHash: varchar("transaction_hash", { length: 128 }).notNull(),
+    // A transaction can emit the same event shape more than once (e.g. a
+    // multi-hop route swapping through the same pool twice) - logIndex is
+    // what disambiguates those within one transactionHash.
+    logIndex: integer("log_index").notNull(),
+    blockNumber: numeric("block_number", { precision: 20, scale: 0 }).notNull(),
+    blockHash: varchar("block_hash", { length: 128 }).notNull(),
+    // The REAL semantic observation time for an event-derived record is
+    // the block's own timestamp, never processing time (see this table's
+    // own callers, and the task's explicit "never confuse observation
+    // time, block time, and processing time" instruction) - createdAt
+    // below is processing-time metadata only, never used as the
+    // observation timestamp for any aggregate derived from this row.
+    blockTimestamp: timestamp("block_timestamp", { withTimezone: true }).notNull(),
+    sender: varchar("sender", { length: 128 }),
+    // Raw on-chain uint256 amounts, exact - numeric(78,0) comfortably
+    // holds the full uint256 range (2^256 - 1 has 78 decimal digits).
+    // Never normalized/scaled here; decimals-aware normalization happens
+    // only at calculation time (lib/onchain/volume/uniswap-v2.ts), the
+    // same "store the raw integer, normalize on read" discipline
+    // HistoricalObservationCalculationInput.balanceRaw already established.
+    amount0In: numeric("amount0_in", { precision: 78, scale: 0 }).notNull(),
+    amount1In: numeric("amount1_in", { precision: 78, scale: 0 }).notNull(),
+    amount0Out: numeric("amount0_out", { precision: 78, scale: 0 }).notNull(),
+    amount1Out: numeric("amount1_out", { precision: 78, scale: 0 }).notNull(),
+    // Same reorg model as historicalObservations.reorgInvalidatedAt - null
+    // means canonical; set once, additively, by
+    // lib/onchain/volume/reorg.ts's own recheck, never deleted or
+    // rewritten. See that column's own comment on historicalObservations
+    // for the full reasoning, unchanged here.
+    reorgInvalidatedAt: timestamp("reorg_invalidated_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    // The idempotency key: re-processing the same block range (a retried
+    // run, an overlapping cursor window) must never create a duplicate row
+    // for the same real on-chain event. onConflictDoNothing targets this
+    // exact index - see record-swap-events.ts.
+    //
+    // Includes blockHash, not just (poolId, transactionHash, logIndex): a
+    // reorg can produce a transaction with the identical hash and log index
+    // re-included on a different canonical block (same tx re-mined, or - in
+    // principle - a colliding identity across two different chain
+    // histories at the same height). Without blockHash in the identity, the
+    // new canonical row would collide with the orphaned pre-reorg row and
+    // get silently dropped by onConflictDoNothing, permanently losing the
+    // real, current swap. With blockHash included, the orphaned row (still
+    // present, now marked via reorgInvalidatedAt by lib/onchain/volume/
+    // reorg.ts) and the new canonical row coexist as two distinct rows -
+    // exactly the same reorg-safe "same block number, different chain
+    // history, different observation" identity model
+    // historical_observations already established for the exact same
+    // reason (see that table's own block-hash-identity index comment).
+    uniqueIndex("swap_events_pool_tx_log_hash_unique").on(table.poolId, table.transactionHash, table.logIndex, table.blockHash),
+    // Supports both the "swaps in this block range" aggregation query and
+    // the reorg-recheck's own "candidates after this cursor" query -
+    // same shape as historical_observations_entity_idx's own purpose.
+    index("swap_events_pool_block_idx").on(table.poolId, table.blockNumber),
   ],
 );
 

@@ -938,6 +938,152 @@ historical backfill (indexing starts from a recent block, the same
 "foundation, not a shipped indexer" boundary Phase 4/5.1's own event
 primitives already established).
 
+## Indexer reliability & historical catch-up (Phase 5.5)
+
+Phase 5.4's own final report flagged a real, live-encountered operational
+gap: once an indexing cursor falls behind a free-tier RPC provider's
+servable window, nothing brought it back. Phase 5.5 closes that gap -
+without adding a second indexing system, a database migration, or touching
+Phase 5.4's own correctness guarantees (idempotency, reorg safety,
+provenance all carry over unchanged, applied at a finer grain).
+
+### The core change: `scanFromCursor` now processes chunk-by-chunk
+
+Before Phase 5.5, `scanFromCursor` (`lib/indexing/events.ts`) fetched
+*every* chunk in a scan's range, combined all their logs into one array,
+and only then called `onLogs` once and advanced the cursor once, for the
+whole range. That's safe (a failure meant nothing was processed and the
+cursor never moved) but had no partial credit: a large gap that kept
+failing partway through had to be re-fetched from its own original start on
+every retry, forever.
+
+`scanFromCursor` now calls `onLogs(logs, chunk)` once **per chunk**, and
+persists the checkpoint immediately after each chunk succeeds - not
+batched until the end. A crash, an RPC outage, or a process restart
+partway through a long catch-up preserves every chunk already completed;
+the next invocation resumes at the next unprocessed chunk, never redoing
+finished work and never skipping unprocessed blocks. This is genuinely the
+same reason `lib/onchain/volume/engine.ts`'s aggregate observations are now
+written **per chunk** rather than once per run - each one's own
+`calculationInputs.fromBlock`/`toBlock` reflects exactly the range it
+covers, never the whole run's, which stays accurate even when a run spans
+many chunks.
+
+### Adaptive range shrinking
+
+A brand-new `"range-limit"` RPC-failure category
+(`lib/chains/rpc-errors.ts`) distinguishes "the provider rejected this
+specific request because the block range was too wide" from a genuinely
+permanent failure (bad method, bad config) - detected via best-effort text
+matching against several real providers' known phrasings (Alchemy, Infura,
+QuickNode, publicnode), not one provider's exact wording hardcoded as a
+universal rule. When `scanFromCursor` sees this classification, it halves
+the chunk size and retries the *same* starting block - never skips it -
+down to a configurable minimum (default 10 blocks). If even the minimum
+still range-limits, the run stops cleanly: `outcome: "partial"` if earlier
+chunks in the same call already succeeded, or a thrown error if nothing did
+at all (see "Partial run semantics" below) - never a silently skipped
+range, never a fabricated success.
+
+### Centralized safe-head calculation
+
+`currentBlock - confirmationsFor(chainSlug)`, clamped at zero, used to live
+in two places (`scanFromCursor`'s own inline formula, and
+`lib/onchain/volume/engine.ts`'s `effectiveStartBlock`) - now lives once, in
+`lib/chains/confirmations.ts`'s `safeHeadFor`, and both call it.
+
+### Bounded retry budget
+
+`maxChunkAttempts` (default 100) bounds the total number of distinct
+chunk-fetch attempts one `scanFromCursor` call will make - covering both a
+long, healthy multi-chunk catch-up and a stubborn range-limit shrink
+sequence. This is a *separate*, coarser budget from `withResilientClient`'s
+own per-request retry/backoff (unchanged, still handles transient/timeout/
+rate-limit failures within one HTTP call) - not a second copy of the same
+retry logic, a different layer bounding a different thing. When exhausted,
+the run stops with `outcome: "partial"` and `stoppedReason:
+"attempt-budget-exhausted"`, preserving everything already completed;
+the next cron invocation continues from there.
+
+### Partial run semantics
+
+Every pool-level result (`PoolVolumeRunResult`, `lib/onchain/volume/engine.ts`)
+now reports one of three outcomes:
+
+- **success** - every chunk needed to reach the safe head completed.
+- **partial** - real, checkpointed progress happened, but the run stopped
+  short (a range-limit at the minimum chunk size, or the attempt budget was
+  exhausted). Never silently reported as complete - `chunksCompleted`,
+  `lag`, `safeHead`, and `cursorAfterRun` make the exact, real extent of
+  progress explicit.
+- **failed** - `ok: false`; either nothing succeeded at all, or `onLogs`
+  itself threw (a decoding/persistence bug, not a recoverable RPC
+  condition) - the cursor still reflects whatever DID complete before the
+  throw, since each chunk's checkpoint was already durably persisted before
+  the next chunk was even attempted.
+
+`workers/onchain/volume.ts`'s own run-level `summarizeVolumeResults`
+mirrors this at the multi-pool level: one broken pool reports the whole
+*run* as `"partial"` (not `"failed"`) as long as at least one pool made
+real progress - Section 30/31's multi-pool/multi-chain isolation, verified
+directly in `lib/onchain/volume/engine.integration.test.ts`.
+
+### Reorg safety and idempotency during catch-up
+
+Unchanged from Phase 5.4, applied at the new finer (per-chunk) grain: every
+raw `swap_events` write and every aggregate `historical_observations` write
+is still `onConflictDoNothing` against the same deterministic identities, so
+a chunk that gets re-fetched after a crash (its own writes already
+committed, only its checkpoint not yet advanced) never double-counts on
+retry. `lib/onchain/volume/reorg.ts`'s dedicated recheck path (`checkBlockHashStillCanonical`, unmodified) needed no changes at all - it
+already operates on whatever rows exist in `swap_events`/
+`historical_observations`, regardless of how many chunks produced them.
+
+### Concurrency: one advisory lock per indexing pass
+
+`workers/onchain/volume.ts` now holds a session-scoped Postgres advisory
+lock (`VOLUME_INDEX_ADVISORY_LOCK_KEY`, distinct from every other lock key
+already in use in this app) for the whole indexing pass, not just a single
+chunk - a catch-up run can now legitimately take much longer than before,
+raising the odds of a cron invocation overlapping the previous one. A
+second, independent layer of protection already existed and still applies
+even if this lock were somehow bypassed: `updateIndexingState`'s atomic
+`GREATEST(existing, new)` upsert (`lib/indexing/state.ts`, unchanged),
+which guarantees a stale worker's lower cursor value can never overwrite an
+already-advanced one - verified directly in `lib/indexing/state.test.ts`'s
+new regression test for exactly this race (Invariant 3).
+
+### Manual recovery (operator-only, never public)
+
+Even with adaptive shrinking, a cursor can still get stuck if the *oldest*
+unprocessed block itself sits outside the provider's currently-servable
+depth-from-head window - shrinking the range width doesn't help when the
+range's own starting point is the problem (this happened live during this
+phase's own development - see "What this doesn't fix" below).
+`lib/indexing/manual-recovery.ts`'s `manuallyAdvanceCursor`, invoked via
+`npm run recover:volume-cursor -- <poolKey> <toBlock> "<reason>"`, is the
+one sanctioned way to unstick it: it requires a non-empty reason, refuses
+to move the cursor backward, and records exactly which blocks were skipped
+directly into `indexing_state.error` - never a silent jump. Never wired to
+any cron schedule or API route - CLI-only, requiring the same
+`DATABASE_URL` access every other worker script already needs, not exposed
+to any public surface.
+
+### What this doesn't fix
+
+Adaptive shrinking recovers from "the range is too WIDE"; it does not (and
+per Section 13/14's own "never jump directly to the newest block" rule,
+must not) recover from "the range's own STARTING block is too far behind
+the current head for this provider to serve at any width." This is a real,
+externally-imposed constraint of relying on one free-tier RPC provider with
+no paid archive access, not a bug in the catch-up logic - confirmed live
+during this phase's own development, where a cursor left idle for roughly
+an hour of wall-clock time fell far enough behind that even a 10-block
+request at its own starting point was rejected. `manuallyAdvanceCursor`
+above is the intentional, human-in-the-loop answer for exactly this case;
+there is no fully-automated recovery from it with a single free RPC
+provider and no configured fallback.
+
 ## Known limitations
 
 - Six verified pools across five chains, plus two verified ERC-4626 vaults
@@ -1010,3 +1156,27 @@ primitives already established).
   guessing adapter" boundary this task itself sets; a lending market's
   supply/borrow-rate-driven interest is a different accounting model than a
   swap-fee-based one and isn't attempted here.
+- **Adaptive range-shrinking (Phase 5.5) cannot recover a cursor whose
+  starting point itself is too far behind the current head for the
+  configured RPC provider to serve at any range width** - see
+  [Indexer reliability & historical catch-up (Phase 5.5)](#indexer-reliability--historical-catch-up-phase-55)'s
+  own "What this doesn't fix" section. `manuallyAdvanceCursor`
+  (`lib/indexing/manual-recovery.ts`) is the deliberate, human-in-the-loop
+  answer, not an automated one - this app has never configured a fallback
+  RPC provider for Ethereum, so there is genuinely no alternate provider
+  for `withResilientClient` to fail over to when the primary's free-tier
+  window is the actual constraint.
+- **No backfill mode with an explicit, bounded end block** - Phase 5.5's
+  own Section 34 explicitly permits skipping this ("if unnecessary, do not
+  add it"); the existing catch-up mechanism already handles "resume from
+  wherever the cursor is, up to the current safe head," which is the real
+  problem this phase exists to solve. A genuinely separate historical
+  window (disconnected from the live cursor) was judged unnecessary this
+  round.
+- **No dedicated multi-chain smoke test** - `VOLUME_SOURCE_POOLS`
+  (`lib/onchain/volume/config.ts`) still has exactly one real entry
+  (Ethereum). Multi-chain isolation (Section 30) is verified at the code
+  level (`indexAllPoolVolume`'s per-pool try/catch,
+  `engine.integration.test.ts`'s own regression test) but has not been
+  exercised against two genuinely different live chains, since only one is
+  configured.

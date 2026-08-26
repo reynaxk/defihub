@@ -1,8 +1,12 @@
 // Pure unit tests for engine.ts's extracted decision functions - no RPC, no
 // DB (see engine.ts's own module comment for why the RPC-touching
-// orchestration itself isn't unit-tested directly).
+// orchestration itself isn't unit-tested directly). Safe-head computation
+// itself (currentBlock - confirmations, clamped at zero) moved to
+// lib/chains/confirmations.ts's safeHeadFor in Phase 5.5 - see
+// confirmations.test.ts for its own direct coverage; effectiveStartBlock
+// below now just calls it.
 import { describe, expect, it } from "vitest";
-import { computeSafeHead, effectiveStartBlock } from "./engine";
+import { effectiveStartBlock } from "./engine";
 import type { VolumeSourcePool } from "./config";
 
 function fakePool(overrides: Partial<VolumeSourcePool> = {}): VolumeSourcePool {
@@ -20,21 +24,6 @@ function fakePool(overrides: Partial<VolumeSourcePool> = {}): VolumeSourcePool {
     ...overrides,
   };
 }
-
-describe("computeSafeHead", () => {
-  it("subtracts the chain's own confirmation depth from the current head", () => {
-    // ethereum's confirmationsFor is 12 (lib/chains/confirmations.ts)
-    expect(computeSafeHead("ethereum", BigInt(1000))).toBe(BigInt(988));
-  });
-
-  it("clamps at zero rather than going negative for a chain still near genesis", () => {
-    expect(computeSafeHead("ethereum", BigInt(5))).toBe(BigInt(0));
-  });
-
-  it("uses a deeper confirmation depth for a chain that requires one (polygon: 128)", () => {
-    expect(computeSafeHead("polygon", BigInt(1000))).toBe(BigInt(872));
-  });
-});
 
 describe("effectiveStartBlock", () => {
   it("honors the configured startBlock unchanged when it already falls within the safe recent window", () => {

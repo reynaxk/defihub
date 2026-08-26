@@ -1,9 +1,8 @@
 import { type Address, type Log } from "viem";
-import { confirmationsFor } from "@/lib/chains/confirmations";
+import { confirmationsFor, safeHeadFor } from "@/lib/chains/confirmations";
 import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import type { VolumeCalculationInput } from "@/lib/database/schema";
-import { scanFromCursor } from "@/lib/indexing/events";
-import { getIndexingState } from "@/lib/indexing/state";
+import { scanFromCursor, type ScanChunk } from "@/lib/indexing/events";
 import { getNativeTokenPrice, isNativeTokenPriceFresh, type NativeTokenPrice } from "@/lib/onchain/pricing/queries";
 import { roundExactDecimal } from "@/lib/onchain/verify-pool";
 import { logger } from "@/lib/observability/logger";
@@ -74,22 +73,6 @@ const DEFAULT_VOLUME_CHUNK_SIZE = BigInt(50);
 // its own real, already-scanned position exactly as before.
 const SAFE_LOOKBACK_BLOCKS = BigInt(80);
 
-// CodeRabbit fix round: the lookback window must be measured from the
-// CONFIRMED head, not the raw current head - scanFromCursor itself never
-// scans up to the raw head either (it subtracts confirmationsFor(chainSlug)
-// to compute its own safeToBlock - see lib/indexing/events.ts). Anchoring
-// effectiveStartBlock to the raw head instead would shift its 80-block
-// window `confirmations` blocks higher than the range scanFromCursor can
-// actually reach, silently narrowing the effective lookback for chains
-// with deeper confirmation requirements (e.g. Polygon's 128) without ever
-// being wrong in a way that surfaces as an error - just a smaller-than-
-// intended safety margin. Pure and directly testable with a plain
-// currentBlock input, no RPC call of its own.
-export function computeSafeHead(chainSlug: string, currentBlock: bigint): bigint {
-  const confirmations = confirmationsFor(chainSlug);
-  return currentBlock > confirmations ? currentBlock - confirmations : BigInt(0);
-}
-
 export interface EffectiveStartBlockResult {
   startBlock: bigint;
   // > 0 whenever the configured pool.startBlock had to be raised to stay
@@ -102,8 +85,24 @@ export interface EffectiveStartBlockResult {
   skippedBlocks: bigint;
 }
 
+// CodeRabbit fix round: the lookback window must be measured from the
+// CONFIRMED head, not the raw current head - scanFromCursor itself never
+// scans up to the raw head either (it subtracts confirmationsFor(chainSlug)
+// to compute its own safeToBlock - see lib/indexing/events.ts). Anchoring
+// effectiveStartBlock to the raw head instead would shift its 80-block
+// window `confirmations` blocks higher than the range scanFromCursor can
+// actually reach, silently narrowing the effective lookback for chains
+// with deeper confirmation requirements (e.g. Polygon's 128) without ever
+// being wrong in a way that surfaces as an error - just a smaller-than-
+// intended safety margin. Phase 5.5: both this function and
+// scanFromCursor now derive their safe head from the SAME
+// lib/chains/confirmations.ts's safeHeadFor - previously each carried an
+// independent, textually-identical copy of the same formula, exactly the
+// "multiple competing safe-head calculations" Phase 5.5 forbids. Pure and
+// directly testable with a plain currentBlock input, no RPC call of its
+// own.
 export function effectiveStartBlock(pool: VolumeSourcePool, currentBlock: bigint): EffectiveStartBlockResult {
-  const safeHead = computeSafeHead(pool.chainSlug, currentBlock);
+  const safeHead = safeHeadFor(pool.chainSlug, currentBlock);
   const recentFloor = safeHead > SAFE_LOOKBACK_BLOCKS ? safeHead - SAFE_LOOKBACK_BLOCKS : BigInt(0);
   const startBlock = pool.startBlock > recentFloor ? pool.startBlock : recentFloor;
   const skippedBlocks = startBlock > pool.startBlock ? startBlock - pool.startBlock : BigInt(0);
@@ -121,22 +120,58 @@ const OBSERVATION_VALUE_DECIMALS = 8;
 // reflects.
 const VOLUME_CALCULATION_VERSION = "uniswap-v2-input-side-only-v1";
 
-export interface PoolVolumeRunResult {
-  poolKey: string;
-  ok: boolean;
-  error?: string;
-  swapCount?: number;
-  pricedSwapCount?: number;
-  unpricedSwapCount?: number;
+// One chunk's own result - Phase 5.5's scanFromCursor now calls onLogs
+// once per chunk (see lib/indexing/events.ts's own module comment), so a
+// single indexPoolVolume run can legitimately span many of these when
+// catching up a large gap. Each chunk gets its own aggregate
+// historicalObservations row (see recordVolumeObservation calls below,
+// pinned to THIS chunk's own last-swap block/hash) - never combined across
+// chunks into one artificially-wide observation, which would blur exactly
+// which block range a given volume/fee/revenue figure actually covers.
+export interface ChunkVolumeResult {
+  fromBlock: string;
+  toBlock: string;
+  swapCount: number;
+  pricedSwapCount: number;
+  unpricedSwapCount: number;
   volumeUsd?: string;
   feesUsd?: string;
   revenueOutcome?: "verified-zero" | "unavailable";
   qualityFlags?: string[];
   // Populated only when a recordVolumeObservation call returned
-  // "skipped-invalid-hash" this run - see logIfNotPersisted below. `ok:
-  // true` on the overall result does NOT mean every metric was actually
-  // persisted; a caller that cares must check this field too.
+  // "skipped-invalid-hash" for this chunk - see logIfNotPersisted below.
   unpersistedMetrics?: string[];
+}
+
+export interface PoolVolumeRunResult {
+  poolKey: string;
+  ok: boolean;
+  error?: string;
+  // Section 26's three-way run outcome. "success": every safe chunk this
+  // run needed to process completed. "partial": real, checkpointed
+  // progress happened (chunks.length > 0) but the run stopped before
+  // reaching the safe head (a provider range limit at the minimum chunk
+  // size, or the attempt budget was exhausted) - the cursor is still
+  // exactly where the last successful chunk left it, safe to resume next
+  // run. "failed": ok is false - either no chunk succeeded at all, or an
+  // error occurred before scanning could even start (chain/pool not
+  // synced, RPC unreachable for the very first call).
+  outcome: "success" | "partial" | "failed";
+  chunks: ChunkVolumeResult[];
+  chunksCompleted: number;
+  chunksAttempted: number;
+  // Set only when outcome is "partial" - see ScanResult.stoppedReason
+  // (lib/indexing/events.ts) for the exact machine-readable values.
+  stoppedReason?: string;
+  // Section 24/25's progress fields - computed AFTER this run's scan
+  // completes (or stops), so they reflect this run's own real, final
+  // position, never an optimistic pre-run estimate. `lag` is safeHead
+  // minus the cursor's block number AFTER this run - 0 once fully caught
+  // up, a real positive number while still catching up (never silently
+  // hidden by reporting "success" for a run that left lag > 0).
+  safeHead?: string;
+  cursorAfterRun?: string;
+  lag?: string;
 }
 
 // Phase 5.3's native price engine is reused exactly as-is (Section 21:
@@ -163,49 +198,27 @@ interface ProcessSwapLogsParams {
   logs: Log[];
   token0Price: SwapTokenPrice | null;
   token1Price: SwapTokenPrice | null;
-  // The block this run's scan actually resumed from (computed once, before
-  // scanFromCursor was called - see indexPoolVolume) - provenance-only,
-  // never used for any write decision, so a benign discrepancy with what
-  // scanFromCursor internally recomputes can never cause a correctness bug,
-  // only a slightly-off display value in calculationInputs.fromBlock.
-  scanFromBlockForProvenance: bigint;
+  // This CHUNK's own [fromBlock, toBlock] boundaries (Phase 5.5:
+  // scanFromCursor now calls onLogs once per chunk, not once for the whole
+  // run - see lib/indexing/events.ts's own module comment). Used both for
+  // calculationInputs.fromBlock and as the lower boundary of the
+  // historical feeTo() range check below - a genuinely different, tighter
+  // range than "the whole run" whenever a run spans more than one chunk.
+  chunk: ScanChunk;
 }
 
-// The idempotent core of one indexing run - called from inside
-// scanFromCursor's onLogs, so it MUST complete (including every DB write)
-// before that cursor advances, and safe to re-run with the exact same logs
-// if a retry happens (every write here is onConflictDoNothing against a
-// deterministic identity - see record-swap-events.ts/
-// record-volume-observation.ts). A single malformed log is skipped and
-// logged, never fatal to the batch; a thrown error (RPC/DB failure)
-// intentionally propagates so scanFromCursor's own error handling leaves
-// the cursor un-advanced for a clean retry next run.
-//
-// CodeRabbit fix round: verified against lib/indexing/events.ts's actual
-// implementation that onLogs (and therefore processSwapLogs) is invoked
-// EXACTLY ONCE per scanFromCursor call, with the FULL merged log set across
-// every internal eth_getLogs chunk scanBlockRange issued - there is no
-// separate per-chunk callback anywhere in the current architecture (scan-
-// BlockRange collects every chunk's logs into one array and returns it;
-// scanFromCursor calls onLogs(logs) once with that combined array, then
-// advances the cursor once). `runResult = await processSwapLogs(...)`
-// (indexPoolVolume below) is therefore a single, correct assignment, not a
-// per-chunk accumulation that could lose or overwrite prior chunks' results
-// - there is nothing to accumulate across, because this function's own
-// `logs` parameter already IS every chunk's logs combined.
-// `scanFromBlockForProvenance`, computed once in indexPoolVolume before
-// scanFromCursor is even called, is correspondingly the correct fromBlock
-// for this entire run, not an approximation of "the first chunk's"
-// fromBlock. Changing this to a genuinely per-chunk callback would mean
-// changing ScanFromCursorParams.onLogs's own signature in lib/indexing/
-// events.ts - shared Phase 5 foundation infrastructure also used unmodified
-// by scan-events-example.ts and this indexer's own reorg-safety guarantees
-// - which is exactly the kind of architecture change this fix round's own
-// scope explicitly excludes. See aggregate.test.ts's own strengthened
-// multi-swap test for direct proof that a large, multi-chunk-sized batch of
-// decoded swaps still aggregates into one correct total.
-async function processSwapLogs(params: ProcessSwapLogsParams): Promise<Omit<PoolVolumeRunResult, "poolKey" | "ok" | "error">> {
-  const { pool, chainId, poolId, logs, token0Price, token1Price, scanFromBlockForProvenance } = params;
+// The idempotent core of one CHUNK's worth of logs - called from inside
+// scanFromCursor's onLogs, once per chunk, so it MUST complete (including
+// every DB write) before that chunk's cursor advances, and safe to re-run
+// with the exact same logs if a retry happens (every write here is
+// onConflictDoNothing against a deterministic identity - see
+// record-swap-events.ts/record-volume-observation.ts). A single malformed
+// log is skipped and logged, never fatal to the batch; a thrown error
+// (RPC/DB failure) intentionally propagates so scanFromCursor's own error
+// handling leaves the cursor un-advanced past this chunk for a clean retry
+// next run.
+async function processSwapLogs(params: ProcessSwapLogsParams): Promise<ChunkVolumeResult> {
+  const { pool, chainId, poolId, logs, token0Price, token1Price, chunk } = params;
 
   const decodedRaw: Omit<DecodedSwapEvent, "blockTimestamp">[] = [];
   let malformedCount = 0;
@@ -222,11 +235,11 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<Omit<Pool
   }
 
   if (decodedRaw.length === 0) {
-    // A genuinely empty window - no aggregate observation is written this
-    // run. indexing_state's own advanced cursor already proves this range
+    // A genuinely empty chunk - no aggregate observation is written for
+    // it. indexing_state's own advanced cursor already proves this range
     // was scanned, which is what distinguishes "scanned, zero swaps" from
     // "not yet indexed" - a $0 row here would add nothing but noise.
-    return { swapCount: 0, pricedSwapCount: 0, unpricedSwapCount: 0 };
+    return { fromBlock: chunk.fromBlock.toString(), toBlock: chunk.toBlock.toString(), swapCount: 0, pricedSwapCount: 0, unpricedSwapCount: 0 };
   }
 
   // Timestamps aren't on the log itself - fetched once per UNIQUE block
@@ -267,12 +280,14 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<Omit<Pool
 
   const [previousVolume, feeRangeCheck] = await Promise.all([
     getLatestVolumeObservation(poolId, "volume_usd"),
-    // Pinned to BOTH boundaries of the range this run is actually
-    // attributing (scanFromBlockForProvenance..pinnedEvent.blockNumber),
-    // never an unpinned "current head" read - see protocol-fee.ts's own
-    // header comment for exactly why a current-head-only read cannot
-    // correctly attribute revenue for a historical range.
-    readV2ProtocolFeeStateAcrossRange(pool.chainSlug, pool.factoryAddress, scanFromBlockForProvenance, pinnedEvent.blockNumber).catch((err) => {
+    // Pinned to BOTH boundaries of the CHUNK this call is actually
+    // attributing (chunk.fromBlock..pinnedEvent.blockNumber), never an
+    // unpinned "current head" read - see protocol-fee.ts's own header
+    // comment for exactly why a current-head-only read cannot correctly
+    // attribute revenue for a historical range. Phase 5.5: this is now the
+    // chunk's own boundary, not the whole run's - a tighter, more accurate
+    // range whenever a run spans multiple chunks.
+    readV2ProtocolFeeStateAcrossRange(pool.chainSlug, pool.factoryAddress, chunk.fromBlock, pinnedEvent.blockNumber).catch((err) => {
       logger.warn("volume indexing: protocol fee state read failed - revenue marked unavailable this run", {
         component: "onchain-volume",
         pool: pool.key,
@@ -294,7 +309,7 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<Omit<Pool
     eventType: "Swap",
     sourceContract: pool.poolAddress,
     sourceChainSlug: pool.chainSlug,
-    fromBlock: scanFromBlockForProvenance.toString(),
+    fromBlock: chunk.fromBlock.toString(),
     toBlock: pinnedEvent.blockNumber.toString(),
     swapCount: aggregate.swapCount,
     pricedSwapCount: aggregate.pricedSwapCount,
@@ -385,6 +400,8 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<Omit<Pool
   }
 
   return {
+    fromBlock: chunk.fromBlock.toString(),
+    toBlock: chunk.toBlock.toString(),
     swapCount: aggregate.swapCount,
     pricedSwapCount: aggregate.pricedSwapCount,
     unpricedSwapCount: aggregate.unpricedSwapCount,
@@ -425,17 +442,30 @@ function logIfNotPersisted(
 
 // The top-level entry point for one pool: resolves its canonical DB
 // identity, looks up both tokens' native prices once, then scans new Swap
-// events since the last checkpoint via the existing, unmodified
-// scanFromCursor primitive (lib/indexing/events.ts) - the same
-// resumable/idempotent/confirmation-aware foundation
+// events since the last checkpoint via scanFromCursor (lib/indexing/
+// events.ts) - the same resumable/idempotent/confirmation-aware foundation
 // scan-events-example.ts already proved works end-to-end, just with this
-// indexer's own component key, chunk size, and onLogs body.
+// indexer's own component key, chunk size, and onLogs body. Phase 5.5:
+// onLogs is now called once per CHUNK (not once for the whole run), so a
+// single call here can legitimately process many chunks while catching up
+// a large gap - every chunk's own ChunkVolumeResult is accumulated into
+// `chunks` below, never overwritten.
 export async function indexPoolVolume(pool: VolumeSourcePool): Promise<PoolVolumeRunResult> {
   const component = `volume:${pool.sourceKind}:${pool.key}`;
 
   const [chainId, poolId] = await Promise.all([getChainId(pool.chainSlug), getPoolIdByConfigKey(pool.key)]);
-  if (!chainId) return { poolKey: pool.key, ok: false, error: `chain "${pool.chainSlug}" not found in DB` };
-  if (!poolId) return { poolKey: pool.key, ok: false, error: `pool "${pool.key}" not yet synced into \`pools\` - run TVL verification first` };
+  if (!chainId) return { poolKey: pool.key, ok: false, outcome: "failed", error: `chain "${pool.chainSlug}" not found in DB`, chunks: [], chunksCompleted: 0, chunksAttempted: 0 };
+  if (!poolId) {
+    return {
+      poolKey: pool.key,
+      ok: false,
+      outcome: "failed",
+      error: `pool "${pool.key}" not yet synced into \`pools\` - run TVL verification first`,
+      chunks: [],
+      chunksCompleted: 0,
+      chunksAttempted: 0,
+    };
+  }
 
   const now = new Date();
   const [token0Native, token1Native] = await Promise.all([
@@ -445,7 +475,7 @@ export async function indexPoolVolume(pool: VolumeSourcePool): Promise<PoolVolum
   const token0Price = toSwapTokenPrice(pool.token0, token0Native, now);
   const token1Price = toSwapTokenPrice(pool.token1, token1Native, now);
 
-  let runResult: Omit<PoolVolumeRunResult, "poolKey" | "ok" | "error"> = {};
+  const chunks: ChunkVolumeResult[] = [];
 
   try {
     const currentBlock = await withResilientClient(pool.chainSlug, (client) => client.getBlockNumber());
@@ -464,10 +494,8 @@ export async function indexPoolVolume(pool: VolumeSourcePool): Promise<PoolVolum
         skippedBlocks: skippedBlocks.toString(),
       });
     }
-    const priorState = await getIndexingState(pool.chainSlug, component);
-    const scanFromBlockForProvenance = priorState?.lastProcessedBlock != null ? priorState.lastProcessedBlock + BigInt(1) : startBlockForThisRun;
 
-    await scanFromCursor({
+    const scanResult = await scanFromCursor({
       chainSlug: pool.chainSlug,
       component,
       address: pool.poolAddress as Address,
@@ -476,15 +504,61 @@ export async function indexPoolVolume(pool: VolumeSourcePool): Promise<PoolVolum
       startBlock: startBlockForThisRun,
       chunkSize: DEFAULT_VOLUME_CHUNK_SIZE,
       confirmations: confirmationsFor(pool.chainSlug),
-      onLogs: async (logs) => {
-        runResult = await processSwapLogs({ pool, chainId, poolId, logs, token0Price, token1Price, scanFromBlockForProvenance });
+      onLogs: async (logs, chunk) => {
+        chunks.push(await processSwapLogs({ pool, chainId, poolId, logs, token0Price, token1Price, chunk }));
       },
     });
-  } catch (err) {
-    return { poolKey: pool.key, ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
 
-  return { poolKey: pool.key, ok: true, ...runResult };
+    if (scanResult.outcome === "partial") {
+      logger.warn("volume indexing: catch-up run stopped before reaching the safe head - will resume next run", {
+        component: "onchain-volume",
+        pool: pool.key,
+        stoppedReason: scanResult.stoppedReason,
+        chunksCompleted: scanResult.chunksCompleted,
+        chunksAttempted: scanResult.chunksAttempted,
+        scannedTo: scanResult.scannedTo.toString(),
+      });
+    }
+
+    const safeHead = safeHeadFor(pool.chainSlug, currentBlock);
+    // scanResult.scannedTo is the cursor's position AFTER this run - for
+    // the "nothing to do, already caught up" case that value is
+    // `fromBlock - 1`, i.e. the cursor unchanged from before this call,
+    // which is exactly right for lag reporting too.
+    const cursorAfterRun = scanResult.scannedTo;
+    const lag = safeHead > cursorAfterRun ? safeHead - cursorAfterRun : BigInt(0);
+
+    return {
+      poolKey: pool.key,
+      ok: true,
+      outcome: scanResult.outcome,
+      chunks,
+      chunksCompleted: scanResult.chunksCompleted,
+      chunksAttempted: scanResult.chunksAttempted,
+      ...(scanResult.stoppedReason ? { stoppedReason: scanResult.stoppedReason } : {}),
+      safeHead: safeHead.toString(),
+      cursorAfterRun: cursorAfterRun.toString(),
+      lag: lag.toString(),
+    };
+  } catch (err) {
+    // scanFromCursor only throws when either no chunk made it through at
+    // all, or a chunk's own onLogs (processSwapLogs) threw - a decode/
+    // persistence bug, not a recoverable RPC condition. Either way,
+    // whatever chunks DID complete before the throw are still preserved
+    // here (and, more importantly, already durably checkpointed in the DB
+    // by scanFromCursor itself before it re-threw) - `ok: false` reflects
+    // that THIS call did not finish cleanly, not that no progress
+    // happened at all.
+    return {
+      poolKey: pool.key,
+      ok: false,
+      outcome: "failed",
+      error: err instanceof Error ? err.message : String(err),
+      chunks,
+      chunksCompleted: chunks.length,
+      chunksAttempted: chunks.length,
+    };
+  }
 }
 
 // Indexes every configured pool, one at a time, each with its own
@@ -501,7 +575,15 @@ export async function indexAllPoolVolume(pools: VolumeSourcePool[] = VOLUME_SOUR
     try {
       results.push(await indexPoolVolume(pool));
     } catch (err) {
-      results.push({ poolKey: pool.key, ok: false, error: err instanceof Error ? err.message : String(err) });
+      results.push({
+        poolKey: pool.key,
+        ok: false,
+        outcome: "failed",
+        error: err instanceof Error ? err.message : String(err),
+        chunks: [],
+        chunksCompleted: 0,
+        chunksAttempted: 0,
+      });
     }
   }
   return results;

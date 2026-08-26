@@ -1,4 +1,5 @@
 import { createPublicClient, http, type PublicClient } from "viem";
+import { backoffDelay, sleep, type BackoffOptions } from "./backoff";
 import { VIEM_CHAIN_BY_SLUG, rpcUrlsFor } from "./rpc-client";
 import { classifyRpcError, isRetryableRpcFailure, type RpcFailureKind } from "./rpc-errors";
 
@@ -45,21 +46,7 @@ export class RpcUnavailableError extends Error {
 // Bounded, not unlimited - a chain with a genuinely broken RPC (or none
 // configured) must fail loudly and promptly, not hang retrying forever.
 const MAX_RETRIES_PER_PROVIDER = 2; // total attempts per provider = 1 + this
-const BASE_DELAY_MS = 250;
-const MAX_DELAY_MS = 4000;
-
-// Full-jitter exponential backoff: a random delay between 50% and 100% of
-// the exponential value, rather than the exact exponential figure every
-// time - spreads out retries from concurrent requests instead of having
-// them all hammer the provider again at the exact same moment.
-function backoffDelay(attempt: number): number {
-  const exp = Math.min(MAX_DELAY_MS, BASE_DELAY_MS * 2 ** attempt);
-  return exp / 2 + Math.random() * (exp / 2);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const BACKOFF: BackoffOptions = { baseDelayMs: 250, maxDelayMs: 4000 };
 
 // Deliberately narrow: only the read-shaped methods this app's consumers
 // actually use. This app performs no writes/signing anywhere (confirmed by
@@ -104,7 +91,7 @@ export async function withResilientClient<T>(
 
         const isLastAttemptForThisProvider = attempt === MAX_RETRIES_PER_PROVIDER;
         if (!isRetryableRpcFailure(kind) || isLastAttemptForThisProvider) break;
-        await sleep(backoffDelay(attempt));
+        await sleep(backoffDelay(attempt, BACKOFF));
       }
     }
   }

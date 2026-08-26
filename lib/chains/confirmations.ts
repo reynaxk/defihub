@@ -21,3 +21,16 @@ const DEFAULT_CONFIRMATIONS = BigInt(12);
 export function confirmationsFor(chainSlug: string): bigint {
   return CONFIRMATIONS_BY_CHAIN[chainSlug] ?? DEFAULT_CONFIRMATIONS;
 }
+
+// Phase 5.5: the ONE place `currentBlock - confirmations, clamped at zero`
+// is computed. Before this, lib/indexing/events.ts's scanFromCursor and
+// lib/onchain/volume/engine.ts's own effectiveStartBlock each carried an
+// independent, textually-identical copy of this exact formula - precisely
+// the "multiple competing safe-head calculations" this phase's own
+// instructions call out. Both now call this instead. Never use the raw,
+// unconfirmed current block for any indexing/production decision - a reorg
+// can still orphan it.
+export function safeHeadFor(chainSlug: string, currentBlock: bigint): bigint {
+  const confirmations = confirmationsFor(chainSlug);
+  return currentBlock > confirmations ? currentBlock - confirmations : BigInt(0);
+}

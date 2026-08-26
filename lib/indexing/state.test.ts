@@ -90,4 +90,33 @@ describe("indexing state", () => {
     expect(rows).toHaveLength(1);
     expect(["100", "200"]).toContain(rows[0].lastProcessedBlock);
   });
+
+  // Section 29's exact scenario, deterministic (not racy) - worker B's
+  // update (cursor 200) durably lands FIRST, then a stale worker A's
+  // update (believing the cursor is still at an earlier position, cursor
+  // 100) arrives SECOND. The atomic GREATEST(...) in updateIndexingState's
+  // own onConflictDoUpdate must win over a plain last-write-wins upsert -
+  // worker A's late, stale write must never move the cursor backward.
+  it("never lets a stale worker's lower cursor value overwrite an already-advanced one (Invariant 3)", async () => {
+    const component = `test-${randomUUID()}`;
+    createdKeys.push({ chainSlug: "ethereum", component });
+
+    await updateIndexingState("ethereum", component, { status: "idle", lastProcessedBlock: BigInt(200) });
+    await updateIndexingState("ethereum", component, { status: "idle", lastProcessedBlock: BigInt(100) });
+
+    const row = await getIndexingState("ethereum", component);
+    expect(row?.lastProcessedBlock).toBe(BigInt(200));
+  });
+
+  it("still allows lastAttemptedSyncAt/status to update even when lastProcessedBlock is omitted, without touching the existing cursor", async () => {
+    const component = `test-${randomUUID()}`;
+    createdKeys.push({ chainSlug: "ethereum", component });
+
+    await updateIndexingState("ethereum", component, { status: "idle", lastProcessedBlock: BigInt(500) });
+    await updateIndexingState("ethereum", component, { status: "running", lastAttemptedSyncAt: new Date() });
+
+    const row = await getIndexingState("ethereum", component);
+    expect(row?.status).toBe("running");
+    expect(row?.lastProcessedBlock).toBe(BigInt(500));
+  });
 });

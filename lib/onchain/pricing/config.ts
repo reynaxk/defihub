@@ -169,6 +169,69 @@ export const REFERENCE_ASSETS: ReferenceAsset[] = [
       },
     ],
   },
+  // Phase 5.7: BNB Chain reference assets. Not a new chain - "bnb-chain" is
+  // already a fully supported chain (VIEM_CHAIN_BY_SLUG, confirmations.ts,
+  // rpc-client.ts default URLs all already have entries, and
+  // VERIFIED_POOLS/VERIFIED_TOKENS already track a real PancakeSwap pool on
+  // it from an earlier phase) - this is extending an already-supported
+  // chain's pricing coverage, the exact reuse this phase's own instructions
+  // call for, not new-chain scope creep. Added specifically because Phase
+  // 5.7's PancakeSwap volume/fee adapter (lib/onchain/volume/config.ts)
+  // needs a native USD price for USDT/WBNB to produce anything above LOW
+  // confidence - without these two entries, every PancakeSwap swap would be
+  // permanently unpriced (getNativeTokenPrice would never resolve for BSC),
+  // which would make that adapter technically "NATIVE" but practically
+  // useless. Same anchor+derived shape as usdc-ethereum/weth-ethereum above,
+  // not a new pattern.
+  {
+    key: "usdt-bnb-chain",
+    chainSlug: "bnb-chain",
+    // BSC-USD (Binance-Peg BSC-USD), the token this chain's ecosystem
+    // universally calls "USDT" - confirmed live via token0() against the
+    // same pool used below, and already tracked as this exact address/
+    // decimals pair in VERIFIED_POOLS's pancakeswap-amm-bsc-usdt-wbnb entry
+    // (lib/onchain/config.ts). 18 decimals, NOT 6 like Ethereum's USDT - the
+    // same decimals gotcha that entry's own comment already documents.
+    address: "0x55d398326f99059ff775485246999027b3197955",
+    symbol: "USDT",
+    decimals: 18,
+    coingeckoId: "tether",
+    kind: "anchor",
+    // Same definitional-anchor role as usdc-ethereum above - one stablecoin
+    // per chain has to be the hand-declared $1.00 starting point (see this
+    // module's own header comment), not independently corroborated on-chain.
+    anchorPriceUsd: "1.00",
+  },
+  {
+    key: "wbnb-bnb-chain",
+    chainSlug: "bnb-chain",
+    address: "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+    symbol: "WBNB",
+    decimals: 18,
+    coingeckoId: "wbnb",
+    kind: "derived",
+    sourcePools: [
+      {
+        // PancakeSwap V2 USDT/WBNB - the EXACT same pool address already
+        // verified and live in VERIFIED_POOLS as
+        // "pancakeswap-amm-bsc-usdt-wbnb" (lib/onchain/config.ts) and in
+        // VOLUME_SOURCE_POOLS for volume/fees (lib/onchain/volume/config.ts) -
+        // reused here for pricing rather than re-verified from scratch, the
+        // same "one verified pool, multiple purposes" precedent
+        // weth-ethereum's own comment establishes for the Ethereum
+        // USDC/WETH pool. Independently re-confirmed live for this phase:
+        // getReserves()/token0()/token1() on the real PancakeSwap V2 Factory
+        // deployment (0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73) - token0()
+        // returns USDT, token1() returns WBNB, matching this entry and
+        // usdt-bnb-chain's pairing below exactly. Reserves at verification
+        // time (~40.71M USDT vs ~58,243.79 WBNB) implied WBNB trading at
+        // ~$698.90 - a plausible real value, not assumed.
+        poolAddress: "0x16b9a82891338f9ba80e2d6970fdda79d1eb0dae",
+        dexKind: "uniswap-v2",
+        pairedWithKey: "usdt-bnb-chain",
+      },
+    ],
+  },
 ];
 
 // The exact dependency shape reference-graph.ts's resolveReferenceOrder

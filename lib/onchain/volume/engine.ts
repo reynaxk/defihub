@@ -9,11 +9,11 @@ import { roundExactDecimal } from "@/lib/onchain/verify-pool";
 import { logger } from "@/lib/observability/logger";
 import { aggregateSwapVolume, classifyVolumeConfidence } from "./aggregate";
 import { type VolumeSourcePool, type VolumeSourceToken, VOLUME_SOURCE_POOLS } from "./config";
-import { readV2ProtocolFeeState, resolveProtocolRevenue } from "./protocol-fee";
+import { readV2ProtocolFeeStateAcrossRange, resolveProtocolRevenueForRange } from "./protocol-fee";
 import { checkRevenueConsistency, checkVolumeFeeConsistency, checkVolumeSpike } from "./quality";
 import { getChainId, getLatestVolumeObservation, getPoolIdByConfigKey } from "./queries";
 import { recordSwapEvents, type SwapEventRecord } from "./record-swap-events";
-import { recordVolumeObservation } from "./record-volume-observation";
+import { recordVolumeObservation, type VolumeObservationWriteOutcome } from "./record-volume-observation";
 import type { DecodedSwapEvent, SwapVolumeResult } from "./types";
 import { computeSwapVolumeUsd, decodeSwapLog, SWAP_EVENT_SIGNATURE, type SwapTokenPrice } from "./uniswap-v2";
 
@@ -74,9 +74,40 @@ const DEFAULT_VOLUME_CHUNK_SIZE = BigInt(50);
 // its own real, already-scanned position exactly as before.
 const SAFE_LOOKBACK_BLOCKS = BigInt(80);
 
-function effectiveStartBlock(pool: VolumeSourcePool, currentBlock: bigint): bigint {
-  const recentFloor = currentBlock > SAFE_LOOKBACK_BLOCKS ? currentBlock - SAFE_LOOKBACK_BLOCKS : BigInt(0);
-  return pool.startBlock > recentFloor ? pool.startBlock : recentFloor;
+// CodeRabbit fix round: the lookback window must be measured from the
+// CONFIRMED head, not the raw current head - scanFromCursor itself never
+// scans up to the raw head either (it subtracts confirmationsFor(chainSlug)
+// to compute its own safeToBlock - see lib/indexing/events.ts). Anchoring
+// effectiveStartBlock to the raw head instead would shift its 80-block
+// window `confirmations` blocks higher than the range scanFromCursor can
+// actually reach, silently narrowing the effective lookback for chains
+// with deeper confirmation requirements (e.g. Polygon's 128) without ever
+// being wrong in a way that surfaces as an error - just a smaller-than-
+// intended safety margin. Pure and directly testable with a plain
+// currentBlock input, no RPC call of its own.
+export function computeSafeHead(chainSlug: string, currentBlock: bigint): bigint {
+  const confirmations = confirmationsFor(chainSlug);
+  return currentBlock > confirmations ? currentBlock - confirmations : BigInt(0);
+}
+
+export interface EffectiveStartBlockResult {
+  startBlock: bigint;
+  // > 0 whenever the configured pool.startBlock had to be raised to stay
+  // within the provider's live-servable window - i.e. blocks between the
+  // configured start and the actual effective start are never scanned at
+  // all for this pool's first-ever run. Exposed (not just used internally)
+  // so the caller can log this loudly rather than silently proceeding as
+  // if the configured value were honored - a real, intentional gap in
+  // coverage, not a bug, but one that must never be invisible.
+  skippedBlocks: bigint;
+}
+
+export function effectiveStartBlock(pool: VolumeSourcePool, currentBlock: bigint): EffectiveStartBlockResult {
+  const safeHead = computeSafeHead(pool.chainSlug, currentBlock);
+  const recentFloor = safeHead > SAFE_LOOKBACK_BLOCKS ? safeHead - SAFE_LOOKBACK_BLOCKS : BigInt(0);
+  const startBlock = pool.startBlock > recentFloor ? pool.startBlock : recentFloor;
+  const skippedBlocks = startBlock > pool.startBlock ? startBlock - pool.startBlock : BigInt(0);
+  return { startBlock, skippedBlocks };
 }
 
 // historical_observations.value is numeric(32,8) - same reasoning and same
@@ -101,6 +132,11 @@ export interface PoolVolumeRunResult {
   feesUsd?: string;
   revenueOutcome?: "verified-zero" | "unavailable";
   qualityFlags?: string[];
+  // Populated only when a recordVolumeObservation call returned
+  // "skipped-invalid-hash" this run - see logIfNotPersisted below. `ok:
+  // true` on the overall result does NOT mean every metric was actually
+  // persisted; a caller that cares must check this field too.
+  unpersistedMetrics?: string[];
 }
 
 // Phase 5.3's native price engine is reused exactly as-is (Section 21:
@@ -144,6 +180,30 @@ interface ProcessSwapLogsParams {
 // logged, never fatal to the batch; a thrown error (RPC/DB failure)
 // intentionally propagates so scanFromCursor's own error handling leaves
 // the cursor un-advanced for a clean retry next run.
+//
+// CodeRabbit fix round: verified against lib/indexing/events.ts's actual
+// implementation that onLogs (and therefore processSwapLogs) is invoked
+// EXACTLY ONCE per scanFromCursor call, with the FULL merged log set across
+// every internal eth_getLogs chunk scanBlockRange issued - there is no
+// separate per-chunk callback anywhere in the current architecture (scan-
+// BlockRange collects every chunk's logs into one array and returns it;
+// scanFromCursor calls onLogs(logs) once with that combined array, then
+// advances the cursor once). `runResult = await processSwapLogs(...)`
+// (indexPoolVolume below) is therefore a single, correct assignment, not a
+// per-chunk accumulation that could lose or overwrite prior chunks' results
+// - there is nothing to accumulate across, because this function's own
+// `logs` parameter already IS every chunk's logs combined.
+// `scanFromBlockForProvenance`, computed once in indexPoolVolume before
+// scanFromCursor is even called, is correspondingly the correct fromBlock
+// for this entire run, not an approximation of "the first chunk's"
+// fromBlock. Changing this to a genuinely per-chunk callback would mean
+// changing ScanFromCursorParams.onLogs's own signature in lib/indexing/
+// events.ts - shared Phase 5 foundation infrastructure also used unmodified
+// by scan-events-example.ts and this indexer's own reorg-safety guarantees
+// - which is exactly the kind of architecture change this fix round's own
+// scope explicitly excludes. See aggregate.test.ts's own strengthened
+// multi-swap test for direct proof that a large, multi-chunk-sized batch of
+// decoded swaps still aggregates into one correct total.
 async function processSwapLogs(params: ProcessSwapLogsParams): Promise<Omit<PoolVolumeRunResult, "poolKey" | "ok" | "error">> {
   const { pool, chainId, poolId, logs, token0Price, token1Price, scanFromBlockForProvenance } = params;
 
@@ -205,9 +265,14 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<Omit<Pool
   );
   const pinnedTimestamp = timestampByBlock.get(pinnedEvent.blockNumber)!;
 
-  const [previousVolume, protocolFeeState] = await Promise.all([
+  const [previousVolume, feeRangeCheck] = await Promise.all([
     getLatestVolumeObservation(poolId, "volume_usd"),
-    readV2ProtocolFeeState(pool.chainSlug, pool.factoryAddress).catch((err) => {
+    // Pinned to BOTH boundaries of the range this run is actually
+    // attributing (scanFromBlockForProvenance..pinnedEvent.blockNumber),
+    // never an unpinned "current head" read - see protocol-fee.ts's own
+    // header comment for exactly why a current-head-only read cannot
+    // correctly attribute revenue for a historical range.
+    readV2ProtocolFeeStateAcrossRange(pool.chainSlug, pool.factoryAddress, scanFromBlockForProvenance, pinnedEvent.blockNumber).catch((err) => {
       logger.warn("volume indexing: protocol fee state read failed - revenue marked unavailable this run", {
         component: "onchain-volume",
         pool: pool.key,
@@ -251,7 +316,17 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<Omit<Pool
     ...(qualityFlags.length > 0 ? { qualityFlags } : {}),
   };
 
-  await recordVolumeObservation({
+  const unpersistedMetrics: string[] = [];
+  // recordVolumeObservation's own onConflictDoNothing distinguishes
+  // "written" from "duplicate-ignored" (both fine, idempotent-expected
+  // outcomes) from "skipped-invalid-hash" (NOT fine - the observation was
+  // never persisted at all). Every call's result must be inspected -
+  // previously these were fire-and-forget `await`s, so an invalid-hash
+  // skip (which should be structurally unreachable given pinnedEvent's
+  // hash comes straight from a real decoded on-chain log, but is never
+  // assumed impossible) would have vanished with no trace anywhere in this
+  // run's own result or logs.
+  const volumeOutcome = await recordVolumeObservation({
     poolId,
     chainId,
     metric: "volume_usd",
@@ -263,7 +338,9 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<Omit<Pool
     calculationVersion: VOLUME_CALCULATION_VERSION,
     confidence,
   });
-  await recordVolumeObservation({
+  logIfNotPersisted(volumeOutcome, "volume_usd", pool, pinnedEvent, unpersistedMetrics);
+
+  const feesOutcome = await recordVolumeObservation({
     poolId,
     chainId,
     metric: "fees_usd",
@@ -275,15 +352,16 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<Omit<Pool
     calculationVersion: VOLUME_CALCULATION_VERSION,
     confidence,
   });
+  logIfNotPersisted(feesOutcome, "fees_usd", pool, pinnedEvent, unpersistedMetrics);
 
   let revenueOutcome: "verified-zero" | "unavailable" = "unavailable";
-  if (protocolFeeState) {
-    const revenue = resolveProtocolRevenue(protocolFeeState);
+  if (feeRangeCheck) {
+    const revenue = resolveProtocolRevenueForRange(feeRangeCheck);
     if (revenue.available) {
       revenueOutcome = "verified-zero";
       const revenueUsd = roundExactDecimal(revenue.revenueUsd, OBSERVATION_VALUE_DECIMALS);
       const revenueFlags = checkRevenueConsistency(revenueUsd);
-      await recordVolumeObservation({
+      const revenueWriteOutcome = await recordVolumeObservation({
         poolId,
         chainId,
         metric: "revenue_usd",
@@ -296,6 +374,7 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<Omit<Pool
         calculationVersion: VOLUME_CALCULATION_VERSION,
         confidence,
       });
+      logIfNotPersisted(revenueWriteOutcome, "revenue_usd", pool, pinnedEvent, unpersistedMetrics);
     } else {
       logger.info("volume indexing: protocol revenue unavailable this run - not fabricated", {
         component: "onchain-volume",
@@ -313,7 +392,35 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<Omit<Pool
     feesUsd,
     revenueOutcome,
     ...(qualityFlags.length > 0 ? { qualityFlags } : {}),
+    ...(unpersistedMetrics.length > 0 ? { unpersistedMetrics } : {}),
   };
+}
+
+// A write NOT actually persisted (skipped-invalid-hash) must never
+// disappear silently - logged as a warning here (never thrown: the
+// existing indexing architecture only throws to leave the CURSOR
+// un-advanced for a safe retry, and retrying would not change anything for
+// a genuinely invalid/missing hash decoded from a real on-chain log - see
+// this function's own caller for why cursor-blocking retry is reserved for
+// transient RPC/DB failures instead) and surfaced on the run's own result
+// via `unpersistedMetrics` so a caller/monitor can see it without reading
+// raw logs.
+function logIfNotPersisted(
+  outcome: VolumeObservationWriteOutcome,
+  metric: string,
+  pool: VolumeSourcePool,
+  pinnedEvent: DecodedSwapEvent,
+  unpersistedMetrics: string[],
+): void {
+  if (outcome !== "skipped-invalid-hash") return;
+  unpersistedMetrics.push(metric);
+  logger.warn("volume indexing: observation NOT persisted - invalid or missing block hash", {
+    component: "onchain-volume",
+    pool: pool.key,
+    metric,
+    blockNumber: pinnedEvent.blockNumber.toString(),
+    blockHash: pinnedEvent.blockHash,
+  });
 }
 
 // The top-level entry point for one pool: resolves its canonical DB
@@ -342,7 +449,21 @@ export async function indexPoolVolume(pool: VolumeSourcePool): Promise<PoolVolum
 
   try {
     const currentBlock = await withResilientClient(pool.chainSlug, (client) => client.getBlockNumber());
-    const startBlockForThisRun = effectiveStartBlock(pool, currentBlock);
+    const { startBlock: startBlockForThisRun, skippedBlocks } = effectiveStartBlock(pool, currentBlock);
+    if (skippedBlocks > BigInt(0)) {
+      // Never a silent adjustment - this pool's configured startBlock
+      // could not be honored because it now falls outside this RPC
+      // provider's live-servable window (see effectiveStartBlock's own
+      // comment), so a real range of blocks is intentionally never scanned
+      // for this pool's first-ever run.
+      logger.warn("volume indexing: configured startBlock is stale relative to the confirmed chain head - skipping ahead to a range this RPC provider can actually serve", {
+        component: "onchain-volume",
+        pool: pool.key,
+        configuredStartBlock: pool.startBlock.toString(),
+        effectiveStartBlock: startBlockForThisRun.toString(),
+        skippedBlocks: skippedBlocks.toString(),
+      });
+    }
     const priorState = await getIndexingState(pool.chainSlug, component);
     const scanFromBlockForProvenance = priorState?.lastProcessedBlock != null ? priorState.lastProcessedBlock + BigInt(1) : startBlockForThisRun;
 

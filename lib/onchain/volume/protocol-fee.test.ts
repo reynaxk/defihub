@@ -1,42 +1,89 @@
 // Pure unit tests for the protocol-revenue decision - no RPC. Covers both
-// branches explicitly, including the "active" branch this phase's one real
-// configured pool actually exercises live (factory.feeTo() ==
-// 0xf38521f130fcCF29dB1961597bc5d2B60F995f85, verified during this phase's
-// own development - see config.ts's feeVerification comment).
+// the both-boundaries-agree branches, including the "active" branch this
+// phase's one real configured pool actually exercises live (factory.feeTo()
+// == 0xf38521f130fcCF29dB1961597bc5d2B60F995f85, verified during this
+// phase's own development - see config.ts's feeVerification comment), and
+// the range-spanning-a-transition branch a purely current-head read could
+// never detect.
 import { describe, expect, it } from "vitest";
-import { resolveProtocolRevenue, type ProtocolFeeState } from "./protocol-fee";
+import { resolveProtocolRevenueForRange, type HistoricalFeeCheckResult, type ProtocolFeeState } from "./protocol-fee";
 
-describe("resolveProtocolRevenue", () => {
-  it("reports revenue as verifiably zero when feeTo() is the zero address", () => {
-    const state: ProtocolFeeState = {
-      factoryAddress: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
-      feeToAddress: "0x0000000000000000000000000000000000000000",
-      active: false,
+function feeState(overrides: Partial<ProtocolFeeState> = {}): ProtocolFeeState {
+  return {
+    factoryAddress: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+    feeToAddress: "0x0000000000000000000000000000000000000000",
+    active: false,
+    ...overrides,
+  };
+}
+
+describe("resolveProtocolRevenueForRange", () => {
+  it("reports revenue as verifiably zero when feeTo() is the zero address at BOTH the start and end of the indexed range", () => {
+    const check: HistoricalFeeCheckResult = {
+      fromBlock: BigInt(100),
+      toBlock: BigInt(200),
+      fromBlockState: feeState({ active: false }),
+      toBlockState: feeState({ active: false }),
     };
-    const outcome = resolveProtocolRevenue(state);
+    const outcome = resolveProtocolRevenueForRange(check);
     expect(outcome).toEqual({
       available: true,
       revenueUsd: "0",
-      reason: expect.stringContaining("verifiably inactive"),
+      reason: expect.stringContaining("BOTH the start (block 100) and end (block 200)"),
     });
   });
 
-  it("reports revenue as unavailable (never fabricated as volume x a fraction) when feeTo() is active - the real, live state of this phase's one configured pool", () => {
-    const state: ProtocolFeeState = {
-      factoryAddress: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
-      feeToAddress: "0xf38521f130fcCF29dB1961597bc5d2B60F995f85",
-      active: true,
-    };
-    const outcome = resolveProtocolRevenue(state);
+  it("reports revenue as unavailable (never fabricated as volume x a fraction) when feeTo() is active at both boundaries - the real, live state of this phase's one configured pool", () => {
+    const active = feeState({ feeToAddress: "0xf38521f130fcCF29dB1961597bc5d2B60F995f85", active: true });
+    const check: HistoricalFeeCheckResult = { fromBlock: BigInt(100), toBlock: BigInt(200), fromBlockState: active, toBlockState: active };
+    const outcome = resolveProtocolRevenueForRange(check);
     expect(outcome.available).toBe(false);
     expect(outcome.reason).toContain("Mint/Burn");
     expect((outcome as { revenueUsd?: string }).revenueUsd).toBeUndefined();
   });
 
+  it("reports revenue as unavailable, never verified-zero, when feeTo() transitions from active to inactive within the indexed range", () => {
+    // The exact scenario a current-head-only read could never catch: feeTo
+    // active at the range's start, disabled somewhere before its end - the
+    // whole range's revenue is genuinely unknown (not provably zero, since
+    // it WAS active for at least part of it), not zero just because the
+    // end of the range happens to read inactive.
+    const check: HistoricalFeeCheckResult = {
+      fromBlock: BigInt(100),
+      toBlock: BigInt(200),
+      fromBlockState: feeState({ active: true, feeToAddress: "0xf38521f130fcCF29dB1961597bc5d2B60F995f85" }),
+      toBlockState: feeState({ active: false }),
+    };
+    const outcome = resolveProtocolRevenueForRange(check);
+    expect(outcome.available).toBe(false);
+    expect(outcome.reason).toContain("state differs between the start");
+    expect(outcome.reason).toContain("block 100, active");
+    expect(outcome.reason).toContain("block 200, inactive");
+  });
+
+  it("reports revenue as unavailable when feeTo() transitions from inactive to active within the indexed range", () => {
+    const check: HistoricalFeeCheckResult = {
+      fromBlock: BigInt(100),
+      toBlock: BigInt(200),
+      fromBlockState: feeState({ active: false }),
+      toBlockState: feeState({ active: true, feeToAddress: "0xf38521f130fcCF29dB1961597bc5d2B60F995f85" }),
+    };
+    const outcome = resolveProtocolRevenueForRange(check);
+    expect(outcome.available).toBe(false);
+    expect(outcome.reason).toContain("state differs between the start");
+  });
+
   it("never confuses an active-but-unmeasured mechanism with a genuinely zero one", () => {
-    const inactive = resolveProtocolRevenue({ factoryAddress: "0xf", feeToAddress: "0x0000000000000000000000000000000000000000", active: false });
-    const active = resolveProtocolRevenue({ factoryAddress: "0xf", feeToAddress: "0xabc", active: true });
-    expect(inactive.available).toBe(true);
-    expect(active.available).toBe(false);
+    const inactiveCheck: HistoricalFeeCheckResult = {
+      fromBlock: BigInt(1),
+      toBlock: BigInt(2),
+      fromBlockState: feeState({ active: false }),
+      toBlockState: feeState({ active: false }),
+    };
+    const activeState = feeState({ active: true, feeToAddress: "0xabc" });
+    const activeCheck: HistoricalFeeCheckResult = { fromBlock: BigInt(1), toBlock: BigInt(2), fromBlockState: activeState, toBlockState: activeState };
+
+    expect(resolveProtocolRevenueForRange(inactiveCheck).available).toBe(true);
+    expect(resolveProtocolRevenueForRange(activeCheck).available).toBe(false);
   });
 });

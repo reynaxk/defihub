@@ -102,8 +102,13 @@ describe("recordVolumeObservation", () => {
 
   it("is idempotent for a repeated write at the same block+hash+metric - exactly one row, first write survives", async () => {
     const { chainId, poolId } = await makeChainAndPool();
-    await recordVolumeObservation(baseRecord({}, poolId, chainId));
-    await recordVolumeObservation(baseRecord({ value: "999999.00000000" }, poolId, chainId));
+    const first = await recordVolumeObservation(baseRecord({}, poolId, chainId));
+    const second = await recordVolumeObservation(baseRecord({ value: "999999.00000000" }, poolId, chainId));
+
+    // The three outcomes are now distinguishable - a genuine first write
+    // must never be reported the same way as a suppressed duplicate.
+    expect(first).toBe("written");
+    expect(second).toBe("duplicate-ignored");
 
     const rows = await db.select().from(historicalObservations).where(eq(historicalObservations.entityId, poolId));
     expect(rows).toHaveLength(1);

@@ -10,15 +10,22 @@ export interface SwapEventRecord {
 }
 
 // Idempotent batch insert - onConflictDoNothing targets
-// swap_events_pool_tx_log_unique (schema.ts), the exact identity a
+// swap_events_pool_tx_log_hash_unique (schema.ts), the exact identity a
 // re-processed block range's events must collide against: the same real
 // on-chain event, re-decoded from a re-scanned range, is silently a no-op
-// here rather than a duplicate row. One statement for the whole batch
-// (never one INSERT per event - Section 28's own "avoid one DB write per
-// event" instruction), and safe to call with an empty array. Returns the
-// count actually written (a repeat call for an already-indexed range
-// returns 0, not the batch size) so callers can tell a genuine no-op run
-// apart from one that inserted nothing because the range itself was empty.
+// here rather than a duplicate row. blockHash is part of that identity
+// (not just poolId/transactionHash/logIndex): a reorg can re-include the
+// identical transaction/log-index pair on a DIFFERENT canonical block, and
+// that new, canonical event must be able to coexist with the orphaned
+// pre-reorg row (still present, only ever marked via reorgInvalidatedAt by
+// lib/onchain/volume/reorg.ts, never deleted) rather than being silently
+// dropped as if it were the same already-seen event. One statement for the
+// whole batch (never one INSERT per event - Section 28's own "avoid one DB
+// write per event" instruction), and safe to call with an empty array.
+// Returns the count actually written (a repeat call for an already-indexed
+// range returns 0, not the batch size) so callers can tell a genuine no-op
+// run apart from one that inserted nothing because the range itself was
+// empty.
 export async function recordSwapEvents(records: SwapEventRecord[]): Promise<number> {
   if (records.length === 0) return 0;
 
@@ -42,7 +49,7 @@ export async function recordSwapEvents(records: SwapEventRecord[]): Promise<numb
       })),
     )
     .onConflictDoNothing({
-      target: [swapEvents.poolId, swapEvents.transactionHash, swapEvents.logIndex],
+      target: [swapEvents.poolId, swapEvents.transactionHash, swapEvents.logIndex, swapEvents.blockHash],
     })
     .returning({ id: swapEvents.id });
 

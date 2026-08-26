@@ -58,7 +58,23 @@ export async function getLatestVolumeObservation(
 
 export interface DailyVolumePoint {
   day: Date;
+  // The authoritative sum - HIGH and MEDIUM confidence observations only
+  // (see this function's own comment for why LOW is excluded).
   volumeUsd: string;
+  // How many LOW-confidence observations this day's total excluded, and
+  // how many swaps those observations represented (pulled from their own
+  // calculationInputs.swapCount) - never silently dropped, always visible
+  // to the caller alongside the total they're excluded from.
+  excludedObservationCount: number;
+  excludedSwapCount: number;
+  // true whenever excludedObservationCount > 0 - this day's volumeUsd is a
+  // real, correct sum of what COULD be priced, but is knowingly incomplete
+  // (real swaps happened this day that contributed $0 to the total because
+  // nothing about them could be priced - see classifyVolumeConfidence,
+  // aggregate.ts). A caller rendering this as "the day's volume" must
+  // surface this flag rather than presenting an incomplete number as if it
+  // were the whole picture.
+  isPartial: boolean;
 }
 
 // Section 13's "daily/weekly/monthly ... computed FROM DeFiHub's own
@@ -74,15 +90,33 @@ export interface DailyVolumePoint {
 // why the double `AT TIME ZONE 'UTC'` is required, not decorative.
 // Reorged runs (reorgInvalidatedAt set) are excluded, matching every other
 // canonical-history read in this app.
+//
+// CodeRabbit fix round: a LOW-confidence observation (classifyVolumeConfidence,
+// aggregate.ts - every swap that run was unpriced) always has volumeUsd ==
+// "0" by construction, so including or excluding it from the SUM itself
+// makes no numeric difference. What it DOES affect is whether a caller can
+// tell "genuinely zero trading activity this day" apart from "activity
+// happened but none of it could be priced" - silently summing LOW rows in
+// with everything else made both cases look identical. LOW rows are now
+// excluded from the authoritative `volumeUsd` sum (MEDIUM rows, which DO
+// carry real partial value, are still included), and reported separately
+// via excludedObservationCount/excludedSwapCount/isPartial instead of being
+// discarded.
 export async function getDailyVolumeHistory(
   poolId: string,
   metric: "volume_usd" | "fees_usd" = "volume_usd",
 ): Promise<DailyVolumePoint[]> {
   const dayTrunc = sql`(date_trunc('day', ${historicalObservations.timestamp} AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')`;
+  const notLow = sql`${historicalObservations.confidence} is distinct from 'LOW'`;
+  const isLow = sql`${historicalObservations.confidence} = 'LOW'`;
   const rows = await db
     .select({
       day: sql<Date>`${dayTrunc}`.as("day"),
-      volumeUsd: sql<string>`sum(${historicalObservations.value})`.as("volume_usd"),
+      volumeUsd: sql<string>`coalesce(sum(${historicalObservations.value}) filter (where ${notLow}), 0)`.as("volume_usd"),
+      excludedObservationCount: sql<number>`count(*) filter (where ${isLow})`.as("excluded_observation_count"),
+      excludedSwapCount: sql<number>`coalesce(sum((${historicalObservations.calculationInputs}->>'swapCount')::int) filter (where ${isLow}), 0)`.as(
+        "excluded_swap_count",
+      ),
     })
     .from(historicalObservations)
     .where(
@@ -98,7 +132,13 @@ export async function getDailyVolumeHistory(
 
   // Same driver-string-not-Date coercion getGlobalTvlHistory's own comment
   // documents for date_trunc results.
-  return rows.map((r) => ({ day: new Date(r.day as unknown as string), volumeUsd: r.volumeUsd }));
+  return rows.map((r) => ({
+    day: new Date(r.day as unknown as string),
+    volumeUsd: r.volumeUsd,
+    excludedObservationCount: Number(r.excludedObservationCount),
+    excludedSwapCount: Number(r.excludedSwapCount),
+    isPartial: Number(r.excludedObservationCount) > 0,
+  }));
 }
 
 export interface SwapEventSummary {

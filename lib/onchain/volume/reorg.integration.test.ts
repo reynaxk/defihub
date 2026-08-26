@@ -36,8 +36,17 @@ const CALC_INPUT: VolumeCalculationInput = {
 
 describe("recheckVolumeReorgs", () => {
   const createdChainIds: string[] = [];
+  // CodeRabbit fix round: indexing_state.chainSlug is a plain varchar, NOT
+  // a foreign key to chains.id (see lib/database/schema.ts's own
+  // indexingState definition) - deleting a chains row does NOT cascade-
+  // delete the indexing_state rows recheckVolumeReorgs wrote for its slug,
+  // so they were being silently left behind after every test that actually
+  // exercised the recheck (every test but the "unsynced pool" one). Tracked
+  // here so afterEach can clean them up explicitly.
+  const createdChainSlugs: string[] = [];
 
   afterEach(async () => {
+    for (const slug of createdChainSlugs.splice(0)) await db.delete(indexingState).where(eq(indexingState.chainSlug, slug));
     for (const id of createdChainIds.splice(0)) await db.delete(chains).where(eq(chains.id, id));
   });
 
@@ -49,6 +58,7 @@ describe("recheckVolumeReorgs", () => {
     const chainSlug = `volume-reorg-test-${randomUUID()}`;
     const [chain] = await db.insert(chains).values({ name: "Volume Reorg Test Chain", slug: chainSlug, nativeToken: "TST" }).returning({ id: chains.id });
     createdChainIds.push(chain.id);
+    createdChainSlugs.push(chainSlug);
 
     const configKey = `volume-reorg-test-pool-${randomUUID()}`;
     const [pool] = await db.insert(pools).values({ configKey, chainId: chain.id, label: "Test Pool", address: `0xpool${randomUUID().slice(0, 8)}` }).returning({ id: pools.id });
@@ -154,6 +164,75 @@ describe("recheckVolumeReorgs", () => {
     });
     expect(stats?.poolsFailed).toBe(0);
     expect(stats?.swapEventsChecked).toBe(0);
+  });
+
+  it("caches a canonical block-hash read across two candidates sharing the exact same (blockNumber, blockHash) - exactly one injected readBlockHash call", async () => {
+    const { chainSlug, chainId, poolId, configKey } = await makeChainAndPool();
+    await db.insert(swapEvents).values([
+      {
+        chainId, poolId, sourceKind: "uniswap-v2", transactionHash: `0x${"55".repeat(32)}`, logIndex: 0,
+        blockNumber: "500", blockHash: HASH_A, blockTimestamp: new Date(), amount0In: "0", amount1In: "1", amount0Out: "1", amount1Out: "0",
+      },
+      {
+        chainId, poolId, sourceKind: "uniswap-v2", transactionHash: `0x${"66".repeat(32)}`, logIndex: 0,
+        blockNumber: "500", blockHash: HASH_A, blockTimestamp: new Date(), amount0In: "0", amount1In: "1", amount0Out: "1", amount1Out: "0",
+      },
+    ]);
+
+    let callCount = 0;
+    const stats = await recheckVolumeReorgs({
+      poolsOverride: [fakePool(chainSlug, configKey)],
+      readBlockHash: async () => {
+        callCount++;
+        return HASH_A;
+      },
+    });
+
+    // Both candidates are still individually verified (the stat reflects
+    // rows checked, not RPC calls made)...
+    expect(stats?.swapEventsChecked).toBe(2);
+    expect(stats?.swapEventsReorged).toBe(0);
+    // ...but the underlying read only actually happened once, for the
+    // shared (blockNumber, blockHash) pair.
+    expect(callCount).toBe(1);
+  });
+
+  it("never shares a cached result between two candidates at the same block number but DIFFERENT block hashes - each gets its own, correct classification", async () => {
+    const { chainSlug, chainId, poolId, configKey } = await makeChainAndPool();
+    await db.insert(swapEvents).values([
+      {
+        chainId, poolId, sourceKind: "uniswap-v2", transactionHash: `0x${"77".repeat(32)}`, logIndex: 0,
+        blockNumber: "600", blockHash: HASH_A, blockTimestamp: new Date(), amount0In: "0", amount1In: "1", amount0Out: "1", amount1Out: "0",
+      },
+      {
+        chainId, poolId, sourceKind: "uniswap-v2", transactionHash: `0x${"88".repeat(32)}`, logIndex: 0,
+        blockNumber: "600", blockHash: HASH_B, blockTimestamp: new Date(), amount0In: "0", amount1In: "1", amount0Out: "1", amount1Out: "0",
+      },
+    ]);
+
+    let callCount = 0;
+    // The chain's real, current hash at block 600 is HASH_A - the row
+    // stored with HASH_A is still canonical, the row stored with HASH_B
+    // was orphaned by a reorg.
+    const stats = await recheckVolumeReorgs({
+      poolsOverride: [fakePool(chainSlug, configKey)],
+      readBlockHash: async () => {
+        callCount++;
+        return HASH_A;
+      },
+    });
+
+    expect(stats?.swapEventsChecked).toBe(2);
+    // Exactly one of the two is reorged - a shared cache entry (keyed on
+    // blockNumber alone) would have wrongly classified both the same way.
+    expect(stats?.swapEventsReorged).toBe(1);
+    expect(callCount).toBe(2);
+
+    const rows = await db.select().from(swapEvents).where(eq(swapEvents.poolId, poolId));
+    const canonicalRow = rows.find((r) => r.blockHash === HASH_A);
+    const reorgedRow = rows.find((r) => r.blockHash === HASH_B);
+    expect(canonicalRow?.reorgInvalidatedAt).toBeNull();
+    expect(reorgedRow?.reorgInvalidatedAt).not.toBeNull();
   });
 
   it("uses a component-key namespace distinct from recheck-reorgs.ts's own pool cursor, so the two never share a cursor", async () => {

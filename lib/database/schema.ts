@@ -773,7 +773,22 @@ export const swapEvents = pgTable(
     // run, an overlapping cursor window) must never create a duplicate row
     // for the same real on-chain event. onConflictDoNothing targets this
     // exact index - see record-swap-events.ts.
-    uniqueIndex("swap_events_pool_tx_log_unique").on(table.poolId, table.transactionHash, table.logIndex),
+    //
+    // Includes blockHash, not just (poolId, transactionHash, logIndex): a
+    // reorg can produce a transaction with the identical hash and log index
+    // re-included on a different canonical block (same tx re-mined, or - in
+    // principle - a colliding identity across two different chain
+    // histories at the same height). Without blockHash in the identity, the
+    // new canonical row would collide with the orphaned pre-reorg row and
+    // get silently dropped by onConflictDoNothing, permanently losing the
+    // real, current swap. With blockHash included, the orphaned row (still
+    // present, now marked via reorgInvalidatedAt by lib/onchain/volume/
+    // reorg.ts) and the new canonical row coexist as two distinct rows -
+    // exactly the same reorg-safe "same block number, different chain
+    // history, different observation" identity model
+    // historical_observations already established for the exact same
+    // reason (see that table's own block-hash-identity index comment).
+    uniqueIndex("swap_events_pool_tx_log_hash_unique").on(table.poolId, table.transactionHash, table.logIndex, table.blockHash),
     // Supports both the "swaps in this block range" aggregation query and
     // the reorg-recheck's own "candidates after this cursor" query -
     // same shape as historical_observations_entity_idx's own purpose.

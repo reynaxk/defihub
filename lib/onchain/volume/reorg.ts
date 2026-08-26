@@ -1,7 +1,7 @@
 import postgres from "postgres";
 import { getObservationsNeedingRecheck, markObservationReorged } from "@/lib/database/queries/onchain-recheck";
 import { getIndexingState, updateIndexingState } from "@/lib/indexing/state";
-import { checkBlockHashStillCanonical, readBlockHashOnChain } from "@/lib/onchain/reorg";
+import { checkBlockHashStillCanonical, readBlockHashOnChain, type ReorgCheckResult } from "@/lib/onchain/reorg";
 import { logger } from "@/lib/observability/logger";
 import { withSyncRun } from "@/lib/observability/sync-run";
 import { VOLUME_SOURCE_POOLS, type VolumeSourcePool } from "./config";
@@ -75,34 +75,79 @@ export interface VolumeReorgRecheckStats {
   observationsUnknown: number;
 }
 
-// Rechecks one pool's raw swap_events - groups candidates by blockNumber
-// (never splits a block's sibling swaps across the cursor boundary, same
-// reasoning as getObservationsNeedingRecheck's own module comment), only
-// advances the cursor past a group once every sibling in it resolved
-// (confirmed or reorged, never left "unknown").
-async function recheckSwapEvents(
-  pool: VolumeSourcePool,
-  poolId: string,
-  lookbackDepth: number,
-  readBlockHash: (chainSlug: string, blockNumber: bigint) => Promise<string | null>,
-): Promise<{ checked: number; reorged: number; unknown: number }> {
-  const component = `${COMPONENT_PREFIX}:pool:${pool.key}:swap-events`;
-  const state = await getIndexingState(pool.chainSlug, component);
+// The identity every recheck candidate (a raw swap_events row, or an
+// aggregate historical_observations row) shares - both
+// SwapEventRecheckCandidate (queries.ts) and RecheckCandidate
+// (onchain-recheck.ts) already have exactly this shape.
+interface RecheckCandidateLike {
+  id: string;
+  blockNumber: bigint;
+  blockHash: string;
+}
+
+interface RecheckWorkflowResult {
+  checked: number;
+  reorged: number;
+  unknown: number;
+}
+
+// CodeRabbit fix round: recheckSwapEvents and recheckAggregateMetric
+// (below) were near-identical copies of the same cursor-load ->
+// candidate-fetch -> block-group -> canonical-check -> mark-reorged ->
+// cursor-advance workflow, differing only in WHERE candidates come from
+// and HOW a reorged one gets marked. Extracted here into one generic
+// helper, parameterized by exactly those two differences (plus the
+// operation-specific error-message text each caller already had) -
+// centralizing the actual mechanics (cursor handling, block grouping,
+// canonical-hash checks, unknown-result stop condition, cursor
+// advancement, result counting, indexing-state updates) in one place,
+// while each caller keeps its own candidate query, reorg-marking function,
+// and error text exactly as before.
+//
+// Also where the canonical block-hash read cache lives (fix for a
+// SEPARATE finding): two candidates that share the exact same
+// (blockNumber, blockHash) pair - the common case of multiple swaps or
+// multiple metrics landing on the same block - previously triggered one
+// checkBlockHashStillCanonical/readBlockHash call EACH, even though the
+// answer is identical for both. The cache is keyed on `${blockNumber}:
+// ${blockHash}` together, not blockNumber alone: two candidates that share
+// a block number but have DIFFERENT block hashes (a real, meaningful case
+// - one is the orphaned pre-reorg row, the other the new canonical row at
+// the same height, see fix #1's own schema change) must never share a
+// cached verdict, since the chain's current hash at that height can only
+// match one of them. `checked` still counts every candidate row inspected
+// (the stat this run reports is "how much data was verified," not "how
+// many RPC calls were made") - only the underlying RPC call itself is
+// deduplicated.
+async function runRecheckWorkflow<C extends RecheckCandidateLike>(params: {
+  chainSlug: string;
+  component: string;
+  loadCandidates: (cursor: bigint | null, limit: number) => Promise<C[]>;
+  markReorged: (ids: string[], invalidatedAt: Date) => Promise<void>;
+  lookbackDepth: number;
+  readBlockHash: (chainSlug: string, blockNumber: bigint) => Promise<string | null>;
+  onReorged: (candidate: C) => void;
+  errorMessagePrefix: string;
+}): Promise<RecheckWorkflowResult> {
+  const { chainSlug, component, loadCandidates, markReorged, lookbackDepth, readBlockHash, onReorged, errorMessagePrefix } = params;
+
+  const state = await getIndexingState(chainSlug, component);
   const cursor = state?.lastProcessedBlock ?? null;
 
-  const candidates = await getSwapEventsNeedingRecheck(poolId, cursor, lookbackDepth);
-  const result = { checked: 0, reorged: 0, unknown: 0 };
+  const candidates = await loadCandidates(cursor, lookbackDepth);
+  const result: RecheckWorkflowResult = { checked: 0, reorged: 0, unknown: 0 };
   if (candidates.length === 0) return result;
 
-  await updateIndexingState(pool.chainSlug, component, { status: "running", lastAttemptedSyncAt: new Date() });
+  await updateIndexingState(chainSlug, component, { status: "running", lastAttemptedSyncAt: new Date() });
 
-  const groups: { blockNumber: bigint; items: typeof candidates }[] = [];
+  const groups: { blockNumber: bigint; items: C[] }[] = [];
   for (const c of candidates) {
     const last = groups[groups.length - 1];
     if (last && last.blockNumber === c.blockNumber) last.items.push(c);
     else groups.push({ blockNumber: c.blockNumber, items: [c] });
   }
 
+  const hashCheckCache = new Map<string, Promise<ReorgCheckResult>>();
   let newCursor: bigint | null = null;
   let stoppedOnUnknown = false;
 
@@ -111,24 +156,27 @@ async function recheckSwapEvents(
     let groupHasUnknown = false;
 
     for (const candidate of group.items) {
-      const check = await checkBlockHashStillCanonical(candidate.blockNumber, candidate.blockHash, (bn) => readBlockHash(pool.chainSlug, bn));
+      const cacheKey = `${candidate.blockNumber}:${candidate.blockHash}`;
+      let checkPromise = hashCheckCache.get(cacheKey);
+      if (!checkPromise) {
+        checkPromise = checkBlockHashStillCanonical(candidate.blockNumber, candidate.blockHash, (bn) => readBlockHash(chainSlug, bn));
+        hashCheckCache.set(cacheKey, checkPromise);
+      }
+      const check = await checkPromise;
       result.checked++;
+
       if (check.status === "confirmed") continue;
       if (check.status === "reorged") {
         result.reorged++;
         reorgedIds.push(candidate.id);
-        logger.warn("volume reorg recheck: swap event no longer canonical", {
-          component: "onchain-volume-reorg-recheck",
-          pool: pool.key,
-          blockNumber: candidate.blockNumber.toString(),
-        });
+        onReorged(candidate);
         continue;
       }
       result.unknown++;
       groupHasUnknown = true;
     }
 
-    if (reorgedIds.length > 0) await markSwapEventsReorged(reorgedIds, new Date());
+    if (reorgedIds.length > 0) await markReorged(reorgedIds, new Date());
     if (groupHasUnknown) {
       stoppedOnUnknown = true;
       break;
@@ -136,9 +184,9 @@ async function recheckSwapEvents(
     newCursor = group.blockNumber;
   }
 
-  await updateIndexingState(pool.chainSlug, component, {
+  await updateIndexingState(chainSlug, component, {
     status: stoppedOnUnknown ? "error" : "idle",
-    error: stoppedOnUnknown ? "RPC read failed while rechecking swap events - will retry next run" : null,
+    error: stoppedOnUnknown ? `${errorMessagePrefix} - will retry next run` : null,
     ...(!stoppedOnUnknown ? { lastSuccessfulSyncAt: new Date() } : {}),
     ...(newCursor != null ? { lastProcessedBlock: newCursor } : {}),
   });
@@ -146,73 +194,65 @@ async function recheckSwapEvents(
   return result;
 }
 
+// Rechecks one pool's raw swap_events - see runRecheckWorkflow above for
+// the shared mechanics; this is now just its candidate query, mark
+// function, and log text.
+function recheckSwapEvents(
+  pool: VolumeSourcePool,
+  poolId: string,
+  lookbackDepth: number,
+  readBlockHash: (chainSlug: string, blockNumber: bigint) => Promise<string | null>,
+): Promise<RecheckWorkflowResult> {
+  return runRecheckWorkflow({
+    chainSlug: pool.chainSlug,
+    component: `${COMPONENT_PREFIX}:pool:${pool.key}:swap-events`,
+    loadCandidates: (cursor, limit) => getSwapEventsNeedingRecheck(poolId, cursor, limit),
+    markReorged: markSwapEventsReorged,
+    lookbackDepth,
+    readBlockHash,
+    errorMessagePrefix: "RPC read failed while rechecking swap events",
+    onReorged: (candidate) =>
+      logger.warn("volume reorg recheck: swap event no longer canonical", {
+        component: "onchain-volume-reorg-recheck",
+        pool: pool.key,
+        blockNumber: candidate.blockNumber.toString(),
+      }),
+  });
+}
+
 // Rechecks one pool's aggregate observations (volume_usd/fees_usd/
-// revenue_usd) for one metric - thin wrapper around the shared, generic
-// getObservationsNeedingRecheck/markObservationReorged query functions
-// (see this module's own header comment for why calling them directly
-// here, with this module's own cursor, is safe).
-async function recheckAggregateMetric(
+// revenue_usd) for one metric - same shared mechanics, its own candidate
+// query (the generic, entityType/metric-parameterized
+// getObservationsNeedingRecheck - see this module's own header comment for
+// why calling it directly here, with this module's own cursor, is safe)
+// and its own mark function (wrapped to the bulk shape runRecheckWorkflow
+// expects, since markObservationReorged itself only marks one row at a
+// time).
+function recheckAggregateMetric(
   pool: VolumeSourcePool,
   poolId: string,
   metric: (typeof AGGREGATE_METRICS)[number],
   lookbackDepth: number,
   readBlockHash: (chainSlug: string, blockNumber: bigint) => Promise<string | null>,
-): Promise<{ checked: number; reorged: number; unknown: number }> {
-  const component = `${COMPONENT_PREFIX}:pool:${pool.key}:${metric}`;
-  const state = await getIndexingState(pool.chainSlug, component);
-  const cursor = state?.lastProcessedBlock ?? null;
-
-  const candidates = await getObservationsNeedingRecheck("pool", poolId, metric, cursor, lookbackDepth);
-  const result = { checked: 0, reorged: 0, unknown: 0 };
-  if (candidates.length === 0) return result;
-
-  await updateIndexingState(pool.chainSlug, component, { status: "running", lastAttemptedSyncAt: new Date() });
-
-  const groups: { blockNumber: bigint; items: typeof candidates }[] = [];
-  for (const c of candidates) {
-    const last = groups[groups.length - 1];
-    if (last && last.blockNumber === c.blockNumber) last.items.push(c);
-    else groups.push({ blockNumber: c.blockNumber, items: [c] });
-  }
-
-  let newCursor: bigint | null = null;
-  let stoppedOnUnknown = false;
-
-  for (const group of groups) {
-    let groupHasUnknown = false;
-    for (const candidate of group.items) {
-      const check = await checkBlockHashStillCanonical(candidate.blockNumber, candidate.blockHash, (bn) => readBlockHash(pool.chainSlug, bn));
-      result.checked++;
-      if (check.status === "confirmed") continue;
-      if (check.status === "reorged") {
-        result.reorged++;
-        await markObservationReorged(candidate.id, new Date());
-        logger.warn("volume reorg recheck: aggregate observation no longer canonical", {
-          component: "onchain-volume-reorg-recheck",
-          pool: pool.key,
-          metric,
-          blockNumber: candidate.blockNumber.toString(),
-        });
-        continue;
-      }
-      result.unknown++;
-      groupHasUnknown = true;
-    }
-    if (groupHasUnknown) {
-      stoppedOnUnknown = true;
-      break;
-    }
-    newCursor = group.blockNumber;
-  }
-
-  await updateIndexingState(pool.chainSlug, component, {
-    status: stoppedOnUnknown ? "error" : "idle",
-    error: stoppedOnUnknown ? `RPC read failed while rechecking ${metric} - will retry next run` : null,
-    ...(!stoppedOnUnknown ? { lastSuccessfulSyncAt: new Date() } : {}),
-    ...(newCursor != null ? { lastProcessedBlock: newCursor } : {}),
+): Promise<RecheckWorkflowResult> {
+  return runRecheckWorkflow({
+    chainSlug: pool.chainSlug,
+    component: `${COMPONENT_PREFIX}:pool:${pool.key}:${metric}`,
+    loadCandidates: (cursor, limit) => getObservationsNeedingRecheck("pool", poolId, metric, cursor, limit),
+    markReorged: async (ids, invalidatedAt) => {
+      await Promise.all(ids.map((id) => markObservationReorged(id, invalidatedAt)));
+    },
+    lookbackDepth,
+    readBlockHash,
+    errorMessagePrefix: `RPC read failed while rechecking ${metric}`,
+    onReorged: (candidate) =>
+      logger.warn("volume reorg recheck: aggregate observation no longer canonical", {
+        component: "onchain-volume-reorg-recheck",
+        pool: pool.key,
+        metric,
+        blockNumber: candidate.blockNumber.toString(),
+      }),
   });
-
-  return result;
 }
 
 async function runVolumeReorgRecheck(options: VolumeReorgRecheckOptions = {}): Promise<VolumeReorgRecheckStats | null> {

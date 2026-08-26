@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
 import { chains, pools, swapEvents } from "@/lib/database/schema";
+import { getRecentSwapEvents } from "./queries";
 import { recordSwapEvents, type SwapEventRecord } from "./record-swap-events";
 import type { DecodedSwapEvent } from "./types";
 
@@ -90,6 +91,56 @@ describe("recordSwapEvents", () => {
   it("batches an empty array as a true no-op, never erroring", async () => {
     const count = await recordSwapEvents([]);
     expect(count).toBe(0);
+  });
+
+  it("lets a new canonical event coexist with its orphaned pre-reorg sibling at the same (poolId, txHash, logIndex) but a different blockHash", async () => {
+    const { chainId, poolId } = await makeChainAndPool();
+    const HASH_1 = "0x" + "11".repeat(32);
+    const HASH_2 = "0x" + "22".repeat(32);
+    const sharedIdentity = { transactionHash: "0x" + "ff".repeat(32), logIndex: 3 };
+
+    // 1. Ingest event A with block hash H1.
+    await recordSwapEvents([
+      { chainId, poolId, sourceKind: "uniswap-v2", event: baseEvent({ ...sharedIdentity, blockHash: HASH_1, amount1In: BigInt(1000000000000000) }) },
+    ]);
+
+    // 2. Invalidate/orphan event A (simulating what lib/onchain/volume/reorg.ts does on a detected reorg).
+    await db.update(swapEvents).set({ reorgInvalidatedAt: new Date() }).where(eq(swapEvents.blockHash, HASH_1));
+
+    // 3. Re-ingest the SAME transaction/log identity, now on a different canonical block hash H2 -
+    // the exact scenario a reorg produces (the tx got re-mined into a different block).
+    const secondCount = await recordSwapEvents([
+      { chainId, poolId, sourceKind: "uniswap-v2", event: baseEvent({ ...sharedIdentity, blockHash: HASH_2, amount1In: BigInt(2000000000000000) }) },
+    ]);
+
+    // 4. Verify canonical event H2 is stored - NOT silently dropped as a
+    // duplicate of the orphaned H1 row (which the OLD 3-column identity
+    // would have done).
+    expect(secondCount).toBe(1);
+    const allRows = await db.select().from(swapEvents).where(eq(swapEvents.poolId, poolId));
+    expect(allRows).toHaveLength(2);
+    const canonicalRow = allRows.find((r) => r.blockHash === HASH_2);
+    const orphanedRow = allRows.find((r) => r.blockHash === HASH_1);
+    expect(canonicalRow?.reorgInvalidatedAt).toBeNull();
+    expect(canonicalRow?.amount1In).toBe("2000000000000000");
+    expect(orphanedRow?.reorgInvalidatedAt).not.toBeNull();
+
+    // 5. Verify H2 contributes to aggregate calculations - getRecentSwapEvents
+    // (the canonical-only read every aggregate calculation is built from)
+    // returns ONLY the canonical H2 event, excluding the orphaned H1 one.
+    const canonical = await getRecentSwapEvents(poolId, 10);
+    expect(canonical).toHaveLength(1);
+    expect(canonical[0].amount1In).toBe("2000000000000000");
+  });
+
+  it("still idempotently no-ops a repeat insert of the exact same (poolId, txHash, logIndex, blockHash) - reorg-safety does not weaken normal dedup", async () => {
+    const { chainId, poolId } = await makeChainAndPool();
+    const record: SwapEventRecord = { chainId, poolId, sourceKind: "uniswap-v2", event: baseEvent() };
+    await recordSwapEvents([record]);
+    const second = await recordSwapEvents([record]);
+    expect(second).toBe(0);
+    const rows = await db.select().from(swapEvents).where(eq(swapEvents.poolId, poolId));
+    expect(rows).toHaveLength(1);
   });
 
   it("inserts a whole batch in one call, not one write per event", async () => {

@@ -34,13 +34,21 @@ export interface VolumeObservationRecord {
   confidence: "HIGH" | "MEDIUM" | "LOW";
 }
 
-export type VolumeObservationWriteOutcome = "written" | "skipped-invalid-hash";
+// "written" and "duplicate-ignored" are both non-error outcomes (a
+// duplicate is expected, idempotent-correct behavior on a retried run -
+// see this file's own conflict target comment), but they are NOT the same
+// fact: a caller that needs to know whether a row genuinely landed just
+// now (e.g. to decide whether to also update something conditioned on a
+// fresh write) must be able to tell them apart, the same way
+// recordSwapEvents' own returned count already distinguishes "0 inserted"
+// from "N inserted" rather than collapsing both into a bare success/fail.
+export type VolumeObservationWriteOutcome = "written" | "duplicate-ignored" | "skipped-invalid-hash";
 
 export async function recordVolumeObservation(record: VolumeObservationRecord): Promise<VolumeObservationWriteOutcome> {
   const hasValidBlockHash = record.blockHash != null && VALID_BLOCK_HASH.test(record.blockHash);
   if (!hasValidBlockHash) return "skipped-invalid-hash";
 
-  await db
+  const rows = await db
     .insert(historicalObservations)
     .values({
       chainId: record.chainId,
@@ -66,7 +74,13 @@ export async function recordVolumeObservation(record: VolumeObservationRecord): 
         historicalObservations.blockHash,
       ],
       where: sql`${historicalObservations.blockNumber} is not null and ${historicalObservations.blockHash} is not null`,
-    });
+    })
+    .returning({ id: historicalObservations.id });
 
-  return "written";
+  // onConflictDoNothing suppresses the insert without erroring - `rows` is
+  // only non-empty when a row was genuinely written this call. Previously
+  // this function returned "written" unconditionally whenever the hash was
+  // valid, even when the conflict silently suppressed the insert - a real
+  // duplicate write was indistinguishable from a genuine one.
+  return rows.length > 0 ? "written" : "duplicate-ignored";
 }

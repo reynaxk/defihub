@@ -17,7 +17,13 @@ import { getLatestVolumeObservation, getPoolIdByConfigKey } from "./volume/queri
 // foundation only - no API route, no frontend page, per Section 29's own
 // "do NOT build the flashy frontend yet."
 export type CoverageMetricKind = "tvl_usd" | "price_usd" | "volume_usd" | "fees_usd" | "revenue_usd";
-export type CoverageSourceLabel = "NATIVE" | "EXTERNAL" | "HYBRID";
+// UNSUPPORTED: architecturally implemented but not currently producing a
+// real observation for this pool (e.g. revenue_usd when no revenue_usd row
+// has ever been written - see getVolumeCoverage below). Never NATIVE
+// without a real observation backing it - the source/provenance contract
+// this whole registry exists to uphold (Section 12/38's "never mislabel
+// unsupported as supported").
+export type CoverageSourceLabel = "NATIVE" | "EXTERNAL" | "HYBRID" | "UNSUPPORTED";
 
 export interface StaticCoverageEntry {
   chainSlug: string;
@@ -99,13 +105,17 @@ export async function getVolumeCoverage(pools = VOLUME_SOURCE_POOLS): Promise<Vo
       chainSlug: pool.chainSlug,
       protocolKey: pool.key,
       metric: "revenue_usd",
-      // Revenue is architecturally native (readV2ProtocolFeeState/
-      // resolveProtocolRevenue, lib/onchain/volume/protocol-fee.ts) but not
-      // reliably computable for every deployment - see that module's own
-      // header comment. Reported here as native only once at least one
-      // real revenue_usd observation exists; otherwise flagged as a known
-      // limitation rather than silently listed as "supported."
-      source: "NATIVE",
+      // Revenue is architecturally native (readV2ProtocolFeeStateAcrossRange/
+      // resolveProtocolRevenueForRange, lib/onchain/volume/protocol-fee.ts)
+      // but not reliably computable for every deployment - see that
+      // module's own header comment. NATIVE only when a real revenue_usd
+      // observation actually exists (revenueObs != null) - a pool whose
+      // protocol-fee switch is active (so no revenue_usd row has ever been
+      // written for it - see engine.ts) must never be reported as
+      // supporting native revenue just because the architecture exists;
+      // that would violate this registry's whole reason for existing (never
+      // claim coverage this app didn't actually produce).
+      source: revenueObs != null ? "NATIVE" : "UNSUPPORTED",
       lastIndexedBlock,
       lastObservationAt: revenueObs?.timestamp ?? null,
       lastObservationValueUsd: revenueObs?.value ?? null,

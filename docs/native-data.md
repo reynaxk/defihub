@@ -804,6 +804,140 @@ above the `MEDIUM` confidence bar. See
 [Known limitations](#known-limitations) below for the complete, honest
 accounting.
 
+## Native volume/fee/revenue engine (Phase 5.4)
+
+Phase 5.3 answered "what is this pool worth" from DeFiHub's own on-chain
+reads. Phase 5.4 answers a genuinely different question - "how much trading
+actually happened here, and what did it cost/earn" - from the same
+discipline: decode real `Swap` events, compute USD values from Phase 5.3's
+own already-verified prices, and never claim a number this app didn't
+actually derive from the chain.
+
+### Coverage: exactly one adapter, one pool, on purpose
+
+`lib/onchain/volume/config.ts`'s `VOLUME_SOURCE_POOLS` has exactly one real
+entry: the same Uniswap V2 USDC/WETH pool already verified in
+`VERIFIED_POOLS` and already reused as a price source in `REFERENCE_ASSETS`
+(the pool address is confirmed identical across all three config files, not
+re-derived). One adapter (`lib/onchain/volume/uniswap-v2.ts`), one protocol
+shape, reused rather than generalized prematurely - see this task's own
+priority order (a reusable event-indexing *foundation* first, breadth
+later).
+
+### Volume: input-side-only, never double-counted
+
+`computeSwapVolumeUsd` (`uniswap-v2.ts`) prices the USD value of a swap's
+INPUT side(s) only - never `token0 USD + token1 USD`, which would count the
+same economic trade twice. Live sampling during development (100 real
+blocks, 24 real swaps) found zero dual-input swaps - the rare dual-input
+case (both `amount0In`/`amount1In` nonzero in one event) is still handled by
+summing both input sides once each, not treated as two separate trades.
+
+### Fees vs. revenue: two different numbers, on purpose
+
+`computeSwapFeeUsd` applies the pool's own **verified** fee (30 bps for a
+genuine, factory-deployed Uniswap V2 pair - trusted because the pair's own
+`factory()` call was confirmed to match the real Uniswap V2 Factory address,
+never a hardcoded global assumption for every V2-shaped pool). This is the
+**LP trading fee** - what liquidity providers earn - not protocol revenue.
+
+Protocol revenue (`lib/onchain/volume/protocol-fee.ts`) is a different,
+harder question: Uniswap V2's protocol-fee switch (`factory.feeTo()`) only
+mints new LP shares to a fee recipient at the next `Mint`/`Burn` call,
+proportional to `sqrt(k)` growth since the last liquidity event - not a
+simple percentage of volume. This phase reads `feeTo()` live and reports
+exactly two honest outcomes: `feeTo() == 0x0` → revenue is **verifiably,
+exactly zero** (a direct on-chain fact); `feeTo() != 0x0` → revenue is
+**unavailable**, with the reason stated, because computing the realized
+amount requires tracking every `Mint`/`Burn` event plus the pool's `kLast`
+state - not implemented this phase. Live-verified fact: this phase's one
+configured pool has an **active** fee switch, so its revenue is reported as
+unavailable, not fabricated as `volume × some fraction`.
+
+### Raw events vs. aggregate observations - two tables, two purposes
+
+`swap_events` (new table) stores one row per real on-chain `Swap` event -
+raw amounts, block/tx identity, **zero USD or price data** - so the raw
+truth survives a pricing failure untouched (Section 22's "preserve raw
+amounts" applies at the row level). Idempotency key: unique on `(poolId,
+transactionHash, logIndex)`. Aggregate `volume_usd`/`fees_usd`/`revenue_usd`
+figures reuse `historical_observations` (entityType `"pool"`, same table
+`tvl_usd` already uses) - one row per indexing run per metric, pinned to the
+block/hash of the last swap actually observed that run (not the scanned
+range's technical upper bound), with a new `VolumeCalculationInput` shape in
+`calculation_inputs` (from-block/to-block, swap counts, priced vs. unpriced
+counts, both tokens' price and source). A run where every swap primes
+cleanly is `HIGH` confidence; a run where none did is `LOW`; mixed is
+`MEDIUM` - reusing `historical_observations.confidence` for this metric
+family (see `classifyVolumeConfidence`, `aggregate.ts`) rather than
+inventing a parallel column.
+
+### Event indexing: the existing foundation, extended
+
+`workers/onchain/volume.ts` calls the exact same `scanFromCursor` primitive
+`lib/indexing/events.ts` already provided (Phase 5's own foundation-only
+scope) - same checkpoint-based resumability, same confirmation-depth safety.
+Two real-world constraints discovered live against this app's default
+free-tier RPC (`ethereum-rpc.publicnode.com`), both handled explicitly
+rather than papered over:
+
+- **Per-call range size**: `eth_getLogs` calls succeed up to roughly 90-94
+  blocks and fail above that - well below `lib/indexing/events.ts`'s own
+  2000-block default. The volume indexer passes its own explicit,
+  conservative `chunkSize` (50) rather than relying on that default.
+- **Depth from the current chain head**: separately, and more surprisingly,
+  this provider's free tier does not serve `eth_getLogs` for *any* block
+  more than roughly 100-110 blocks behind the current chain head at all -
+  confirmed by testing single-block ranges at increasing depth. This means
+  a fixed, config-time `startBlock` becomes unreachable through this
+  provider within about 20 minutes of being chosen. `effectiveStartBlock`
+  (`engine.ts`) fixes this: the first-ever scan for a pool starts from
+  whichever is more recent of the configured `startBlock` and "current head
+  minus a safe lookback window" - never further back than the provider can
+  actually serve, regardless of how stale the config value has become.
+  Once a real cursor exists this has no effect; a pool that has already
+  begun indexing just keeps advancing from its own position.
+
+### Idempotency and reorg safety
+
+Every write in this module is `onConflictDoNothing` against a deterministic
+identity - `(poolId, transactionHash, logIndex)` for raw events, the same
+`(entityType, entityId, metric, blockNumber, blockHash)` partial unique
+index every other `historical_observations` writer already uses for
+aggregates - so a re-scanned range (a retried run, a restarted worker) never
+double-counts. `lib/onchain/volume/reorg.ts` is a **separate, dedicated**
+recheck path, not a fourth generalization of
+`workers/onchain/recheck-reorgs.ts`'s existing pool/vault/token machinery -
+see that file's own header comment for the specific reason: the existing
+job's cursor key doesn't include `metric`, which is safe today (one metric
+per entity type) but would silently collide two independent cursors
+(`tvl_usd` and `volume_usd` for the same pool) if reused as-is. Rather than
+changing a shared, already-shipped function's cursor semantics, this module
+reuses only the true leaf primitives
+(`checkBlockHashStillCanonical`/`readBlockHashOnChain`,
+`getObservationsNeedingRecheck`/`markObservationReorged`) under its own
+metric-inclusive component-key namespace.
+
+**Known gap, stated rather than hidden**: a reorg landing in the *middle* of
+an already-aggregated block range (not touching that range's own last
+block) does not automatically trigger recomputation of that aggregate
+observation this phase - only the pinned block/hash itself is rechecked.
+The underlying raw `swap_events` for that range ARE independently rechecked
+and marked if reorged, so the discrepancy is detectable by comparing raw
+events against the aggregate figure, just not auto-repaired yet.
+
+### What this is not
+
+Not volume/fees/revenue for any protocol beyond one Uniswap V2 pool, not
+Uniswap V3 (the existing V3 verified pool has no volume adapter this phase -
+V2 was finished completely first, per this task's own priority order,
+rather than shipping two partial adapters), not a public coverage page (the
+coverage registry - `lib/onchain/coverage.ts` - is backend-only, a
+foundation for one, per this task's own explicit scope), and not a
+historical backfill (indexing starts from a recent block, the same
+"foundation, not a shipped indexer" boundary Phase 4/5.1's own event
+primitives already established).
+
 ## Known limitations
 
 - Six verified pools across five chains, plus two verified ERC-4626 vaults
@@ -856,3 +990,23 @@ accounting.
   have no block-hash provenance at all - `onchain_verifications` has no
   `blockHash` column - so they remain outside this recheck's coverage; see
   `recheck-reorgs.ts`'s own module comment.
+- **Volume/fees/revenue (Phase 5.4) cover exactly one pool** - the Uniswap
+  V2 USDC/WETH pair on Ethereum. See
+  [Native volume/fee/revenue engine (Phase 5.4)](#native-volumefeerevenue-engine-phase-54)
+  above for the full picture, including why revenue is reported as
+  unavailable for that one pool specifically (its protocol-fee switch is
+  live and active, and this phase does not implement the `Mint`/`Burn` +
+  `kLast` tracking a nonzero-`feeTo()` deployment requires).
+- **No Uniswap V3 volume** - the existing verified V3 pool
+  (`uniswap-v3-eth-usdc-weth-005` in `VERIFIED_POOLS`) has TVL coverage from
+  Phase 4/5 but no volume/fee adapter; V3's concentrated-liquidity swap math
+  is a genuinely different calculation from V2's constant-product model, out
+  of scope for this phase rather than approximated.
+- **A mid-range reorg does not auto-recompute an already-written aggregate
+  observation** - see this phase's own "Idempotency and reorg safety"
+  section above for the exact gap and why the underlying raw events remain
+  independently checkable in the meantime.
+- **No lending-protocol fee/interest accounting** - the "never a generic
+  guessing adapter" boundary this task itself sets; a lending market's
+  supply/borrow-rate-driven interest is a different accounting model than a
+  swap-fee-based one and isn't attempted here.

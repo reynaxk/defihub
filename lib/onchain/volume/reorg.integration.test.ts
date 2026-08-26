@@ -1,0 +1,174 @@
+// Real-Postgres integration tests for lib/onchain/volume/reorg.ts - same
+// "create real rows, inject readBlockHash, assert on real DB state"
+// pattern as workers/onchain/recheck-reorgs.test.ts, scoped down: this
+// module has exactly one entity shape (one pool's swap_events plus its
+// three aggregate metrics) rather than that job's three entity types, so
+// the scenario matrix is smaller. Advisory-lock contention itself
+// (pg_try_advisory_lock returning false when another invocation already
+// holds it) is NOT re-tested here - that raw Postgres mechanism is an
+// unmodified copy of recheck-reorgs.ts's own already-tested pattern (see
+// this module's own header comment for why it's a separate module at all),
+// and re-proving generic advisory-lock semantics a second time would not
+// catch anything specific to this module's own logic.
+import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { closeDb, db } from "@/lib/database/client";
+import { chains, historicalObservations, indexingState, pools, swapEvents, type VolumeCalculationInput } from "@/lib/database/schema";
+import type { VolumeSourcePool } from "./config";
+import { recheckVolumeReorgs } from "./reorg";
+
+const HASH_A = `0x${"a".repeat(64)}`;
+const HASH_B = `0x${"b".repeat(64)}`;
+
+const CALC_INPUT: VolumeCalculationInput = {
+  eventType: "Swap",
+  sourceContract: "0xpool",
+  sourceChainSlug: "ethereum",
+  fromBlock: "1",
+  toBlock: "2",
+  swapCount: 1,
+  pricedSwapCount: 1,
+  unpricedSwapCount: 0,
+  token0: { symbol: "USDC", coingeckoId: "usd-coin", decimals: 6, priceUsd: "1.00", priceSource: "onchain-pricing-engine" },
+  token1: { symbol: "WETH", coingeckoId: "weth", decimals: 18, priceUsd: "2500.00", priceSource: "onchain-pricing-engine" },
+};
+
+describe("recheckVolumeReorgs", () => {
+  const createdChainIds: string[] = [];
+
+  afterEach(async () => {
+    for (const id of createdChainIds.splice(0)) await db.delete(chains).where(eq(chains.id, id));
+  });
+
+  afterAll(async () => {
+    await closeDb();
+  });
+
+  async function makeChainAndPool(): Promise<{ chainSlug: string; poolId: string; configKey: string; chainId: string }> {
+    const chainSlug = `volume-reorg-test-${randomUUID()}`;
+    const [chain] = await db.insert(chains).values({ name: "Volume Reorg Test Chain", slug: chainSlug, nativeToken: "TST" }).returning({ id: chains.id });
+    createdChainIds.push(chain.id);
+
+    const configKey = `volume-reorg-test-pool-${randomUUID()}`;
+    const [pool] = await db.insert(pools).values({ configKey, chainId: chain.id, label: "Test Pool", address: `0xpool${randomUUID().slice(0, 8)}` }).returning({ id: pools.id });
+
+    return { chainSlug, poolId: pool.id, configKey, chainId: chain.id };
+  }
+
+  function fakePool(chainSlug: string, configKey: string): VolumeSourcePool {
+    return {
+      key: configKey,
+      chainSlug,
+      poolAddress: "0xpool",
+      sourceKind: "uniswap-v2",
+      token0: { address: "0xusdc", symbol: "USDC", decimals: 6, coingeckoId: "usd-coin" },
+      token1: { address: "0xweth", symbol: "WETH", decimals: 18, coingeckoId: "weth" },
+      factoryAddress: "0xfactory",
+      feeBps: 30,
+      feeVerification: "test",
+      startBlock: BigInt(1),
+    };
+  }
+
+  it("leaves canonical swap events and observations untouched, and advances both cursors", async () => {
+    const { chainSlug, chainId, poolId, configKey } = await makeChainAndPool();
+    await db.insert(swapEvents).values({
+      chainId, poolId, sourceKind: "uniswap-v2", transactionHash: `0x${"11".repeat(32)}`, logIndex: 0,
+      blockNumber: "100", blockHash: HASH_A, blockTimestamp: new Date(), amount0In: "0", amount1In: "1", amount0Out: "1", amount1Out: "0",
+    });
+    await db.insert(historicalObservations).values({
+      chainId, entityType: "pool", entityId: poolId, metric: "volume_usd", value: "1000", timestamp: new Date(),
+      blockNumber: "100", blockHash: HASH_A, calculationInputs: CALC_INPUT, source: "onchain-volume-engine", confidence: "HIGH", priceLabel: "ONCHAIN_NATIVE",
+    });
+
+    const stats = await recheckVolumeReorgs({ poolsOverride: [fakePool(chainSlug, configKey)], readBlockHash: async () => HASH_A });
+
+    expect(stats?.swapEventsReorged).toBe(0);
+    expect(stats?.observationsReorged).toBe(0);
+    expect(stats?.swapEventsChecked).toBe(1);
+    expect(stats?.observationsChecked).toBe(1);
+
+    const [swap] = await db.select().from(swapEvents).where(eq(swapEvents.poolId, poolId));
+    expect(swap.reorgInvalidatedAt).toBeNull();
+
+    const swapState = await db.select().from(indexingState).where(eq(indexingState.component, `volume-reorg-recheck:pool:${configKey}:swap-events`));
+    expect(swapState[0]?.status).toBe("idle");
+    expect(swapState[0]?.lastProcessedBlock).toBe("100");
+  });
+
+  it("marks a swap event AND its pool's aggregate observation reorg-invalidated when the chain no longer matches - without deleting either row", async () => {
+    const { chainSlug, chainId, poolId, configKey } = await makeChainAndPool();
+    await db.insert(swapEvents).values({
+      chainId, poolId, sourceKind: "uniswap-v2", transactionHash: `0x${"22".repeat(32)}`, logIndex: 0,
+      blockNumber: "200", blockHash: HASH_A, blockTimestamp: new Date(), amount0In: "0", amount1In: "1", amount0Out: "1", amount1Out: "0",
+    });
+    await db.insert(historicalObservations).values({
+      chainId, entityType: "pool", entityId: poolId, metric: "fees_usd", value: "3", timestamp: new Date(),
+      blockNumber: "200", blockHash: HASH_A, calculationInputs: CALC_INPUT, source: "onchain-volume-engine", confidence: "HIGH", priceLabel: "ONCHAIN_NATIVE",
+    });
+
+    const stats = await recheckVolumeReorgs({ poolsOverride: [fakePool(chainSlug, configKey)], readBlockHash: async () => HASH_B });
+
+    expect(stats?.swapEventsReorged).toBe(1);
+    expect(stats?.observationsReorged).toBe(1);
+
+    const [swap] = await db.select().from(swapEvents).where(eq(swapEvents.poolId, poolId));
+    expect(swap.reorgInvalidatedAt).not.toBeNull();
+    // Every other field is untouched - not deleted, not rewritten.
+    expect(swap.amount1In).toBe("1");
+    expect(swap.blockHash).toBe(HASH_A);
+
+    const [obs] = await db.select().from(historicalObservations).where(eq(historicalObservations.entityId, poolId));
+    expect(obs.reorgInvalidatedAt).not.toBeNull();
+    expect(obs.value).toBe("3.00000000");
+  });
+
+  it("does not advance the cursor past a block it could not resolve (readBlockHash failure), so it is retried next run", async () => {
+    const { chainSlug, chainId, poolId, configKey } = await makeChainAndPool();
+    await db.insert(swapEvents).values({
+      chainId, poolId, sourceKind: "uniswap-v2", transactionHash: `0x${"33".repeat(32)}`, logIndex: 0,
+      blockNumber: "300", blockHash: HASH_A, blockTimestamp: new Date(), amount0In: "0", amount1In: "1", amount0Out: "1", amount1Out: "0",
+    });
+
+    const stats = await recheckVolumeReorgs({
+      poolsOverride: [fakePool(chainSlug, configKey)],
+      readBlockHash: async () => {
+        throw new Error("RPC down");
+      },
+    });
+
+    expect(stats?.swapEventsUnknown).toBe(1);
+    const [swap] = await db.select().from(swapEvents).where(eq(swapEvents.poolId, poolId));
+    expect(swap.reorgInvalidatedAt).toBeNull(); // never guessed as reorged from a failed read
+
+    const swapState = await db.select().from(indexingState).where(eq(indexingState.component, `volume-reorg-recheck:pool:${configKey}:swap-events`));
+    expect(swapState[0]?.status).toBe("error");
+    expect(swapState[0]?.lastProcessedBlock).toBeNull(); // cursor never advanced past the unresolved block
+  });
+
+  it("skips a pool that has not been synced into `pools` yet without failing the run", async () => {
+    const stats = await recheckVolumeReorgs({
+      poolsOverride: [fakePool("volume-reorg-unsynced-chain", "volume-reorg-unsynced-pool")],
+      readBlockHash: async () => HASH_A,
+    });
+    expect(stats?.poolsFailed).toBe(0);
+    expect(stats?.swapEventsChecked).toBe(0);
+  });
+
+  it("uses a component-key namespace distinct from recheck-reorgs.ts's own pool cursor, so the two never share a cursor", async () => {
+    const { chainSlug, chainId, poolId, configKey } = await makeChainAndPool();
+    await db.insert(swapEvents).values({
+      chainId, poolId, sourceKind: "uniswap-v2", transactionHash: `0x${"44".repeat(32)}`, logIndex: 0,
+      blockNumber: "400", blockHash: HASH_A, blockTimestamp: new Date(), amount0In: "0", amount1In: "1", amount0Out: "1", amount1Out: "0",
+    });
+
+    await recheckVolumeReorgs({ poolsOverride: [fakePool(chainSlug, configKey)], readBlockHash: async () => HASH_A });
+
+    const rows = await db.select({ component: indexingState.component }).from(indexingState).where(eq(indexingState.chainSlug, chainSlug));
+    for (const row of rows) {
+      expect(row.component).toMatch(/^volume-reorg-recheck:pool:/);
+      expect(row.component).not.toBe(`reorg-recheck:pool:${configKey}`);
+    }
+  });
+});

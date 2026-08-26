@@ -43,6 +43,8 @@ const KNOWN_WORKERS = [
   "alerts",
   "onchain",
   "onchain-price",
+  "onchain-volume",
+  "onchain-volume-reorg-recheck",
   "rollup-metrics",
 ];
 

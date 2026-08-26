@@ -426,6 +426,22 @@ export interface HistoricalObservationCalculationInput {
   // storing this as `number` would round the "input" half of the
   // provenance record even where the calculation itself stayed exact.
   priceUsd: string;
+  // Phase 5.3: present only when this token's priceUsd above came from the
+  // on-chain reference-asset pricing engine (lib/onchain/pricing/) rather
+  // than the external price provider - see
+  // lib/onchain/pricing/tvl-integration.ts's resolveNativePriceOverrides,
+  // whose own NativePriceOverride shape this mirrors exactly, and
+  // verify-pool.ts's verifyAllPools, which attaches it per-token right
+  // before persisting. Optional/additive: a CoinGecko-priced token (the
+  // overwhelming majority, and every token in every pre-Phase-5.3 row)
+  // simply omits this field - never fabricated, never backfilled onto a
+  // token that wasn't actually natively priced.
+  nativePriceProvenance?: {
+    sources: PriceSourceObservation[];
+    observedAt: string; // ISO string - jsonb has no native Date type
+    blockNumber: number | null;
+    blockHash: string | null;
+  };
 }
 
 // Phase 5.3: the per-source snapshot behind one on-chain-derived token price

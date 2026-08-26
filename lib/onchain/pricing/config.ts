@@ -90,11 +90,11 @@ export const REFERENCE_ASSETS: ReferenceAsset[] = [
         // Uniswap V2 USDC/WETH - the EXACT same pool address already
         // verified and live in VERIFIED_POOLS as "uniswap-v2-eth-usdc-weth"
         // (lib/onchain/config.ts), reused here rather than re-verified from
-        // scratch. Independently re-confirmed live on-chain for this phase,
-        // 2026-08-26: factory.getPair(USDC, WETH) on the real Uniswap V2
-        // Factory (0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f) returns this
-        // exact address; token0()/token1() on it return USDC/WETH in that
-        // order, matching this entry and weth-ethereum's own pairing below.
+        // scratch. Independently re-confirmed live on-chain for this phase:
+        // factory.getPair(USDC, WETH) on the real Uniswap V2 Factory
+        // (0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f) returns this exact
+        // address; token0()/token1() on it return USDC/WETH in that order,
+        // matching this entry and weth-ethereum's own pairing below.
         poolAddress: "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc",
         dexKind: "uniswap-v2",
         pairedWithKey: "usdc-ethereum",
@@ -111,7 +111,7 @@ export const REFERENCE_ASSETS: ReferenceAsset[] = [
     kind: "derived",
     sourcePools: [
       {
-        // Uniswap V2 USDC/USDT. Verified live on-chain, 2026-08-26: same
+        // Uniswap V2 USDC/USDT. Verified live on-chain, same
         // factory.getPair() method as above; token0()/token1() return
         // USDC/USDT in that order. At verification time the pool's own
         // reserves (~1.6657M USDC vs ~1.6681M USDT) implied USDT trading at
@@ -134,7 +134,7 @@ export const REFERENCE_ASSETS: ReferenceAsset[] = [
     kind: "derived",
     sourcePools: [
       {
-        // Uniswap V2 DAI/USDC. Verified live on-chain, 2026-08-26:
+        // Uniswap V2 DAI/USDC. Verified live on-chain:
         // factory.getPair(DAI, USDC); token0()/token1() return DAI/USDC in
         // that order. Reserves at verification time (~544,776 DAI vs
         // ~544,068 USDC) implied DAI trading slightly above USDC - again a
@@ -159,7 +159,7 @@ export const REFERENCE_ASSETS: ReferenceAsset[] = [
     // and reject if it were ever accidentally made circular.
     sourcePools: [
       {
-        // Uniswap V2 WBTC/WETH. Verified live on-chain, 2026-08-26:
+        // Uniswap V2 WBTC/WETH. Verified live on-chain:
         // factory.getPair(WBTC, WETH); token0()/token1() return WBTC/WETH
         // in that order. Reserves at verification time (~54.66 WBTC vs
         // ~1758.76 WETH) implied ~32.17 WETH per WBTC.

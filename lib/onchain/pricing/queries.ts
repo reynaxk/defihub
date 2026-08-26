@@ -1,6 +1,7 @@
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, historicalObservations, tokens, type PriceSourceObservation } from "@/lib/database/schema";
+import { PRICING_THRESHOLDS } from "./aggregate";
 import type { PriceConfidence, PriceLabel } from "./types";
 
 export interface NativeTokenPrice {
@@ -61,4 +62,20 @@ export async function getNativeTokenPrice(chainSlug: string, address: string): P
     // comment on why the column allows two shapes).
     sources: (row.calculationInputs as PriceSourceObservation[] | null) ?? [],
   };
+}
+
+// Whether a native token price is recent enough to still be trusted for a
+// decision made "right now" (e.g. lib/onchain/pricing/tvl-integration.ts's
+// TVL override) - a genuinely different question from confidence, which
+// says how *well-corroborated* a price was at observation time, not how
+// long ago that was. Deliberately keyed off the observation's own
+// `observedAt` timestamp, never blockNumber: block numbers aren't
+// comparable across chains and don't map to wall-clock time at all, so
+// they can't answer "is this too old to use right now." `now` is injected
+// (not `new Date()` internally) so this stays deterministically testable
+// without faking the system clock - the same convention
+// aggregate.ts's aggregatePrices already established for its own
+// staleness check.
+export function isNativeTokenPriceFresh(observedAt: Date, now: Date): boolean {
+  return now.getTime() - observedAt.getTime() <= PRICING_THRESHOLDS.MAX_NATIVE_PRICE_AGE_FOR_TVL_MS;
 }

@@ -1,13 +1,16 @@
-// Pure unit tests for priceSourceForTokens - the deterministic policy
-// deciding how a pool's historical_observations.priceSource should be
-// tagged given which of its tokens got a native price override this run.
+// Pure unit tests for priceSourceForTokens and isNativePriceEligibleForTvl -
+// the deterministic policy pieces behind TVL source selection.
 // resolveNativePriceOverrides itself is not unit-tested here, matching this
 // codebase's established convention that an orchestration function
 // composing a DB read (getNativeTokenPrice, covered by
 // queries.integration.test.ts) with config isn't directly unit-tested, only
-// its pure decision logic is.
+// its pure decision logic is - isNativePriceEligibleForTvl was extracted
+// specifically to be that pure decision.
 import { describe, expect, it } from "vitest";
-import { priceSourceForTokens } from "./tvl-integration";
+import { isNativePriceEligibleForTvl, priceSourceForTokens } from "./tvl-integration";
+import { PRICING_THRESHOLDS } from "./aggregate";
+
+const NOW = new Date("2026-08-26T12:00:00.000Z");
 
 describe("priceSourceForTokens", () => {
   it("tags a pool as onchain-pricing-engine when every one of its tokens was natively priced this run - native price", () => {
@@ -29,5 +32,43 @@ describe("priceSourceForTokens", () => {
 
   it("falls back to the external provider name for a pool with no tokens at all (unreachable in practice, never throws)", () => {
     expect(priceSourceForTokens([], new Set(), "coingecko")).toBe("coingecko");
+  });
+});
+
+describe("isNativePriceEligibleForTvl", () => {
+  it("accepts a fresh HIGH-confidence native price", () => {
+    expect(isNativePriceEligibleForTvl("HIGH", NOW, NOW)).toBe(true);
+  });
+
+  it("accepts a fresh MEDIUM-confidence native price", () => {
+    expect(isNativePriceEligibleForTvl("MEDIUM", NOW, NOW)).toBe(true);
+  });
+
+  it("rejects a stale HIGH-confidence native price - falls back to the external price", () => {
+    const staleObservedAt = new Date(NOW.getTime() - (PRICING_THRESHOLDS.MAX_NATIVE_PRICE_AGE_FOR_TVL_MS + 60_000));
+    expect(isNativePriceEligibleForTvl("HIGH", staleObservedAt, NOW)).toBe(false);
+  });
+
+  it("rejects a stale MEDIUM-confidence native price - falls back to the external price", () => {
+    const staleObservedAt = new Date(NOW.getTime() - (PRICING_THRESHOLDS.MAX_NATIVE_PRICE_AGE_FOR_TVL_MS + 60_000));
+    expect(isNativePriceEligibleForTvl("MEDIUM", staleObservedAt, NOW)).toBe(false);
+  });
+
+  it("rejects a fresh LOW-confidence native price - confidence and freshness are both required, independently", () => {
+    expect(isNativePriceEligibleForTvl("LOW", NOW, NOW)).toBe(false);
+  });
+
+  it("rejects a fresh INVALID-confidence native price", () => {
+    expect(isNativePriceEligibleForTvl("INVALID", NOW, NOW)).toBe(false);
+  });
+
+  it("accepts a price observed exactly at the freshness boundary (inclusive)", () => {
+    const boundaryObservedAt = new Date(NOW.getTime() - PRICING_THRESHOLDS.MAX_NATIVE_PRICE_AGE_FOR_TVL_MS);
+    expect(isNativePriceEligibleForTvl("HIGH", boundaryObservedAt, NOW)).toBe(true);
+  });
+
+  it("rejects a price observed one millisecond past the freshness boundary", () => {
+    const justPastBoundary = new Date(NOW.getTime() - PRICING_THRESHOLDS.MAX_NATIVE_PRICE_AGE_FOR_TVL_MS - 1);
+    expect(isNativePriceEligibleForTvl("HIGH", justPastBoundary, NOW)).toBe(false);
   });
 });

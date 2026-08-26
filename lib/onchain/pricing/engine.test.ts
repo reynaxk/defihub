@@ -30,9 +30,39 @@ const weth: ReferenceAsset = {
   sourcePools: [{ poolAddress: "0xpool1", dexKind: "uniswap-v2", pairedWithKey: "usdc-test" }],
 };
 
+// A second reference asset used only by the multi-source tests below - not
+// itself resolvable (no entry in resolvedPriceByKey), so any source pairing
+// against it exercises the "unresolved dependency" exclusion path
+// alongside a genuinely valid source for the SAME asset.
+const unresolvedRef: ReferenceAsset = {
+  key: "unresolved-ref-test",
+  chainSlug: "ethereum",
+  address: "0xunresolved",
+  symbol: "UNR",
+  decimals: 18,
+  coingeckoId: "unresolved-ref",
+  kind: "derived",
+  sourcePools: [{ poolAddress: "0xnever-read", dexKind: "uniswap-v2", pairedWithKey: "usdc-test" }],
+};
+
+// WETH-shaped, but with TWO configured source pools: one paired against
+// unresolvedRef (never resolvable in these tests), one paired against the
+// real, resolvable anchor - the exact shape Finding #4's regression test
+// needs.
+const wethTwoSources: ReferenceAsset = {
+  ...weth,
+  key: "weth-two-sources-test",
+  sourcePools: [
+    { poolAddress: "0xpool-unresolved", dexKind: "uniswap-v2", pairedWithKey: "unresolved-ref-test" },
+    { poolAddress: "0xpool1", dexKind: "uniswap-v2", pairedWithKey: "usdc-test" },
+  ],
+};
+
 const assetByKey = new Map([
   [anchor.key, anchor],
   [weth.key, weth],
+  [unresolvedRef.key, unresolvedRef],
+  [wethTwoSources.key, wethTwoSources],
 ]);
 
 const BLOCK_NUMBER = BigInt(19000000);
@@ -81,7 +111,7 @@ describe("resolveReferenceAssetOutcome", () => {
     expect(outcome.sources![0].included).toBe(true);
   });
 
-  it("fails explicitly when the pool's on-chain token0/token1 do not match the configured pair, never substituting or guessing", () => {
+  it("fails explicitly when the pool's on-chain token0/token1 do not match the configured pair, but preserves the reserves the chain actually returned (known but excluded, not unknown)", () => {
     const resolvedPriceByKey = new Map([["usdc-test", "1.00"]]);
     const mismatched = decoded({ token0: "0xsomethingelse" as const });
     const outcome = resolveReferenceAssetOutcome(weth, assetByKey, mismatched, resolvedPriceByKey, NOW, BLOCK_NUMBER, BLOCK_HASH);
@@ -90,22 +120,56 @@ describe("resolveReferenceAssetOutcome", () => {
     expect(outcome.sources).toHaveLength(1);
     expect(outcome.sources![0].included).toBe(false);
     expect(outcome.sources![0].exclusionReason).toMatch(/do not match the configured pair/);
+    // The chain read succeeded (it's the pairing that's wrong, not the
+    // read) - the raw reserves and the already-resolved paired price are
+    // real, known values, not fabricated, and must not be zeroed out.
+    expect(outcome.sources![0].reserveRaw).toBe("4102476795628499120331");
+    expect(outcome.sources![0].pairedReserveRaw).toBe("10026031352833");
+    expect(outcome.sources![0].pairedTokenPriceUsd).toBe("1.00");
   });
 
-  it("fails explicitly when the pool's on-chain read itself failed (null reserves/token0/token1), never fabricating a value", () => {
+  it("fails explicitly when the pool's on-chain read itself failed (null reserves/token0/token1), and correctly leaves every value unknown - genuinely nothing was read", () => {
     const resolvedPriceByKey = new Map([["usdc-test", "1.00"]]);
     const failed = decoded({ reserve0: null, reserve1: null, token0: null, token1: null });
     const outcome = resolveReferenceAssetOutcome(weth, assetByKey, failed, resolvedPriceByKey, NOW, BLOCK_NUMBER, BLOCK_HASH);
 
     expect(outcome.ok).toBe(false);
     expect(outcome.sources![0].exclusionReason).toMatch(/read failed/);
+    // Nothing was actually read here - unlike the pair-mismatch case above,
+    // these values are genuinely unknown, so "0" is correct, not a lost
+    // known value.
+    expect(outcome.sources![0].reserveRaw).toBe("0");
+    expect(outcome.sources![0].pairedReserveRaw).toBe("0");
+    expect(outcome.sources![0].pairedTokenPriceUsd).toBe("0");
   });
 
-  it("fails explicitly when its own dependency has not been resolved yet, rather than pricing against a missing reference", () => {
+  it("excludes a source whose derived price/liquidity itself failed (e.g. below the minimum-liquidity floor), preserving the reserves and paired price that were fed into it", () => {
+    // Reserves scaled down far enough that deriveV2Price's own liquidity
+    // floor rejects them (see uniswap-v2.ts's MIN_LIQUIDITY_USD /
+    // aggregate.ts's PRICING_THRESHOLDS.MIN_LIQUIDITY_USD, $10,000) - a
+    // genuinely different failure than a chain-read failure or a pair
+    // mismatch: the read succeeded and the pairing is correct, only the
+    // resulting pool is too thin to trust.
+    const tinyPool = decoded({ reserve0: BigInt("1000000000000000"), reserve1: BigInt("1000") }); // ~$0.000001 liquidity
+    const resolvedPriceByKey = new Map([["usdc-test", "1.00"]]);
+    const outcome = resolveReferenceAssetOutcome(weth, assetByKey, tinyPool, resolvedPriceByKey, NOW, BLOCK_NUMBER, BLOCK_HASH);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.sources).toHaveLength(1);
+    expect(outcome.sources![0].included).toBe(false);
+    expect(outcome.sources![0].exclusionReason).toMatch(/liquidity/);
+    expect(outcome.sources![0].reserveRaw).toBe("1000000000000000");
+    expect(outcome.sources![0].pairedReserveRaw).toBe("1000");
+    expect(outcome.sources![0].pairedTokenPriceUsd).toBe("1.00");
+  });
+
+  it("fails explicitly when its own dependency has not been resolved yet, recording the reason on the excluded source rather than only a top-level error", () => {
     // No entry for "usdc-test" in resolvedPriceByKey at all.
     const outcome = resolveReferenceAssetOutcome(weth, assetByKey, decoded(), new Map(), NOW, BLOCK_NUMBER, BLOCK_HASH);
     expect(outcome.ok).toBe(false);
-    expect(outcome.error).toMatch(/not been resolved yet/);
+    expect(outcome.sources).toHaveLength(1);
+    expect(outcome.sources![0].included).toBe(false);
+    expect(outcome.sources![0].exclusionReason).toMatch(/not been resolved yet/);
   });
 
   it("fails explicitly when a derived asset has no configured source pools at all", () => {
@@ -113,6 +177,37 @@ describe("resolveReferenceAssetOutcome", () => {
     const outcome = resolveReferenceAssetOutcome(noSources, assetByKey, decoded(), new Map([["usdc-test", "1.00"]]), NOW, BLOCK_NUMBER, BLOCK_HASH);
     expect(outcome.ok).toBe(false);
     expect(outcome.error).toMatch(/no configured source pools/);
+  });
+
+  it("succeeds using the one valid source when a SECOND configured source has an unresolved dependency, never letting the bad source contaminate or invalidate the good one", () => {
+    // wethTwoSources has two configured pools: one paired against
+    // unresolvedRef (never given a price below - genuinely unresolved),
+    // one paired against the real anchor (resolved to $1.00, the same
+    // well-reserved pool `decoded()` already sets up).
+    const resolvedPriceByKey = new Map([["usdc-test", "1.00"]]); // unresolved-ref-test deliberately absent
+    const decodedTwoPools = new Map(decoded());
+    decodedTwoPools.set("0xpool-unresolved", {
+      reserve0: BigInt("1"),
+      reserve1: BigInt("1"),
+      token0: "0xweth",
+      token1: "0xunresolved",
+    });
+
+    const outcome = resolveReferenceAssetOutcome(wethTwoSources, assetByKey, decodedTwoPools, resolvedPriceByKey, NOW, BLOCK_NUMBER, BLOCK_HASH);
+
+    expect(outcome.ok).toBe(true);
+    const price = Number(outcome.priceUsd);
+    expect(price).toBeGreaterThan(2440);
+    expect(price).toBeLessThan(2450);
+
+    expect(outcome.sources).toHaveLength(2);
+    const excluded = outcome.sources!.filter((s) => !s.included);
+    const included = outcome.sources!.filter((s) => s.included);
+    expect(excluded).toHaveLength(1);
+    expect(excluded[0].sourcePoolAddress).toBe("0xpool-unresolved");
+    expect(excluded[0].exclusionReason).toMatch(/not been resolved yet/);
+    expect(included).toHaveLength(1);
+    expect(included[0].sourcePoolAddress).toBe("0xpool1");
   });
 });
 

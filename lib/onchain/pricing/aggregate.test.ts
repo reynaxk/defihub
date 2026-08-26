@@ -111,6 +111,35 @@ describe("aggregatePrices", () => {
     expect(result.confidence).toBe("INVALID");
     expect(result.priceUsd).toBe("0");
   });
+
+  it("guards against division by zero when the only source has zero liquidity - INVALID, never a thrown error or a fabricated price", () => {
+    const result = aggregatePrices([input({ liquidityUsd: "0" })], NOW);
+    expect(result.confidence).toBe("INVALID");
+    expect(result.priceUsd).toBe("0");
+    expect(result.sources).toHaveLength(1);
+    expect(result.sources[0].included).toBe(false);
+    expect(result.sources[0].exclusionReason).toMatch(/zero liquidity/);
+  });
+
+  it("excludes only the zero-liquidity source and still aggregates normally over the remaining positive-liquidity ones", () => {
+    const good = input({ sourcePoolAddress: "0xa", priceUsd: "2444.00", liquidityUsd: "5000000" });
+    // Close enough to `good` to clear the outlier-rejection pass on its own
+    // price merits - this test is specifically isolating the zero-liquidity
+    // guard, not the (already separately tested) outlier-rejection pass.
+    const zero = input({ sourcePoolAddress: "0xb", priceUsd: "2445.00", liquidityUsd: "0" });
+
+    const result = aggregatePrices([good, zero], NOW);
+
+    expect(result.confidence).not.toBe("INVALID");
+    expect(result.priceUsd).toBe("2444");
+    const included = result.sources.filter((s) => s.included);
+    const excluded = result.sources.filter((s) => !s.included);
+    expect(included).toHaveLength(1);
+    expect(included[0].sourcePoolAddress).toBe("0xa");
+    expect(excluded).toHaveLength(1);
+    expect(excluded[0].sourcePoolAddress).toBe("0xb");
+    expect(excluded[0].exclusionReason).toMatch(/zero liquidity/);
+  });
 });
 
 describe("classifyConfidence", () => {

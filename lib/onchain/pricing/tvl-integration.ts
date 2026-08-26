@@ -1,5 +1,6 @@
+import type { PriceSourceObservation } from "@/lib/database/schema";
 import { REFERENCE_ASSETS } from "./config";
-import { getNativeTokenPrice } from "./queries";
+import { getNativeTokenPrice, isNativeTokenPriceFresh } from "./queries";
 import type { PriceConfidence } from "./types";
 
 // Phase 5.3's controlled TVL source-selection policy: NEVER a blanket
@@ -11,23 +12,84 @@ import type { PriceConfidence } from "./types";
 // thinly-liquid one is not worth the risk to an already-working pipeline.
 const SUFFICIENT_CONFIDENCE_FOR_TVL: ReadonlySet<PriceConfidence> = new Set(["HIGH", "MEDIUM"]);
 
-// For every requested coingeckoId that matches a configured reference asset
-// AND has a sufficiently-confident native price on record, returns that
-// price - exact decimal string, ready to substitute directly into a
+// Everything a caller needs to both USE a native override (priceUsd) and
+// PERSIST honest provenance for it - see verify-pool.ts's verifyAllPools,
+// which attaches this directly onto the relevant token's own
+// calculationInputs entry (HistoricalObservationCalculationInput's own
+// nativePriceProvenance field, schema.ts). Deliberately not collapsed down
+// to a bare priceUsd string the way an earlier version of this function
+// did - that lost the source-level identity and block provenance a native
+// price is supposed to carry, undermining the whole point of this being an
+// on-chain-derived price rather than an opaque number.
+export interface NativePriceOverride {
+  priceUsd: string;
+  sources: PriceSourceObservation[];
+  observedAt: Date;
+  blockNumber: number | null;
+  blockHash: string | null;
+}
+
+// For every requested coingeckoId that matches a configured reference asset,
+// has a sufficiently-confident native price on record, AND is recent enough
+// to still be trusted right now (see isNativeTokenPriceFresh -
+// queries.ts - confidence alone says nothing about how long ago a price was
+// observed), returns the full override - ready both to substitute into a
 // priceById map (verify-pool.ts's own `Map<coingeckoId, exact decimal
-// string>` shape). A coingeckoId with no native price, or one below the
-// confidence bar, or one that isn't a configured reference asset at all,
-// simply isn't in the returned map - the caller's own existing CoinGecko
-// price for it is untouched.
-export async function resolveNativePriceOverrides(coingeckoIds: readonly string[]): Promise<Map<string, string>> {
-  const overrides = new Map<string, string>();
+// string>` shape, via `.priceUsd`) and to persist as honest provenance. A
+// coingeckoId with no native price, one below the confidence bar, one that's
+// gone stale, or one that isn't a configured reference asset at all, simply
+// isn't in the returned map - the caller's own existing CoinGecko price and
+// provenance for it are untouched. `now` is injected (not `new Date()`
+// internally) so freshness stays deterministically testable, the same
+// convention aggregate.ts's aggregatePrices already established.
+// Pure - the actual eligibility decision, extracted specifically so it's
+// directly unit-testable with plain constructed inputs (confidence x
+// freshness), no RPC/DB involved - the same "orchestration stays thin, the
+// real decision is a pure function" pattern this whole codebase already
+// uses (resolveVaultOutcome in verify-vault.ts, resolveReferenceAssetOutcome
+// above). Confidence and freshness are independent, both-required gates:
+// a HIGH-confidence price observed an hour ago is not automatically still
+// correct, and a fresh LOW-confidence price was never trustworthy to begin
+// with regardless of how recent it is.
+export function isNativePriceEligibleForTvl(confidence: PriceConfidence, observedAt: Date, now: Date): boolean {
+  return SUFFICIENT_CONFIDENCE_FOR_TVL.has(confidence) && isNativeTokenPriceFresh(observedAt, now);
+}
+
+// For every requested coingeckoId that matches a configured reference asset,
+// has a sufficiently-confident native price on record, AND is recent enough
+// to still be trusted right now (see isNativePriceEligibleForTvl above -
+// confidence alone says nothing about how long ago a price was observed),
+// returns the full override - ready both to substitute into a priceById map
+// (verify-pool.ts's own `Map<coingeckoId, exact decimal string>` shape, via
+// `.priceUsd`) and to persist as honest provenance. A coingeckoId with no
+// native price, one below the confidence bar, one that's gone stale, or one
+// that isn't a configured reference asset at all, simply isn't in the
+// returned map - the caller's own existing CoinGecko price and provenance
+// for it are untouched. `now` is injected (not `new Date()` internally) so
+// freshness stays deterministically testable, the same convention
+// aggregate.ts's aggregatePrices already established.
+export async function resolveNativePriceOverrides(coingeckoIds: readonly string[], now: Date = new Date()): Promise<Map<string, NativePriceOverride>> {
+  const overrides = new Map<string, NativePriceOverride>();
   const relevant = REFERENCE_ASSETS.filter((a) => coingeckoIds.includes(a.coingeckoId));
 
   for (const asset of relevant) {
     const native = await getNativeTokenPrice(asset.chainSlug, asset.address);
-    if (native && SUFFICIENT_CONFIDENCE_FOR_TVL.has(native.confidence)) {
-      overrides.set(asset.coingeckoId, native.priceUsd);
-    }
+    // A stale (or insufficiently confident) native price is left in place
+    // as canonical history unchanged - this check never touches the
+    // underlying historical_observations row, and never invalidates it.
+    // It's simply not eligible to override the external fallback for a
+    // decision being made right now; the caller falls back to its existing
+    // CoinGecko price for this coingeckoId exactly as if no native price
+    // existed at all.
+    if (!native || !isNativePriceEligibleForTvl(native.confidence, native.observedAt, now)) continue;
+
+    overrides.set(asset.coingeckoId, {
+      priceUsd: native.priceUsd,
+      sources: native.sources,
+      observedAt: native.observedAt,
+      blockNumber: native.blockNumber,
+      blockHash: native.blockHash,
+    });
   }
 
   return overrides;

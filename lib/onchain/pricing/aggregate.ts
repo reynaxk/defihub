@@ -46,6 +46,23 @@ export const PRICING_THRESHOLDS = {
   // a much lower bar than "genuinely corroborating" (close enough to treat
   // as independent confirmation of the same real price).
   HIGH_CONFIDENCE_AGREEMENT_BPS: BigInt(100),
+  // A DIFFERENT concern from MAX_SOURCE_AGE_MS above: that one bounds how
+  // old a single source's read can be WITHIN one aggregation pass (always
+  // ~0 in practice, since every source is read in the same pinned
+  // multicall - see that constant's own comment). This one bounds how old
+  // an already-PERSISTED native price observation can be before it's still
+  // eligible to override an external fallback price for TVL computation
+  // "right now" (lib/onchain/pricing/tvl-integration.ts) - a genuinely
+  // different question, asked at read time, potentially long after the
+  // observation was written. The on-chain pricing cron runs every 30
+  // minutes (vercel.json's "/api/cron/price-onchain" schedule) - twice
+  // that interval tolerates exactly one missed/delayed run without
+  // treating a merely-late price as untrustworthy, while still rejecting a
+  // price from a cron that's been silently broken for longer than that.
+  // Confidence alone (HIGH/MEDIUM) says nothing about *when* a price was
+  // observed - a high-confidence price from hours ago is not automatically
+  // still correct.
+  MAX_NATIVE_PRICE_AGE_FOR_TVL_MS: 60 * 60 * 1000,
 } as const;
 
 function toScaledBigInt(decimal: string, scale = 30): bigint {
@@ -125,17 +142,41 @@ export function aggregatePrices(inputs: AggregationInput[], now: Date, label: Pr
     return { priceUsd: "0", confidence: "INVALID", label, sources };
   }
 
+  // Pass 3: zero-liquidity guard. deriveV2Price's own MIN_LIQUIDITY_USD
+  // floor (uniswap-v2.ts) already rejects a thin pool before it ever
+  // becomes a candidate at all - this is a defensive floor for any future
+  // source kind that might not enforce an equivalent minimum. A candidate
+  // with exactly zero liquidity can never contribute a defined weight to
+  // the liquidity-weighted mean below; dividing by a totalLiquidity of
+  // exactly zero would throw, not silently produce a fabricated price.
+  // Excluded the same way stale/outlier candidates are, with its own
+  // reason - never silently dropped from provenance.
+  const weighted: AggregationInput[] = [];
+  for (const input of included) {
+    if (toScaledBigInt(input.candidate.liquidityUsd) === BigInt(0)) {
+      sources.push({ ...input.candidate, included: false, exclusionReason: "zero liquidity - cannot contribute to a liquidity-weighted price" });
+    } else {
+      weighted.push(input);
+    }
+  }
+
+  if (weighted.length === 0) {
+    return { priceUsd: "0", confidence: "INVALID", label, sources };
+  }
+
   // Liquidity-weighted mean of the surviving sources - a deeper pool's
   // price is weighted more heavily than a shallow one, rather than a naive
   // average that would let a thin, easily-moved pool count exactly as much
   // as a deep one. Exact BigInt arithmetic throughout: each source's
   // contribution is (price * liquidity), summed and divided by total
-  // liquidity, all at CALCULATION_SCALE fixed point.
+  // liquidity, all at CALCULATION_SCALE fixed point. totalLiquidity is
+  // guaranteed positive here - every zero-liquidity candidate was already
+  // excluded above.
   const SCALE = 30;
   const SCALE_FACTOR = BigInt(10) ** BigInt(SCALE);
   let weightedSum = BigInt(0);
   let totalLiquidity = BigInt(0);
-  for (const input of included) {
+  for (const input of weighted) {
     const priceScaled = toScaledBigInt(input.candidate.priceUsd, SCALE);
     const liquidityScaled = toScaledBigInt(input.candidate.liquidityUsd, SCALE);
     weightedSum += (priceScaled * liquidityScaled) / SCALE_FACTOR;
@@ -143,11 +184,11 @@ export function aggregatePrices(inputs: AggregationInput[], now: Date, label: Pr
   }
   const priceUsd = formatUnits((weightedSum * SCALE_FACTOR) / totalLiquidity, SCALE);
 
-  for (const input of included) {
+  for (const input of weighted) {
     sources.push({ ...input.candidate, included: true });
   }
 
-  const confidence = classifyConfidence(included.map((i) => i.candidate), label);
+  const confidence = classifyConfidence(weighted.map((i) => i.candidate), label);
   return { priceUsd, confidence, label, sources };
 }
 

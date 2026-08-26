@@ -4,7 +4,7 @@ import { confirmationsFor } from "@/lib/chains/confirmations";
 import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import type { PriceSourceObservation } from "@/lib/database/schema";
 import { aggregatePrices, PRICING_THRESHOLDS, type AggregationInput } from "./aggregate";
-import { REFERENCE_ASSETS, toReferenceAssetNode, type ReferenceAsset } from "./config";
+import { REFERENCE_ASSETS, toReferenceAssetNode, type ReferenceAsset, type ReferenceAssetSourcePool } from "./config";
 import { resolveReferenceOrder } from "./reference-graph";
 import { V2_PAIR_ABI, deriveV2Price } from "./uniswap-v2";
 import type { CandidatePriceSource, PriceConfidence, PriceLabel } from "./types";
@@ -91,24 +91,58 @@ export function resolveReferenceAssetOutcome(
   const preExcluded: PriceSourceObservation[] = [];
   const candidateInputs: AggregationInput[] = [];
 
+  // Every configured source pool is evaluated independently - one source's
+  // failure (an unknown paired asset, an unresolved dependency, a chain
+  // read failure, a pair mismatch, an unusable derived price) excludes only
+  // that source and records why, then moves on to the next one. It must
+  // never abort evaluation of the OTHER configured sources for this same
+  // asset: a genuinely valid source sitting right next to a broken one
+  // would otherwise be thrown away along with it. The asset as a whole only
+  // fails once every source has been excluded (see the aggregatePrices call
+  // below, which returns INVALID exactly when candidateInputs ends up
+  // empty) - that's the one case where "no valid source" really is the
+  // asset's own outcome, not a false negative from one bad source.
   for (const source of sourcePools) {
     const pairedAsset = assetByKey.get(source.pairedWithKey);
     if (!pairedAsset) {
-      return { key: asset.key, ok: false, error: `configured pairedWithKey "${source.pairedWithKey}" is not a known reference asset - config error` };
+      // Genuinely unknown on every axis - there's no real ReferenceAsset to
+      // pull a symbol/address from, so pairedTokenSymbol carries the raw
+      // config key itself (more useful for debugging than a bare
+      // "unknown") rather than a value invented to fit the normal shape.
+      preExcluded.push({
+        sourceKind: source.dexKind,
+        sourcePoolAddress: source.poolAddress,
+        sourceChainSlug: asset.chainSlug,
+        pairedTokenSymbol: source.pairedWithKey,
+        pairedTokenAddress: "unknown",
+        pairedTokenPriceUsd: "0",
+        priceUsd: "0",
+        liquidityUsd: "0",
+        reserveRaw: "0",
+        pairedReserveRaw: "0",
+        included: false,
+        exclusionReason: `configured pairedWithKey "${source.pairedWithKey}" is not a known reference asset - config error`,
+      });
+      continue;
     }
     const pairedPriceUsd = resolvedPriceByKey.get(source.pairedWithKey);
     if (pairedPriceUsd == null) {
       // Should be unreachable in production (engine.ts's caller always
       // processes assets in resolveReferenceOrder's dependency order), but
       // never assumed - an asset priced against an unresolved reference
-      // would silently be wrong, not just incomplete.
-      return { key: asset.key, ok: false, error: `reference asset "${source.pairedWithKey}" has not been resolved yet - dependency ordering bug` };
+      // would silently be wrong, not just incomplete. The reserves
+      // genuinely haven't been evaluated against this source yet, so they
+      // stay unknown too - only the paired asset's identity is known here.
+      preExcluded.push(
+        excludedSourceObservation(source, asset, pairedAsset, `reference asset "${source.pairedWithKey}" has not been resolved yet - dependency ordering bug`),
+      );
+      continue;
     }
 
     const decoded = decodedPools.get(source.poolAddress.toLowerCase());
     if (!decoded || decoded.token0 == null || decoded.token1 == null || decoded.reserve0 == null || decoded.reserve1 == null) {
       preExcluded.push(
-        emptySourceObservation(source, asset, pairedAsset, "on-chain read failed (getReserves()/token0()/token1())"),
+        excludedSourceObservation(source, asset, pairedAsset, "on-chain read failed (getReserves()/token0()/token1())"),
       );
       continue;
     }
@@ -132,12 +166,18 @@ export function resolveReferenceAssetOutcome(
       // this source is excluded with a clear, specific reason, the same
       // "config is the expected value, chain validates it, never the
       // reverse" discipline verify-vault.ts's asset() check established.
+      // The reserves themselves WERE read successfully though - recorded
+      // here in raw token0/token1 order (not asset/paired order, which is
+      // exactly the thing this branch couldn't determine) rather than
+      // discarded, since "what did the chain actually return" remains
+      // known even though this source can't be trusted to price anything.
       preExcluded.push(
-        emptySourceObservation(
+        excludedSourceObservation(
           source,
           asset,
           pairedAsset,
           `pool token0/token1 (${decoded.token0}/${decoded.token1}) do not match the configured pair (${asset.address}/${pairedAsset.address})`,
+          { pairedTokenPriceUsd: pairedPriceUsd, reserveRaw: decoded.reserve0.toString(), pairedReserveRaw: decoded.reserve1.toString() },
         ),
       );
       continue;
@@ -153,7 +193,17 @@ export function resolveReferenceAssetOutcome(
     });
 
     if (!derived.ok) {
-      preExcluded.push(emptySourceObservation(source, asset, pairedAsset, derived.error));
+      // deriveV2Price itself couldn't produce a price/liquidity (e.g. below
+      // the minimum-liquidity floor) - genuinely unknown, never fabricated.
+      // The reserves and the paired price that were fed into it are known
+      // though, and preserved here rather than zeroed alongside them.
+      preExcluded.push(
+        excludedSourceObservation(source, asset, pairedAsset, derived.error, {
+          pairedTokenPriceUsd: pairedPriceUsd,
+          reserveRaw: pricedReserve.toString(),
+          pairedReserveRaw: pairedReserve.toString(),
+        }),
+      );
       continue;
     }
 
@@ -191,11 +241,22 @@ export function resolveReferenceAssetOutcome(
   };
 }
 
-function emptySourceObservation(
-  source: ReferenceAsset["sourcePools"] extends (infer P)[] | undefined ? P : never,
+// Builds an excluded-source observation, preserving whatever inputs were
+// genuinely known at the point of exclusion rather than zeroing everything
+// out uniformly. `known` covers exactly the fields that can legitimately
+// be known even though the source itself is excluded (the paired asset's
+// USD price, and the raw reserves the chain actually returned) - anything
+// not passed in `known` stays "0", meaning it truly is unknown (e.g. a
+// chain read that failed outright has no reserves to report at all).
+// "Known but excluded" and "unknown" are deliberately never conflated: a
+// consumer reading calculation_inputs later must be able to tell them
+// apart, not see an indistinguishable "0" for both.
+function excludedSourceObservation(
+  source: ReferenceAssetSourcePool,
   asset: ReferenceAsset,
   pairedAsset: ReferenceAsset,
   reason: string,
+  known: Partial<Pick<PriceSourceObservation, "pairedTokenPriceUsd" | "reserveRaw" | "pairedReserveRaw">> = {},
 ): PriceSourceObservation {
   return {
     sourceKind: source.dexKind,
@@ -203,11 +264,11 @@ function emptySourceObservation(
     sourceChainSlug: asset.chainSlug,
     pairedTokenSymbol: pairedAsset.symbol,
     pairedTokenAddress: pairedAsset.address,
-    pairedTokenPriceUsd: "0",
+    pairedTokenPriceUsd: known.pairedTokenPriceUsd ?? "0",
     priceUsd: "0",
     liquidityUsd: "0",
-    reserveRaw: "0",
-    pairedReserveRaw: "0",
+    reserveRaw: known.reserveRaw ?? "0",
+    pairedReserveRaw: known.pairedReserveRaw ?? "0",
     included: false,
     exclusionReason: reason,
   };

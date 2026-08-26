@@ -18,7 +18,8 @@
 // project's TS target doesn't support BigInt literal syntax.
 import { describe, expect, it } from "vitest";
 import type { HistoricalObservationCalculationInput } from "@/lib/database/schema";
-import { computePoolTvl, priceToExactDecimalString, roundExactDecimal, type PoolTvlToken } from "./verify-pool";
+import { attachNativeProvenance, computePoolTvl, priceToExactDecimalString, roundExactDecimal, type PoolTvlToken } from "./verify-pool";
+import type { NativePriceOverride } from "./pricing/tvl-integration";
 
 function pow10(exponent: number): bigint {
   return BigInt(10) ** BigInt(exponent);
@@ -340,5 +341,95 @@ describe("roundExactDecimal", () => {
 
   it("preserves a value above Number.MAX_SAFE_INTEGER with a fractional component when rescaling", () => {
     expect(roundExactDecimal("10000000000000000.5", 8)).toBe("10000000000000000.5");
+  });
+});
+
+describe("attachNativeProvenance", () => {
+  function calcInput(overrides: Partial<HistoricalObservationCalculationInput> = {}): HistoricalObservationCalculationInput {
+    return { symbol: "USDC", coingeckoId: "usd-coin", decimals: 6, balanceRaw: "1000000", priceUsd: "1.00", ...overrides };
+  }
+
+  function override(overrides: Partial<NativePriceOverride> = {}): NativePriceOverride {
+    return {
+      priceUsd: "1.00",
+      sources: [],
+      observedAt: new Date("2026-08-26T00:00:00.000Z"),
+      blockNumber: 19000000,
+      blockHash: "0x" + "aa".repeat(32),
+      ...overrides,
+    };
+  }
+
+  it("attaches native provenance to every token when a pool's TVL is fully native - fully native TVL", () => {
+    const usdc = calcInput({ symbol: "USDC", coingeckoId: "usd-coin" });
+    const weth = calcInput({ symbol: "WETH", coingeckoId: "weth", priceUsd: "2444.40" });
+    const overrides = new Map([
+      ["usd-coin", override({ priceUsd: "1.00" })],
+      ["weth", override({ priceUsd: "2444.40", blockNumber: 19000001 })],
+    ]);
+
+    const result = attachNativeProvenance([usdc, weth], overrides);
+
+    expect(result).toHaveLength(2);
+    expect(result[0].nativePriceProvenance).toBeDefined();
+    expect(result[0].nativePriceProvenance!.blockNumber).toBe(19000000);
+    expect(result[0].nativePriceProvenance!.blockHash).toBe("0x" + "aa".repeat(32));
+    expect(result[0].nativePriceProvenance!.observedAt).toBe("2026-08-26T00:00:00.000Z");
+    expect(result[1].nativePriceProvenance).toBeDefined();
+    expect(result[1].nativePriceProvenance!.blockNumber).toBe(19000001);
+    // Every other field on each entry is untouched - only the new field is added.
+    expect(result[0].priceUsd).toBe("1.00");
+    expect(result[0].balanceRaw).toBe("1000000");
+    expect(result[1].priceUsd).toBe("2444.40");
+  });
+
+  it("attaches native provenance only to the natively-priced token, preserving the other's plain CoinGecko entry untouched - hybrid TVL", () => {
+    const usdc = calcInput({ symbol: "USDC", coingeckoId: "usd-coin" });
+    const bridgedWeth = calcInput({ symbol: "WETH", coingeckoId: "l2-standard-bridged-weth-base", priceUsd: "2440.00" });
+    const overrides = new Map([["usd-coin", override()]]); // bridged WETH's coingeckoId has no override
+
+    const result = attachNativeProvenance([usdc, bridgedWeth], overrides);
+
+    expect(result[0].nativePriceProvenance).toBeDefined();
+    expect(result[1].nativePriceProvenance).toBeUndefined();
+    // The external entry is byte-for-byte identical to the input - never
+    // replaced with fake native metadata.
+    expect(result[1]).toEqual(bridgedWeth);
+  });
+
+  it("leaves every entry completely unchanged when no token has a native override - fully external TVL", () => {
+    const usdt = calcInput({ symbol: "USDT", coingeckoId: "tether" });
+    const wbnb = calcInput({ symbol: "WBNB", coingeckoId: "wbnb", priceUsd: "600.00" });
+
+    const result = attachNativeProvenance([usdt, wbnb], new Map());
+
+    expect(result).toEqual([usdt, wbnb]);
+    expect(result[0].nativePriceProvenance).toBeUndefined();
+    expect(result[1].nativePriceProvenance).toBeUndefined();
+  });
+
+  it("preserves the exact source-level identity from the override, not a summarized/lossy copy", () => {
+    const usdc = calcInput({ symbol: "USDC", coingeckoId: "usd-coin" });
+    const sources: NativePriceOverride["sources"] = [
+      {
+        sourceKind: "uniswap-v2",
+        sourcePoolAddress: "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc",
+        sourceChainSlug: "ethereum",
+        pairedTokenSymbol: "WETH",
+        pairedTokenAddress: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        pairedTokenPriceUsd: "2444.40",
+        priceUsd: "1.00",
+        liquidityUsd: "20000000",
+        reserveRaw: "10026031352833",
+        pairedReserveRaw: "4102476795628499120331",
+        included: true,
+      },
+    ];
+    const overrides = new Map([["usd-coin", override({ sources })]]);
+
+    const result = attachNativeProvenance([usdc], overrides);
+
+    expect(result[0].nativePriceProvenance!.sources).toEqual(sources);
+    expect(result[0].nativePriceProvenance!.sources[0].sourcePoolAddress).toBe("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc");
   });
 });

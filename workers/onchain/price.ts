@@ -1,8 +1,49 @@
 import "dotenv/config";
 import { closeDb } from "../../lib/database/client";
-import { priceAllReferenceAssets } from "../../lib/onchain/pricing/price-reference-assets";
+import { priceAllReferenceAssets, type ReferenceAssetPriceResult } from "../../lib/onchain/pricing/price-reference-assets";
 import { logger } from "../../lib/observability/logger";
 import { withSyncRun } from "../../lib/observability/sync-run";
+
+export interface PriceRunSummary {
+  priced: number;
+  skipped: number;
+  failed: number;
+  outcome: "success" | "partial";
+}
+
+// Pure - turns one run's per-asset results into the run's overall stats and
+// success/partial classification, directly unit-testable with plain
+// constructed inputs (see price.test.ts). Deliberately extracted rather
+// than inlined into priceOnchain below: the accounting rule itself
+// (skipped-no-token and skipped-invalid-hash both count as skipped, never
+// as priced; the run is "success" only when EVERY requested asset actually
+// persisted) is exactly the kind of decision this codebase always pulls out
+// into a pure function so it can be tested without a real DB/RPC round-trip
+// - the same pattern as resolveVaultOutcome, resolveReferenceAssetOutcome,
+// priceSourceForTokens, isNativePriceEligibleForTvl.
+export function summarizePriceResults(results: ReferenceAssetPriceResult[]): PriceRunSummary {
+  let priced = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const r of results) {
+    if (r.outcome === "written") priced++;
+    else if (r.outcome === "skipped-no-token" || r.outcome === "skipped-invalid-hash") skipped++;
+    else failed++;
+  }
+
+  // "success" requires every single requested asset to have actually
+  // persisted a real observation this run - a skip is not a failure in the
+  // exception-thrown sense, but it's still not a successful price
+  // observation, and must never be silently absorbed into a clean-looking
+  // "success" outcome. Zero requested assets (REFERENCE_ASSETS empty, or
+  // every asset otherwise excluded before this point) also reports
+  // "success" here - priceAllReferenceAssets already short-circuits to an
+  // empty results array in that case, so `results.length === 0` correctly
+  // falls through this same `priced === results.length` check.
+  const outcome: PriceRunSummary["outcome"] = priced === results.length ? "success" : "partial";
+  return { priced, skipped, failed, outcome };
+}
 
 // Phase 5.3's independent on-chain price engine, run as its own worker -
 // deliberately separate from verify.ts (pool/vault/protocol-TVL
@@ -17,25 +58,23 @@ import { withSyncRun } from "../../lib/observability/sync-run";
 export async function priceOnchain(): Promise<void> {
   await withSyncRun("onchain-price", async () => {
     const results = await priceAllReferenceAssets();
-    let ok = 0;
     for (const r of results) {
-      if (r.ok) {
-        ok++;
+      if (r.outcome === "written") {
         logger.info("priced", { component: "onchain-pricing", key: r.key });
       } else {
-        logger.warn("skipped", { component: "onchain-pricing", key: r.key, reason: r.error });
+        logger.warn(r.outcome, { component: "onchain-pricing", key: r.key, reason: r.error });
       }
     }
 
-    const failed = results.length - ok;
+    const summary = summarizePriceResults(results);
     return {
       result: undefined,
       stats: {
         recordsProcessed: results.length,
-        errorCount: failed,
-        metadata: { priced: ok, skipped: failed },
+        errorCount: results.length - summary.priced,
+        metadata: { priced: summary.priced, skipped: summary.skipped, failed: summary.failed },
       },
-      outcome: failed > 0 ? ("partial" as const) : ("success" as const),
+      outcome: summary.outcome,
     };
   });
 }

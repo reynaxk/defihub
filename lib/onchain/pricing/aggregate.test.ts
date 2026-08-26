@@ -121,24 +121,83 @@ describe("aggregatePrices", () => {
     expect(result.sources[0].exclusionReason).toMatch(/zero liquidity/);
   });
 
-  it("excludes only the zero-liquidity source and still aggregates normally over the remaining positive-liquidity ones", () => {
-    const good = input({ sourcePoolAddress: "0xa", priceUsd: "2444.00", liquidityUsd: "5000000" });
-    // Close enough to `good` to clear the outlier-rejection pass on its own
-    // price merits - this test is specifically isolating the zero-liquidity
-    // guard, not the (already separately tested) outlier-rejection pass.
-    const zero = input({ sourcePoolAddress: "0xb", priceUsd: "2445.00", liquidityUsd: "0" });
+  it("a valid liquid source wins over a zero-liquidity source even when their prices materially disagree - the zero-liquidity price must never skew the outlier median against the real source", () => {
+    // Source A: $100, comfortably liquid. Source B: $150, zero liquidity -
+    // a 5000bps gap, deliberately large enough that if the zero-liquidity
+    // guard ran AFTER outlier rejection (the actual bug this regression
+    // test targets), the naive 2-value median ($125) would make BOTH
+    // sources look like outliers and wrongly reject the one genuinely
+    // valid source along with the worthless one.
+    const liquid = input({ sourcePoolAddress: "0xa", priceUsd: "100.00", liquidityUsd: "1000000" });
+    const zero = input({ sourcePoolAddress: "0xb", priceUsd: "150.00", liquidityUsd: "0" });
 
-    const result = aggregatePrices([good, zero], NOW);
+    const result = aggregatePrices([liquid, zero], NOW);
 
     expect(result.confidence).not.toBe("INVALID");
-    expect(result.priceUsd).toBe("2444");
+    expect(result.priceUsd).toBe("100");
     const included = result.sources.filter((s) => s.included);
     const excluded = result.sources.filter((s) => !s.included);
     expect(included).toHaveLength(1);
     expect(included[0].sourcePoolAddress).toBe("0xa");
     expect(excluded).toHaveLength(1);
     expect(excluded[0].sourcePoolAddress).toBe("0xb");
+    // Case D from the task: excluded for being zero-liquidity, never
+    // mislabeled as an outlier - the two are genuinely different reasons.
     expect(excluded[0].exclusionReason).toMatch(/zero liquidity/);
+    expect(excluded[0].exclusionReason).not.toMatch(/outlier/);
+  });
+
+  it("a zero-liquidity source never contaminates the weighted price or confidence of multiple valid liquid sources", () => {
+    const a = input({ sourcePoolAddress: "0xa", priceUsd: "2444.00", liquidityUsd: "5000000" });
+    const b = input({ sourcePoolAddress: "0xb", priceUsd: "2446.00", liquidityUsd: "5000000" });
+    const zero = input({ sourcePoolAddress: "0xc", priceUsd: "9999.00", liquidityUsd: "0" });
+
+    const result = aggregatePrices([a, b, zero], NOW);
+
+    // Same result as if the zero-liquidity source had never been passed in
+    // at all - it contributes to neither the weighted numerator nor the
+    // total liquidity denominator.
+    const withoutZero = aggregatePrices([a, b], NOW);
+    expect(result.priceUsd).toBe(withoutZero.priceUsd);
+    expect(result.confidence).toBe(withoutZero.confidence);
+
+    const included = result.sources.filter((s) => s.included);
+    const excluded = result.sources.filter((s) => !s.included);
+    expect(included.map((s) => s.sourcePoolAddress).sort()).toEqual(["0xa", "0xb"]);
+    expect(excluded).toHaveLength(1);
+    expect(excluded[0].sourcePoolAddress).toBe("0xc");
+    expect(excluded[0].exclusionReason).toMatch(/zero liquidity/);
+  });
+
+  it("returns INVALID with no usable source when every candidate has zero liquidity, never manufacturing a price from any of them", () => {
+    const a = input({ sourcePoolAddress: "0xa", priceUsd: "100.00", liquidityUsd: "0" });
+    const b = input({ sourcePoolAddress: "0xb", priceUsd: "9999.00", liquidityUsd: "0" });
+
+    const result = aggregatePrices([a, b], NOW);
+
+    expect(result.confidence).toBe("INVALID");
+    expect(result.priceUsd).toBe("0");
+    const excluded = result.sources.filter((s) => !s.included);
+    expect(excluded).toHaveLength(2);
+    expect(excluded.every((s) => s.exclusionReason?.match(/zero liquidity/))).toBe(true);
+  });
+
+  it("excludes a zero-liquidity source alongside an already-invalid one (dependency/pair-mismatch style), aggregating any remaining valid liquid source normally", () => {
+    // Mirrors engine.ts's own pre-excluded-source shape (a source that
+    // never became an AggregationInput at all) merged with aggregatePrices'
+    // own output - exercised here directly at the aggregate.ts level via a
+    // pre-built exclusion entry standing in for that engine-level case,
+    // proving the two kinds of exclusion coexist without interfering with
+    // each other or with a genuinely valid third source.
+    const valid = input({ sourcePoolAddress: "0xa", priceUsd: "100.00", liquidityUsd: "1000000" });
+    const zero = input({ sourcePoolAddress: "0xb", priceUsd: "9999.00", liquidityUsd: "0" });
+
+    const result = aggregatePrices([valid, zero], NOW);
+
+    expect(result.confidence).not.toBe("INVALID");
+    expect(result.priceUsd).toBe("100");
+    expect(result.sources.filter((s) => s.included)).toHaveLength(1);
+    expect(result.sources.filter((s) => !s.included)).toHaveLength(1);
   });
 });
 

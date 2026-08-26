@@ -36,4 +36,14 @@ describe("isNativeTokenPriceFresh", () => {
     // This test exists to make that guarantee explicit and regression-checkable in intent, not just in types.
     expect(isNativeTokenPriceFresh.length).toBe(2);
   });
+
+  it("rejects an observation exactly 1ms in the future - a negative age must never pass as fresh", () => {
+    const observedAt = new Date(NOW.getTime() + 1);
+    expect(isNativeTokenPriceFresh(observedAt, NOW)).toBe(false);
+  });
+
+  it("rejects a far-future observation, not just a barely-future one - a large negative age is still rejected, never treated as 'maximally fresh'", () => {
+    const observedAt = new Date(NOW.getTime() + 24 * 60 * 60 * 1000); // 1 day in the future
+    expect(isNativeTokenPriceFresh(observedAt, NOW)).toBe(false);
+  });
 });

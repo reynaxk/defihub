@@ -71,4 +71,21 @@ describe("isNativePriceEligibleForTvl", () => {
     const justPastBoundary = new Date(NOW.getTime() - PRICING_THRESHOLDS.MAX_NATIVE_PRICE_AGE_FOR_TVL_MS - 1);
     expect(isNativePriceEligibleForTvl("HIGH", justPastBoundary, NOW)).toBe(false);
   });
+
+  it("rejects a HIGH-confidence price observed 1ms in the future - never treated as fresh regardless of confidence", () => {
+    const oneMsInFuture = new Date(NOW.getTime() + 1);
+    expect(isNativePriceEligibleForTvl("HIGH", oneMsInFuture, NOW)).toBe(false);
+  });
+
+  it("a future-dated observation is ineligible the same way a stale one is - the caller falls back to the external price rather than using it as a native override", () => {
+    // Same shape as tvl-integration.ts's own resolveNativePriceOverrides
+    // eligibility gate (`if (!native || !isNativePriceEligibleForTvl(...)) continue`)
+    // - a false result here means that coingeckoId is simply never added to
+    // the overrides map, and verify-pool.ts's existing CoinGecko price for
+    // it is left completely untouched, exactly as if no native price
+    // existed at all.
+    const oneMsInFuture = new Date(NOW.getTime() + 1);
+    const eligible = isNativePriceEligibleForTvl("HIGH", oneMsInFuture, NOW);
+    expect(eligible).toBe(false);
+  });
 });

@@ -51,6 +51,12 @@ export interface NativePriceOverride {
 // a HIGH-confidence price observed an hour ago is not automatically still
 // correct, and a fresh LOW-confidence price was never trustworthy to begin
 // with regardless of how recent it is.
+// Freshness itself is fully delegated to isNativeTokenPriceFresh
+// (queries.ts), never re-implemented here - a future-dated observation
+// (observedAt after `now`, e.g. from a clock skew or a corrupted row) is
+// rejected by that one shared function, so this path and
+// getNativeTokenPrice's own direct callers stay protected consistently by
+// construction, not by two independently-maintained checks.
 export function isNativePriceEligibleForTvl(confidence: PriceConfidence, observedAt: Date, now: Date): boolean {
   return SUFFICIENT_CONFIDENCE_FOR_TVL.has(confidence) && isNativeTokenPriceFresh(observedAt, now);
 }

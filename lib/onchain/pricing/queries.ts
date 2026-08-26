@@ -66,16 +66,29 @@ export async function getNativeTokenPrice(chainSlug: string, address: string): P
 
 // Whether a native token price is recent enough to still be trusted for a
 // decision made "right now" (e.g. lib/onchain/pricing/tvl-integration.ts's
-// TVL override) - a genuinely different question from confidence, which
-// says how *well-corroborated* a price was at observation time, not how
-// long ago that was. Deliberately keyed off the observation's own
-// `observedAt` timestamp, never blockNumber: block numbers aren't
-// comparable across chains and don't map to wall-clock time at all, so
-// they can't answer "is this too old to use right now." `now` is injected
-// (not `new Date()` internally) so this stays deterministically testable
-// without faking the system clock - the same convention
-// aggregate.ts's aggregatePrices already established for its own
-// staleness check.
+// TVL override, via isNativePriceEligibleForTvl there - which delegates to
+// this exact function rather than re-implementing its own freshness check,
+// so both callers stay consistent by construction, not by convention) - a
+// genuinely different question from confidence, which says how
+// *well-corroborated* a price was at observation time, not how long ago
+// that was. Deliberately keyed off the observation's own `observedAt`
+// timestamp, never blockNumber: block numbers aren't comparable across
+// chains and don't map to wall-clock time at all, so they can't answer "is
+// this too old to use right now." `now` is injected (not `new Date()`
+// internally) so this stays deterministically testable without faking the
+// system clock - the same convention aggregate.ts's aggregatePrices
+// already established for its own staleness check.
 export function isNativeTokenPriceFresh(observedAt: Date, now: Date): boolean {
-  return now.getTime() - observedAt.getTime() <= PRICING_THRESHOLDS.MAX_NATIVE_PRICE_AGE_FOR_TVL_MS;
+  const ageMs = now.getTime() - observedAt.getTime();
+  // A negative age means observedAt is in the future relative to now - a
+  // corrupted or clock-skewed timestamp, never a legitimately "extra
+  // fresh" observation. Rejected explicitly: a negative number is always
+  // <= a positive MAX_NATIVE_PRICE_AGE_FOR_TVL_MS threshold, so without
+  // this check every future-dated observation would pass the age
+  // comparison below and be treated as maximally fresh - exactly
+  // backwards. This is a current-price eligibility check only - it never
+  // touches, deletes, or invalidates the underlying historical_observations
+  // row, and it makes no claim about why the timestamp is wrong.
+  if (ageMs < 0) return false;
+  return ageMs <= PRICING_THRESHOLDS.MAX_NATIVE_PRICE_AGE_FOR_TVL_MS;
 }

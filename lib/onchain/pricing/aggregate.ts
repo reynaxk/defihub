@@ -116,22 +116,46 @@ export function aggregatePrices(inputs: AggregationInput[], now: Date, label: Pr
     }
   }
 
-  // Pass 2: outlier rejection against the median of the still-fresh
-  // candidates. A single fresh candidate is its own median (deviation 0),
-  // so it's never rejected as an outlier purely for being alone - see
-  // classifyConfidence below for how source count on its own still bounds
-  // the resulting confidence.
-  const freshPrices = fresh.map((f) => f.candidate.priceUsd);
-  const median = freshPrices.length > 0 ? medianPrice(freshPrices) : null;
+  // Pass 2: zero-liquidity guard. Deliberately runs BEFORE outlier
+  // rejection below, not after: a worthless zero-liquidity source's price
+  // must never be allowed to skew the cross-source median that decides
+  // whether OTHER, genuinely liquid sources get rejected as outliers - a
+  // zero-liquidity source with a wildly different price would otherwise
+  // drag the median toward itself and cause a real, well-liquidated source
+  // to look like the outlier instead. deriveV2Price's own MIN_LIQUIDITY_USD
+  // floor (uniswap-v2.ts) already rejects a thin pool before it ever
+  // becomes a candidate at all - this is a defensive floor for any future
+  // source kind that might not enforce an equivalent minimum. A candidate
+  // with exactly zero liquidity can never contribute a defined weight to
+  // the liquidity-weighted mean below either; dividing by a totalLiquidity
+  // of exactly zero would throw, not silently produce a fabricated price.
+  // Excluded the same way stale candidates are, with its own reason -
+  // never silently dropped from provenance.
+  const liquid: AggregationInput[] = [];
+  for (const input of fresh) {
+    if (toScaledBigInt(input.candidate.liquidityUsd) === BigInt(0)) {
+      sources.push({ ...input.candidate, included: false, exclusionReason: "zero liquidity - cannot contribute to a liquidity-weighted price" });
+    } else {
+      liquid.push(input);
+    }
+  }
+
+  // Pass 3: outlier rejection against the median of the still-fresh,
+  // still-liquid candidates only. A single liquid candidate is its own
+  // median (deviation 0), so it's never rejected as an outlier purely for
+  // being alone - see classifyConfidence below for how source count on its
+  // own still bounds the resulting confidence.
+  const liquidPrices = liquid.map((f) => f.candidate.priceUsd);
+  const median = liquidPrices.length > 0 ? medianPrice(liquidPrices) : null;
 
   const included: AggregationInput[] = [];
-  for (const input of fresh) {
+  for (const input of liquid) {
     const deviation = median != null ? deviationBps(input.candidate.priceUsd, median) : BigInt(0);
     if (median != null && deviation > PRICING_THRESHOLDS.MAX_DEVIATION_FROM_MEDIAN_BPS) {
       sources.push({
         ...input.candidate,
         included: false,
-        exclusionReason: `outlier: ${deviation}bps from the ${fresh.length}-source median ($${median}), exceeding the ${PRICING_THRESHOLDS.MAX_DEVIATION_FROM_MEDIAN_BPS}bps limit`,
+        exclusionReason: `outlier: ${deviation}bps from the ${liquid.length}-source median ($${median}), exceeding the ${PRICING_THRESHOLDS.MAX_DEVIATION_FROM_MEDIAN_BPS}bps limit`,
       });
     } else {
       included.push(input);
@@ -142,28 +166,6 @@ export function aggregatePrices(inputs: AggregationInput[], now: Date, label: Pr
     return { priceUsd: "0", confidence: "INVALID", label, sources };
   }
 
-  // Pass 3: zero-liquidity guard. deriveV2Price's own MIN_LIQUIDITY_USD
-  // floor (uniswap-v2.ts) already rejects a thin pool before it ever
-  // becomes a candidate at all - this is a defensive floor for any future
-  // source kind that might not enforce an equivalent minimum. A candidate
-  // with exactly zero liquidity can never contribute a defined weight to
-  // the liquidity-weighted mean below; dividing by a totalLiquidity of
-  // exactly zero would throw, not silently produce a fabricated price.
-  // Excluded the same way stale/outlier candidates are, with its own
-  // reason - never silently dropped from provenance.
-  const weighted: AggregationInput[] = [];
-  for (const input of included) {
-    if (toScaledBigInt(input.candidate.liquidityUsd) === BigInt(0)) {
-      sources.push({ ...input.candidate, included: false, exclusionReason: "zero liquidity - cannot contribute to a liquidity-weighted price" });
-    } else {
-      weighted.push(input);
-    }
-  }
-
-  if (weighted.length === 0) {
-    return { priceUsd: "0", confidence: "INVALID", label, sources };
-  }
-
   // Liquidity-weighted mean of the surviving sources - a deeper pool's
   // price is weighted more heavily than a shallow one, rather than a naive
   // average that would let a thin, easily-moved pool count exactly as much
@@ -171,12 +173,12 @@ export function aggregatePrices(inputs: AggregationInput[], now: Date, label: Pr
   // contribution is (price * liquidity), summed and divided by total
   // liquidity, all at CALCULATION_SCALE fixed point. totalLiquidity is
   // guaranteed positive here - every zero-liquidity candidate was already
-  // excluded above.
+  // excluded in Pass 2, before it ever had a chance to reach here.
   const SCALE = 30;
   const SCALE_FACTOR = BigInt(10) ** BigInt(SCALE);
   let weightedSum = BigInt(0);
   let totalLiquidity = BigInt(0);
-  for (const input of weighted) {
+  for (const input of included) {
     const priceScaled = toScaledBigInt(input.candidate.priceUsd, SCALE);
     const liquidityScaled = toScaledBigInt(input.candidate.liquidityUsd, SCALE);
     weightedSum += (priceScaled * liquidityScaled) / SCALE_FACTOR;
@@ -184,11 +186,11 @@ export function aggregatePrices(inputs: AggregationInput[], now: Date, label: Pr
   }
   const priceUsd = formatUnits((weightedSum * SCALE_FACTOR) / totalLiquidity, SCALE);
 
-  for (const input of weighted) {
+  for (const input of included) {
     sources.push({ ...input.candidate, included: true });
   }
 
-  const confidence = classifyConfidence(weighted.map((i) => i.candidate), label);
+  const confidence = classifyConfidence(included.map((i) => i.candidate), label);
   return { priceUsd, confidence, label, sources };
 }
 

@@ -105,8 +105,8 @@ export async function getVolumeCoverage(pools = VOLUME_SOURCE_POOLS): Promise<Vo
       chainSlug: pool.chainSlug,
       protocolKey: pool.key,
       metric: "revenue_usd",
-      // Revenue is architecturally native (readV2ProtocolFeeStateAcrossRange/
-      // resolveProtocolRevenueForRange, lib/onchain/volume/protocol-fee.ts)
+      // Revenue is architecturally native (protocol-fee.ts's
+      // readV2ProtocolFeeStateAcrossRange/readV3ProtocolFeeStateAcrossRange)
       // but not reliably computable for every deployment - see that
       // module's own header comment. NATIVE only when a real revenue_usd
       // observation actually exists (revenueObs != null) - a pool whose
@@ -119,12 +119,21 @@ export async function getVolumeCoverage(pools = VOLUME_SOURCE_POOLS): Promise<Vo
       lastIndexedBlock,
       lastObservationAt: revenueObs?.timestamp ?? null,
       lastObservationValueUsd: revenueObs?.value ?? null,
+      // Phase 5.6: the limitation TEXT must match the actual protocol
+      // mechanism, not just the NATIVE/UNSUPPORTED label - V2's feeTo()/
+      // kLast explanation is factually wrong when printed for a V3 pool
+      // (a real bug caught live during this phase's own development: V3
+      // pools were showing V2's own mechanism description).
       knownLimitations:
         revenueObs != null
           ? []
-          : [
-              "protocol revenue requires an active feeTo() mechanism whose realized amount can currently only be verified as exactly zero (feeTo() == 0x0); an active-but-nonzero feeTo() requires Mint/Burn + kLast tracking not implemented this phase - see protocol-fee.ts",
-            ],
+          : pool.sourceKind === "uniswap-v3"
+            ? [
+                "protocol revenue requires an active slot0().feeProtocol mechanism whose realized amount can currently only be verified as exactly zero (feeProtocol == 0); an active-but-nonzero feeProtocol requires tracking every Swap's fee-growth contribution plus every collectProtocol() call, not implemented this phase - see protocol-fee.ts",
+              ]
+            : [
+                "protocol revenue requires an active feeTo() mechanism whose realized amount can currently only be verified as exactly zero (feeTo() == 0x0); an active-but-nonzero feeTo() requires Mint/Burn + kLast tracking not implemented this phase - see protocol-fee.ts",
+              ],
     });
   }
 

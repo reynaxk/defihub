@@ -143,6 +143,80 @@ describe("recordSwapEvents", () => {
     expect(rows).toHaveLength(1);
   });
 
+  it("persists a V3 event's sqrtPriceX96/liquidity/tick fields exactly, and leaves them null for a V2 event", async () => {
+    const { chainId, poolId } = await makeChainAndPool();
+    await recordSwapEvents([
+      {
+        chainId,
+        poolId,
+        sourceKind: "uniswap-v3",
+        event: baseEvent({
+          transactionHash: "0x" + "33".repeat(32),
+          amount0In: BigInt("290968404"),
+          amount1In: BigInt(0),
+          amount0Out: BigInt(0),
+          amount1Out: BigInt("117612467754305400"),
+          sqrtPriceX96: BigInt("1593278375175708285337695076763573"),
+          liquidity: BigInt("4399000621040250994"),
+          tick: 198189,
+        }),
+      },
+      { chainId, poolId, sourceKind: "uniswap-v2", event: baseEvent({ transactionHash: "0x" + "44".repeat(32), logIndex: 9 }) },
+    ]);
+
+    const rows = await db.select().from(swapEvents).where(eq(swapEvents.poolId, poolId));
+    const v3Row = rows.find((r) => r.sourceKind === "uniswap-v3")!;
+    const v2Row = rows.find((r) => r.sourceKind === "uniswap-v2")!;
+
+    expect(v3Row.sqrtPriceX96).toBe("1593278375175708285337695076763573");
+    expect(v3Row.liquidity).toBe("4399000621040250994");
+    expect(v3Row.tick).toBe(198189);
+
+    expect(v2Row.sqrtPriceX96).toBeNull();
+    expect(v2Row.liquidity).toBeNull();
+    expect(v2Row.tick).toBeNull();
+  });
+
+  it("lets a new canonical V3 event coexist with its orphaned pre-reorg sibling, same as V2 (Section 5's reorg-safety requirement applies identically to both sourceKinds)", async () => {
+    const { chainId, poolId } = await makeChainAndPool();
+    const HASH_1 = "0x" + "55".repeat(32);
+    const HASH_2 = "0x" + "66".repeat(32);
+    const sharedIdentity = { transactionHash: "0x" + "77".repeat(32), logIndex: 3 };
+
+    await recordSwapEvents([
+      { chainId, poolId, sourceKind: "uniswap-v3", event: baseEvent({ ...sharedIdentity, blockHash: HASH_1, tick: 100 }) },
+    ]);
+    await db.update(swapEvents).set({ reorgInvalidatedAt: new Date() }).where(eq(swapEvents.blockHash, HASH_1));
+
+    const secondCount = await recordSwapEvents([
+      { chainId, poolId, sourceKind: "uniswap-v3", event: baseEvent({ ...sharedIdentity, blockHash: HASH_2, tick: 105 }) },
+    ]);
+
+    expect(secondCount).toBe(1);
+    const allRows = await db.select().from(swapEvents).where(eq(swapEvents.poolId, poolId));
+    expect(allRows).toHaveLength(2);
+    const canonicalRow = allRows.find((r) => r.blockHash === HASH_2);
+    expect(canonicalRow?.reorgInvalidatedAt).toBeNull();
+    expect(canonicalRow?.tick).toBe(105);
+  });
+
+  it("is idempotent for a repeated V3 event insert - exactly one row", async () => {
+    const { chainId, poolId } = await makeChainAndPool();
+    const record: SwapEventRecord = {
+      chainId,
+      poolId,
+      sourceKind: "uniswap-v3",
+      event: baseEvent({ transactionHash: "0x" + "88".repeat(32), sqrtPriceX96: BigInt(12345), liquidity: BigInt(6789), tick: -1000 }),
+    };
+    const first = await recordSwapEvents([record]);
+    const second = await recordSwapEvents([record]);
+    expect(first).toBe(1);
+    expect(second).toBe(0);
+
+    const rows = await db.select().from(swapEvents).where(eq(swapEvents.poolId, poolId));
+    expect(rows).toHaveLength(1);
+  });
+
   it("inserts a whole batch in one call, not one write per event", async () => {
     const { chainId, poolId } = await makeChainAndPool();
     const records: SwapEventRecord[] = Array.from({ length: 5 }, (_, i) => ({

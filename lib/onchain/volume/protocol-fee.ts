@@ -168,3 +168,119 @@ export function resolveProtocolRevenueForRange(check: HistoricalFeeCheckResult):
       `factory.feeTo() (${toBlockState.factoryAddress}) = ${toBlockState.feeToAddress} is active across this indexed range (blocks ${fromBlock}-${toBlock}) - realized protocol revenue requires tracking every Mint/Burn event for this pool and its kLast state to compute the sqrt(k) growth each one captured, which this phase does not implement`,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Uniswap V3 (Phase 5.6)
+// ---------------------------------------------------------------------------
+//
+// V3's protocol-fee mechanism is genuinely different from V2's, not the
+// same concept under a new name:
+//   - V2: a single boolean-ish switch (factory.feeTo() zero or not),
+//     realized as LP-share dilution computed from kLast at the next
+//     Mint/Burn.
+//   - V3: slot0().feeProtocol is a packed uint8 - the low 4 bits are
+//     token0's protocol-fee denominator (0 = off, 4-10 = 1/N of the LP fee
+//     tier itself), the high 4 bits are token1's. Realized amounts
+//     accumulate in the pool's own protocolFees.token0/token1 storage as
+//     swaps happen, and are only actually paid out when the factory owner
+//     calls collectProtocol() (a Collect-shaped event, not indexed this
+//     phase). feeProtocol == 0 means NEITHER token has protocol fees
+//     active - the same "verifiably, exactly zero" case V2's zero-address
+//     feeTo() represents. Any nonzero value means at least one token has
+//     an active cut, but the REALIZED amount requires tracking every
+//     Swap's fee-growth contribution plus every collectProtocol() call - a
+//     larger, genuinely different scope than this phase implements, so
+//     (matching V2's own precedent exactly) this reports "unavailable"
+//     rather than guessing.
+//
+// This IS the real, live state for this phase's one configured V3 pool
+// (lib/onchain/volume/config.ts's uniswap-v3-eth-usdc-weth-005 entry):
+// slot0().feeProtocol returned 68 (0x44 = token0 sub-fee 4, token1 sub-fee
+// 4 - both active) when verified. Protocol revenue for that specific pool
+// is therefore reported as unavailable by this module today, for the same
+// "honest, not a placeholder" reason as the V2 pool.
+export const V3_POOL_SLOT0_ABI = parseAbi([
+  "function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
+]);
+
+export interface V3ProtocolFeeState {
+  poolAddress: string;
+  feeProtocol: number;
+  active: boolean;
+}
+
+// Reads slot0() directly from the POOL contract itself (unlike V2, which
+// reads feeTo() from a separate factory contract) - optionally pinned to a
+// specific historical block, same reasoning as readV2ProtocolFeeState.
+export async function readV3ProtocolFeeState(chainSlug: string, poolAddress: string, atBlock?: bigint): Promise<V3ProtocolFeeState> {
+  const [, , , , , feeProtocol] = await withResilientClient(chainSlug, (client) =>
+    client.readContract({
+      address: poolAddress as Address,
+      abi: V3_POOL_SLOT0_ABI,
+      functionName: "slot0",
+      ...(atBlock != null ? { blockNumber: atBlock } : {}),
+    }),
+  );
+  return { poolAddress, feeProtocol, active: feeProtocol !== 0 };
+}
+
+export interface HistoricalV3FeeCheckResult {
+  fromBlock: bigint;
+  toBlock: bigint;
+  fromBlockState: V3ProtocolFeeState;
+  toBlockState: V3ProtocolFeeState;
+}
+
+// The V3 twin of readV2ProtocolFeeStateAcrossRange - same reasoning
+// (pinned to BOTH boundaries of the range actually being attributed,
+// never an unpinned "current" read - see this file's own header comment),
+// same single-read optimization when the range is a single block.
+export async function readV3ProtocolFeeStateAcrossRange(
+  chainSlug: string,
+  poolAddress: string,
+  fromBlock: bigint,
+  toBlock: bigint,
+): Promise<HistoricalV3FeeCheckResult> {
+  if (fromBlock === toBlock) {
+    const state = await readV3ProtocolFeeState(chainSlug, poolAddress, fromBlock);
+    return { fromBlock, toBlock, fromBlockState: state, toBlockState: state };
+  }
+  const [fromBlockState, toBlockState] = await Promise.all([
+    readV3ProtocolFeeState(chainSlug, poolAddress, fromBlock),
+    readV3ProtocolFeeState(chainSlug, poolAddress, toBlock),
+  ]);
+  return { fromBlock, toBlock, fromBlockState, toBlockState };
+}
+
+// The V3 twin of resolveProtocolRevenueForRange - identical three-outcome
+// shape (boundaries disagree -> unavailable; both inactive -> verified
+// zero; both active -> unavailable), same ProtocolRevenueOutcome return
+// type so engine.ts's downstream handling (recording revenue_usd, logging
+// the "unavailable" reason) is identical regardless of which protocol
+// produced the check.
+export function resolveV3ProtocolRevenueForRange(check: HistoricalV3FeeCheckResult): ProtocolRevenueOutcome {
+  const { fromBlock, toBlock, fromBlockState, toBlockState } = check;
+
+  if (fromBlockState.active !== toBlockState.active) {
+    return {
+      available: false,
+      reason:
+        `slot0().feeProtocol state differs between the start (block ${fromBlock}, ${fromBlockState.active ? "active" : "inactive"}) and end (block ${toBlock}, ${toBlockState.active ? "active" : "inactive"}) of this indexed range - the protocol-fee mechanism changed state within this range, so realized revenue cannot be determined without full Swap fee-growth + Collect event tracking across the transition`,
+    };
+  }
+
+  if (!toBlockState.active) {
+    return {
+      available: true,
+      revenueUsd: "0",
+      reason:
+        `slot0().feeProtocol (pool ${toBlockState.poolAddress}) was verified as 0 at BOTH the start (block ${fromBlock}) and end (block ${toBlock}) of this indexed range - the protocol-fee mechanism was inactive for the whole range, so captured revenue is exactly zero, not merely unmeasured`,
+    };
+  }
+
+  return {
+    available: false,
+    reason:
+      `slot0().feeProtocol (pool ${toBlockState.poolAddress}) = ${toBlockState.feeProtocol} is active across this indexed range (blocks ${fromBlock}-${toBlock}) - realized protocol revenue requires tracking every Swap's fee-growth contribution and every collectProtocol() call, which this phase does not implement`,
+  };
+}

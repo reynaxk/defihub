@@ -1084,6 +1084,103 @@ above is the intentional, human-in-the-loop answer for exactly this case;
 there is no fully-automated recovery from it with a single free RPC
 provider and no configured fallback.
 
+## Native Uniswap V3 volume/fees (Phase 5.6)
+
+Phase 5.4 built native volume/fees for Uniswap V2. Phase 5.6 extends that
+to Uniswap V3 - not by copying V2's logic and renaming it, but by
+correctly handling V3's genuinely different event shape and accounting,
+then reusing everything that turns out to be legitimately protocol-neutral
+once that difference is normalized away.
+
+### TVL was already solved - nothing new needed
+
+Before writing any V3-specific code, this phase's own audit found that
+native V3 TVL has existed since Phase 4/5: `VERIFIED_POOLS`
+(`lib/onchain/config.ts`) already lists three real V3 pools (Ethereum,
+Arbitrum, Optimism), verified via the SAME direct ERC-20
+`balanceOf(poolAddress)` mechanism used for V2 pairs. That mechanism is
+not an approximation for V3 - a V3 pool contract holds every LP position's
+locked tokens directly in its own balance, across every tick range, in or
+out of the currently active price - so summing those balances × native
+price already IS the correct, complete total value locked, not a
+narrower "active liquidity only" figure. No liquidity-math, tick
+accounting, or position tracking was built or needed for TVL.
+
+### Volume and fees - the genuinely new work
+
+V3's `Swap` event
+(`Swap(sender, recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)`)
+is structurally different from V2's - a single SIGNED amount0/amount1
+pair instead of four separate unsigned In/Out fields, plus three fields
+V2 doesn't have at all. `decodeV3SwapLog`
+(`lib/onchain/volume/uniswap-v3.ts`) normalizes the signed pair into the
+identical `amount0In/amount1In/amount0Out/amount1Out` shape V2's own
+decoder produces (positive amount → the "In" field; negative → the "Out"
+field, negated back to a positive magnitude) - a lossless, exact
+re-expression of the same underlying fact V2's event already carries
+directly, confirmed against a real, live-captured Swap event and
+cross-validated by hand (a 290.968404 USDC-in-for-0.1176 WETH-out swap
+implying ~$2473.6/WETH, consistent with real market conditions at
+capture time).
+
+That normalization is what lets `lib/onchain/volume/math.ts`'s
+`computeSwapVolumeUsd`/`computeSwapFeeUsd` (extracted from uniswap-v2.ts
+this phase, once a second protocol needed the identical calculation) apply
+completely unchanged to both protocols - not a shortcut, a genuine
+structural equivalence once each protocol's own event shape is decoded
+correctly. Volume convention is identical to V2's: the USD value of the
+swap's input side(s), never both sides summed.
+
+### Fee tier - read from the pool, never assumed
+
+V3 pools are NOT all 0.30% like V2. Each pool's fee tier is immutable
+(baked in at deployment, native unit: hundredths-of-a-bip, denominator
+1,000,000) and verified live via that specific pool's own `fee()` call -
+never a global constant. `VolumeSourcePool.feeBps` stores this converted
+into the shared bps-out-of-10,000 unit (`raw / 100` - exact for every
+standard V3 tier), with the untouched raw value kept alongside
+(`v3FeeTierRaw`) purely for traceability. The one configured pool
+(`uniswap-v3-eth-usdc-weth-005`) is verified at 0.05% (raw 500 → 5 bps) -
+confirmed correct live: a real indexed run computed `feesUsd =
+80.24907710` against `volumeUsd = 160498.15420372`, exactly `0.05%` of it.
+
+### Revenue - genuinely different mechanism from V2, same honest outcome
+
+V3's protocol-fee switch is `slot0().feeProtocol`, a packed uint8 (not a
+factory-level address toggle like V2's `feeTo()`) - read directly from the
+pool contract, not a factory. `feeProtocol == 0` means verifiably zero
+protocol revenue (the same "direct on-chain fact" V2's zero address
+represents); any nonzero value means the mechanism is active, but the
+REALIZED amount requires tracking every `Swap`'s fee-growth contribution
+plus every `collectProtocol()` call - a different and larger scope than
+this phase implements, so (matching V2's own precedent exactly) revenue is
+reported unavailable, never guessed. Live-verified fact for this phase's
+one configured V3 pool: `feeProtocol == 68` (both token0 and token1 have
+an active 1/4 protocol cut) - revenue is therefore unavailable for it
+specifically, the same situation as the V2 pool.
+
+### What this phase deliberately did NOT build
+
+No tick indexing, no Mint/Burn/Collect event indexing, no position
+accounting, no liquidity-range math. None of Sections 8/10/11/12's
+concentrated-liquidity accounting was needed because this app's own TVL
+methodology (direct balance reads) never required it in the first place -
+building it anyway would have been unused complexity, not correctness.
+If a FUTURE phase ever needs true active-in-range liquidity (as opposed to
+total balance-based TVL) or realized protocol revenue, that work starts
+from zero here, not from a partially-built foundation.
+
+### Reorg safety, idempotency, chunked indexing - fully reused, zero changes
+
+V3 rows share the exact same `swap_events` table as V2 (three new
+NULLABLE columns - `sqrt_price_x96`, `liquidity`, `tick` - populated only
+for V3 rows), the same `(poolId, transactionHash, logIndex, blockHash)`
+reorg-safe identity, the same `lib/onchain/volume/reorg.ts` recheck path,
+and the same `scanFromCursor` chunked-catch-up engine from Phase 5.5 -
+none of these needed a single V3-specific change. Verified live: the
+reorg-recheck worker checked both pools' events and observations together
+in one run with zero code awareness of which was which.
+
 ## Known limitations
 
 - Six verified pools across five chains, plus two verified ERC-4626 vaults
@@ -1174,9 +1271,24 @@ provider and no configured fallback.
   window (disconnected from the live cursor) was judged unnecessary this
   round.
 - **No dedicated multi-chain smoke test** - `VOLUME_SOURCE_POOLS`
-  (`lib/onchain/volume/config.ts`) still has exactly one real entry
-  (Ethereum). Multi-chain isolation (Section 30) is verified at the code
-  level (`indexAllPoolVolume`'s per-pool try/catch,
-  `engine.integration.test.ts`'s own regression test) but has not been
-  exercised against two genuinely different live chains, since only one is
-  configured.
+  (`lib/onchain/volume/config.ts`) has two real entries as of Phase 5.6
+  (one V2, one V3), both on Ethereum. Multi-pool isolation IS now
+  genuinely exercised live (both pools indexed together in the same real
+  run - see the Phase 5.6 section above); multi-CHAIN isolation (Section
+  30) is still only verified at the code level
+  (`indexAllPoolVolume`'s per-pool try/catch,
+  `engine.integration.test.ts`'s own regression test), not against two
+  genuinely different live chains, since only Ethereum is configured for
+  volume/fees today.
+- **No V3 tick/position/liquidity accounting, Mint/Burn/Collect indexing,
+  or active-in-range-only TVL** (Phase 5.6) - deliberately not built,
+  because this app's existing balance-based TVL methodology never needed
+  it; see the Phase 5.6 section above's "What this phase deliberately did
+  NOT build." A future phase wanting TRUE active-liquidity TVL (as opposed
+  to total-balance TVL) or realized V3 protocol revenue starts this work
+  from zero.
+- **V3 protocol revenue is unavailable for the one configured V3 pool** -
+  `slot0().feeProtocol == 68` (live-verified, both tokens have an active
+  1/4 protocol cut) - the same "mechanism active, realized amount not
+  tracked" situation as the V2 pool, for the same class of reason
+  (Mint/Burn/kLast for V2, Swap fee-growth + `collectProtocol()` for V3).

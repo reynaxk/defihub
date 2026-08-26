@@ -8,13 +8,76 @@ import { roundExactDecimal } from "@/lib/onchain/verify-pool";
 import { logger } from "@/lib/observability/logger";
 import { aggregateSwapVolume, classifyVolumeConfidence } from "./aggregate";
 import { type VolumeSourcePool, type VolumeSourceToken, VOLUME_SOURCE_POOLS } from "./config";
-import { readV2ProtocolFeeStateAcrossRange, resolveProtocolRevenueForRange } from "./protocol-fee";
+import { computeSwapVolumeUsd, type SwapTokenPrice } from "./math";
+import {
+  readV2ProtocolFeeStateAcrossRange,
+  readV3ProtocolFeeStateAcrossRange,
+  resolveProtocolRevenueForRange,
+  resolveV3ProtocolRevenueForRange,
+  type ProtocolRevenueOutcome,
+} from "./protocol-fee";
 import { checkRevenueConsistency, checkVolumeFeeConsistency, checkVolumeSpike } from "./quality";
 import { getChainId, getLatestVolumeObservation, getPoolIdByConfigKey } from "./queries";
 import { recordSwapEvents, type SwapEventRecord } from "./record-swap-events";
 import { recordVolumeObservation, type VolumeObservationWriteOutcome } from "./record-volume-observation";
 import type { DecodedSwapEvent, SwapVolumeResult } from "./types";
-import { computeSwapVolumeUsd, decodeSwapLog, SWAP_EVENT_SIGNATURE, type SwapTokenPrice } from "./uniswap-v2";
+import { decodeSwapLog, SWAP_EVENT_SIGNATURE } from "./uniswap-v2";
+import { decodeV3SwapLog, V3_SWAP_EVENT_SIGNATURE } from "./uniswap-v3";
+
+// Per-sourceKind dispatch (Section "protocol adapter architecture" - common
+// primitives in math.ts/record-swap-events.ts/protocol-fee.ts's own shared
+// ProtocolRevenueOutcome shape, thin protocol-specific adapters in
+// uniswap-v2.ts/uniswap-v3.ts). Deliberately three small, explicit
+// functions rather than one generic "adapter interface" object per pool -
+// with exactly two protocols, an interface layer would hide more than it
+// would clarify; a switch that fails to compile if a third sourceKind is
+// ever added without a matching arm here is the more honest tool for this
+// job's actual size.
+function swapEventSignatureFor(pool: VolumeSourcePool): string {
+  return pool.sourceKind === "uniswap-v3" ? V3_SWAP_EVENT_SIGNATURE : SWAP_EVENT_SIGNATURE;
+}
+
+function decodeSwapLogFor(pool: VolumeSourcePool, log: Log): Omit<DecodedSwapEvent, "blockTimestamp"> | null {
+  return pool.sourceKind === "uniswap-v3" ? decodeV3SwapLog(log) : decodeSwapLog(log);
+}
+
+// V2's methodology version and V3's are versioned INDEPENDENTLY, even
+// though both currently implement the identical input-side-only
+// convention (math.ts) - a future change to only one protocol's own
+// decode/fee logic should only bump that protocol's own version string,
+// never force every existing V2 row to look like it used a "new" version
+// it never actually used.
+function calculationVersionFor(pool: VolumeSourcePool): string {
+  return pool.sourceKind === "uniswap-v3" ? "uniswap-v3-input-side-only-v1" : "uniswap-v2-input-side-only-v1";
+}
+
+// Reads and resolves this pool's protocol-revenue state for the given
+// range, dispatching to the correct protocol's own read (V2:
+// factory.feeTo(); V3: pool.slot0().feeProtocol - see protocol-fee.ts's
+// own module comments for why these are genuinely different mechanisms,
+// not the same concept renamed). Never throws - an RPC failure here
+// degrades to "no revenue outcome this chunk" (logged), the same
+// resilience the V2-only version of this code already had.
+async function resolveProtocolRevenueForPool(pool: VolumeSourcePool, fromBlock: bigint, toBlock: bigint): Promise<ProtocolRevenueOutcome | null> {
+  try {
+    if (pool.sourceKind === "uniswap-v3") {
+      const check = await readV3ProtocolFeeStateAcrossRange(pool.chainSlug, pool.poolAddress, fromBlock, toBlock);
+      return resolveV3ProtocolRevenueForRange(check);
+    }
+    if (!pool.factoryAddress) {
+      throw new Error(`pool "${pool.key}" is sourceKind "uniswap-v2" but has no configured factoryAddress`);
+    }
+    const check = await readV2ProtocolFeeStateAcrossRange(pool.chainSlug, pool.factoryAddress, fromBlock, toBlock);
+    return resolveProtocolRevenueForRange(check);
+  } catch (err) {
+    logger.warn("volume indexing: protocol fee state read failed - revenue marked unavailable this run", {
+      component: "onchain-volume",
+      pool: pool.key,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
 
 // The RPC-touching orchestration layer that ties every other file in this
 // module together - not unit-tested directly (this codebase's established
@@ -113,12 +176,6 @@ export function effectiveStartBlock(pool: VolumeSourcePool, currentBlock: bigint
 // reused roundExactDecimal as price-reference-assets.ts's
 // OBSERVATION_VALUE_DECIMALS.
 const OBSERVATION_VALUE_DECIMALS = 8;
-
-// Bumped only if this adapter's methodology changes (e.g. a V3 adapter, or
-// a different volume convention) - see uniswap-v2.ts's own header comment
-// for the input-side-only convention this version number currently
-// reflects.
-const VOLUME_CALCULATION_VERSION = "uniswap-v2-input-side-only-v1";
 
 // One chunk's own result - Phase 5.5's scanFromCursor now calls onLogs
 // once per chunk (see lib/indexing/events.ts's own module comment), so a
@@ -223,7 +280,7 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<ChunkVolu
   const decodedRaw: Omit<DecodedSwapEvent, "blockTimestamp">[] = [];
   let malformedCount = 0;
   for (const log of logs) {
-    const decoded = decodeSwapLog(log);
+    const decoded = decodeSwapLogFor(pool, log);
     if (!decoded) {
       malformedCount++;
       continue;
@@ -278,23 +335,16 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<ChunkVolu
   );
   const pinnedTimestamp = timestampByBlock.get(pinnedEvent.blockNumber)!;
 
-  const [previousVolume, feeRangeCheck] = await Promise.all([
+  const [previousVolume, revenueResolution] = await Promise.all([
     getLatestVolumeObservation(poolId, "volume_usd"),
     // Pinned to BOTH boundaries of the CHUNK this call is actually
     // attributing (chunk.fromBlock..pinnedEvent.blockNumber), never an
     // unpinned "current head" read - see protocol-fee.ts's own header
     // comment for exactly why a current-head-only read cannot correctly
-    // attribute revenue for a historical range. Phase 5.5: this is now the
-    // chunk's own boundary, not the whole run's - a tighter, more accurate
-    // range whenever a run spans multiple chunks.
-    readV2ProtocolFeeStateAcrossRange(pool.chainSlug, pool.factoryAddress, chunk.fromBlock, pinnedEvent.blockNumber).catch((err) => {
-      logger.warn("volume indexing: protocol fee state read failed - revenue marked unavailable this run", {
-        component: "onchain-volume",
-        pool: pool.key,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }),
+    // attribute revenue for a historical range. Dispatches to the correct
+    // protocol's own mechanism (V2 vs V3 - see resolveProtocolRevenueForPool's
+    // own comment) and never throws.
+    resolveProtocolRevenueForPool(pool, chunk.fromBlock, pinnedEvent.blockNumber),
   ]);
 
   const volumeUsd = roundExactDecimal(aggregate.volumeUsd, OBSERVATION_VALUE_DECIMALS);
@@ -350,7 +400,7 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<ChunkVolu
     blockHash: pinnedEvent.blockHash,
     timestamp: pinnedTimestamp,
     calculationInputs,
-    calculationVersion: VOLUME_CALCULATION_VERSION,
+    calculationVersion: calculationVersionFor(pool),
     confidence,
   });
   logIfNotPersisted(volumeOutcome, "volume_usd", pool, pinnedEvent, unpersistedMetrics);
@@ -364,14 +414,14 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<ChunkVolu
     blockHash: pinnedEvent.blockHash,
     timestamp: pinnedTimestamp,
     calculationInputs,
-    calculationVersion: VOLUME_CALCULATION_VERSION,
+    calculationVersion: calculationVersionFor(pool),
     confidence,
   });
   logIfNotPersisted(feesOutcome, "fees_usd", pool, pinnedEvent, unpersistedMetrics);
 
   let revenueOutcome: "verified-zero" | "unavailable" = "unavailable";
-  if (feeRangeCheck) {
-    const revenue = resolveProtocolRevenueForRange(feeRangeCheck);
+  if (revenueResolution) {
+    const revenue = revenueResolution;
     if (revenue.available) {
       revenueOutcome = "verified-zero";
       const revenueUsd = roundExactDecimal(revenue.revenueUsd, OBSERVATION_VALUE_DECIMALS);
@@ -386,7 +436,7 @@ async function processSwapLogs(params: ProcessSwapLogsParams): Promise<ChunkVolu
         timestamp: pinnedTimestamp,
         calculationInputs:
           revenueFlags.length > 0 ? { ...calculationInputs, qualityFlags: [...(calculationInputs.qualityFlags ?? []), ...revenueFlags] } : calculationInputs,
-        calculationVersion: VOLUME_CALCULATION_VERSION,
+        calculationVersion: calculationVersionFor(pool),
         confidence,
       });
       logIfNotPersisted(revenueWriteOutcome, "revenue_usd", pool, pinnedEvent, unpersistedMetrics);
@@ -499,7 +549,7 @@ export async function indexPoolVolume(pool: VolumeSourcePool): Promise<PoolVolum
       chainSlug: pool.chainSlug,
       component,
       address: pool.poolAddress as Address,
-      eventSignature: SWAP_EVENT_SIGNATURE,
+      eventSignature: swapEventSignatureFor(pool),
       currentBlock,
       startBlock: startBlockForThisRun,
       chunkSize: DEFAULT_VOLUME_CHUNK_SIZE,

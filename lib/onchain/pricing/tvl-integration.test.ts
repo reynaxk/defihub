@@ -77,7 +77,7 @@ describe("isNativePriceEligibleForTvl", () => {
     expect(isNativePriceEligibleForTvl("HIGH", oneMsInFuture, NOW)).toBe(false);
   });
 
-  it("a future-dated observation is ineligible the same way a stale one is - the caller falls back to the external price rather than using it as a native override", () => {
+  it("treats a future-dated observation as ineligible, the same way a stale one is - never accepted regardless of confidence", () => {
     // Same shape as tvl-integration.ts's own resolveNativePriceOverrides
     // eligibility gate (`if (!native || !isNativePriceEligibleForTvl(...)) continue`)
     // - a false result here means that coingeckoId is simply never added to

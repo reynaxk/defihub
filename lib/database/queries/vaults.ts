@@ -147,7 +147,10 @@ export async function getVaultTvlHistory(
     blockHash: r.blockHash,
     priceSource: r.priceSource,
     priceRetrievedAt: r.priceRetrievedAt,
-    calculationInputs: r.calculationInputs,
+    // entityType is filtered to "vault" above - see pools.ts's identical
+    // cast for the full reasoning (Phase 5.3's PriceSourceObservation[]
+    // shape only ever appears on entityType "token" rows).
+    calculationInputs: r.calculationInputs as HistoricalObservationCalculationInput[] | null,
     source: r.source,
     calculationVersion: r.calculationVersion,
   }));

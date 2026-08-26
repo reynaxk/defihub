@@ -8,6 +8,7 @@
     { "path": "/api/cron/sync-tokens", "schedule": "5 */6 * * *" },
     { "path": "/api/cron/check-alerts", "schedule": "*/10 * * * *" },
     { "path": "/api/cron/verify-onchain", "schedule": "12,42 * * * *" },
+    { "path": "/api/cron/price-onchain", "schedule": "9,39 * * * *" },
     { "path": "/api/cron/recheck-reorgs", "schedule": "27 * * * *" },
     { "path": "/api/cron/rollup-metrics", "schedule": "7 3 * * *" }
   ]

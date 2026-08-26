@@ -1,0 +1,12 @@
+-- Added NOT VALID, deliberately not followed by VALIDATE CONSTRAINT - the
+-- same pattern established in migrations 0026 and 0028 for this table's
+-- other two entity-scoped block-identity CHECK constraints. entityType
+-- "token" is brand new (no pre-existing row to grandfather), but a validated
+-- ADD CONSTRAINT still scans and locks the entire table to confirm no row
+-- violates it, regardless of how few rows the constraint's own condition
+-- applies to - unnecessary cost on a table that may hold a large number of
+-- real pool/vault observations by the time this runs against a live
+-- deployment. NOT VALID takes only a brief metadata lock (SHARE UPDATE
+-- EXCLUSIVE) and applies the rule to every new INSERT/UPDATE from this
+-- moment forward.
+ALTER TABLE "historical_observations" ADD CONSTRAINT "historical_observations_token_price_requires_block_identity" CHECK ("historical_observations"."entity_type" <> 'token' OR "historical_observations"."metric" <> 'price_usd' OR ("historical_observations"."block_number" IS NOT NULL AND "historical_observations"."block_hash" IS NOT NULL AND "historical_observations"."block_hash" <> '')) NOT VALID;

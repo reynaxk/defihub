@@ -12,7 +12,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import postgres from "postgres";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { closeDb, db } from "@/lib/database/client";
-import { chains, historicalObservations, indexingState, pools, vaults } from "@/lib/database/schema";
+import { chains, historicalObservations, indexingState, pools, tokens, vaults } from "@/lib/database/schema";
 import { REORG_RECHECK_ADVISORY_LOCK_KEY, recheckPoolTvlReorgs } from "./recheck-reorgs";
 
 const REAL_HASH_A = `0x${"a".repeat(64)}`;
@@ -56,12 +56,18 @@ async function makeVault(chainId: string) {
   return vault;
 }
 
+async function makeToken(chainId: string) {
+  const address = `0xtoken${randomUUID().slice(0, 8)}`;
+  const [token] = await db.insert(tokens).values({ chainId, address, symbol: "TST", decimals: 18 }).returning({ id: tokens.id });
+  return { id: token.id, configKey: address };
+}
+
 async function makeObservation(
   entityId: string,
   chainId: string,
   blockNumber: bigint,
   blockHash: string,
-  entityType: "pool" | "vault" = "pool",
+  entityType: "pool" | "vault" | "token" = "pool",
 ) {
   const [row] = await db
     .insert(historicalObservations)
@@ -69,7 +75,12 @@ async function makeObservation(
       chainId,
       entityType,
       entityId,
-      metric: "tvl_usd",
+      // Phase 5.3: "token" entities use metric "price_usd", not "tvl_usd" -
+      // derived from entityType here rather than taken as a separate
+      // parameter, since every real caller (and every existing pool/vault
+      // test) already has a fixed 1:1 entityType -> metric mapping and
+      // there's no need for this test helper to expose a knob nothing uses.
+      metric: entityType === "token" ? "price_usd" : "tvl_usd",
       value: "100.00000000",
       timestamp: new Date(),
       blockNumber: blockNumber.toString(),
@@ -80,7 +91,7 @@ async function makeObservation(
   return row.id;
 }
 
-async function getState(chainSlug: string, configKey: string, entityType: "pool" | "vault" = "pool") {
+async function getState(chainSlug: string, configKey: string, entityType: "pool" | "vault" | "token" = "pool") {
   const [state] = await db
     .select()
     .from(indexingState)
@@ -92,18 +103,22 @@ describe("recheckPoolTvlReorgs", () => {
   const createdChainIds: string[] = [];
   const createdPoolIds: string[] = [];
   const createdVaultIds: string[] = [];
+  const createdTokenIds: string[] = [];
 
   afterEach(async () => {
     // historical_observations.entityId and indexing_state.chainSlug are
     // plain columns, not FKs (see historicalObservations' own schema
     // comment on why entityType/entityId is deliberately not a real FK) -
-    // deleting the chain (which cascades to `pools`/`vaults`) does NOT
-    // clean these up, so both need explicit cleanup here.
+    // deleting the chain (which cascades to `pools`/`vaults`/`tokens`) does
+    // NOT clean these up, so both need explicit cleanup here.
     if (createdPoolIds.length > 0) {
       await db.delete(historicalObservations).where(inArray(historicalObservations.entityId, createdPoolIds));
     }
     if (createdVaultIds.length > 0) {
       await db.delete(historicalObservations).where(inArray(historicalObservations.entityId, createdVaultIds));
+    }
+    if (createdTokenIds.length > 0) {
+      await db.delete(historicalObservations).where(inArray(historicalObservations.entityId, createdTokenIds));
     }
     for (const chainId of createdChainIds) {
       const [chain] = await db.select({ slug: chains.slug }).from(chains).where(eq(chains.id, chainId));
@@ -111,6 +126,7 @@ describe("recheckPoolTvlReorgs", () => {
     }
     createdPoolIds.splice(0);
     createdVaultIds.splice(0);
+    createdTokenIds.splice(0);
     for (const id of createdChainIds.splice(0)) await db.delete(chains).where(eq(chains.id, id));
   });
 
@@ -737,6 +753,78 @@ describe("recheckPoolTvlReorgs", () => {
     const state = await getState(chain.slug, vault.configKey, "vault");
     expect(state.status).toBe("error");
     expect(state.lastSuccessfulSyncAt).toBeNull();
+  });
+
+  // Phase 5.3: the same job, generalized a second time, to also cover
+  // native token price observations (lib/onchain/pricing/, entityType
+  // "token", metric "price_usd") alongside pools and vaults -
+  // tokenEntitiesOverride mirrors poolEntitiesOverride/vaultEntitiesOverride's
+  // exact shape/purpose.
+
+  it("discovers and rechecks a token price entity exactly like a pool/vault entity, tagging results with entityType \"token\"", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const token = await makeToken(chain.id);
+    createdTokenIds.push(token.id);
+    await makeObservation(token.id, chain.id, BigInt(100), REAL_HASH_A, "token");
+
+    const stats = await recheckPoolTvlReorgs({
+      tokenEntitiesOverride: [{ tokenId: token.id, configKey: token.configKey, chainSlug: chain.slug }],
+      readBlockHash: async () => REAL_HASH_A,
+    });
+
+    expect(stats!.totalConfirmed).toBe(1);
+    expect(stats!.perEntity[0].entityType).toBe("token");
+    expect(stats!.perEntity[0].entityKey).toBe(token.configKey);
+
+    const state = await getState(chain.slug, token.configKey, "token");
+    expect(state.status).toBe("idle");
+    expect(Number(state.lastProcessedBlock)).toBe(100);
+    expect(state.lastSuccessfulSyncAt).not.toBeNull();
+  });
+
+  it("detects a reorg for a token price observation and marks it invalidated, the same as it would for a pool or vault", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const token = await makeToken(chain.id);
+    createdTokenIds.push(token.id);
+    const obsId = await makeObservation(token.id, chain.id, BigInt(200), REAL_HASH_A, "token");
+
+    const stats = await recheckPoolTvlReorgs({
+      tokenEntitiesOverride: [{ tokenId: token.id, configKey: token.configKey, chainSlug: chain.slug }],
+      readBlockHash: async () => REAL_HASH_B,
+    });
+
+    expect(stats!.totalReorged).toBe(1);
+    expect(stats!.perEntity[0].reorgedObservations[0].observationId).toBe(obsId);
+
+    const [row] = await db.select().from(historicalObservations).where(eq(historicalObservations.id, obsId));
+    expect(row.reorgInvalidatedAt).not.toBeNull();
+    expect(row.blockHash).toBe(REAL_HASH_A); // provenance untouched, same as the pool/vault case
+
+    const state = await getState(chain.slug, token.configKey, "token");
+    expect(state.status).toBe("error");
+    expect(state.lastSuccessfulSyncAt).toBeNull();
+  });
+
+  it("never mixes real production token price entities into a pool-only override run", async () => {
+    const chain = await makeChain();
+    createdChainIds.push(chain.id);
+    const pool = await makePool(chain.id);
+    createdPoolIds.push(pool.id);
+    await makeObservation(pool.id, chain.id, BigInt(30), REAL_HASH_A);
+
+    // Only poolEntitiesOverride is supplied - tokenEntitiesOverride is
+    // omitted, which must default to an empty list, never a live query
+    // against real "token"/"price_usd" observations that may already exist
+    // in this same database.
+    const stats = await recheckPoolTvlReorgs({
+      poolEntitiesOverride: [{ poolId: pool.id, configKey: pool.configKey, chainSlug: chain.slug }],
+      readBlockHash: async () => REAL_HASH_A,
+    });
+
+    expect(stats!.entitiesConsidered).toBe(1);
+    expect(stats!.perEntity.every((e) => e.entityType === "pool")).toBe(true);
   });
 
   it("processes pools and vaults together in one run, keeping each entity's own checkpoint independent - and the pool's checkpoint key is byte-identical to Phase 5.1's own format", async () => {

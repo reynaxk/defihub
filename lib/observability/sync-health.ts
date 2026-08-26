@@ -42,6 +42,7 @@ const KNOWN_WORKERS = [
   "yields",
   "alerts",
   "onchain",
+  "onchain-price",
   "rollup-metrics",
 ];
 

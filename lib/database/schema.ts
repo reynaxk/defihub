@@ -426,6 +426,56 @@ export interface HistoricalObservationCalculationInput {
   // storing this as `number` would round the "input" half of the
   // provenance record even where the calculation itself stayed exact.
   priceUsd: string;
+  // Phase 5.3: present only when this token's priceUsd above came from the
+  // on-chain reference-asset pricing engine (lib/onchain/pricing/) rather
+  // than the external price provider - see
+  // lib/onchain/pricing/tvl-integration.ts's resolveNativePriceOverrides,
+  // whose own NativePriceOverride shape this mirrors exactly, and
+  // verify-pool.ts's verifyAllPools, which attaches it per-token right
+  // before persisting. Optional/additive: a CoinGecko-priced token (the
+  // overwhelming majority, and every token in every pre-Phase-5.3 row)
+  // simply omits this field - never fabricated, never backfilled onto a
+  // token that wasn't actually natively priced.
+  nativePriceProvenance?: {
+    sources: PriceSourceObservation[];
+    observedAt: string; // ISO string - jsonb has no native Date type
+    blockNumber: number | null;
+    blockHash: string | null;
+  };
+}
+
+// Phase 5.3: the per-source snapshot behind one on-chain-derived token price
+// (entityType "token", metric "price_usd" - see historicalObservations
+// below). A genuinely different shape from HistoricalObservationCalculationInput
+// above (a DEX price source, not a pool-token balance), stored in the exact
+// same jsonb calculationInputs column - jsonb has no schema enforcement at
+// the database level, so a differently-shaped provenance record for a
+// different metric doesn't need a new column or table, only its own TS
+// interface (see calculationInputs' own column comment for why this column
+// intentionally accepts either shape). `included` covers every source this
+// engine actually considered, not just the ones that won: a rejected source
+// (`included: false`, `exclusionReason` set - stale, an outlier, insufficient
+// liquidity) still records why it was rejected, since "why is a source NOT
+// contributing" is as much a part of price provenance as "why is it worth
+// $X" - see lib/onchain/pricing/aggregate.ts.
+export interface PriceSourceObservation {
+  sourceKind: "uniswap-v2"; // extensible union - the one adapter this phase implements and verifies
+  sourcePoolAddress: string;
+  sourceChainSlug: string;
+  pairedTokenSymbol: string;
+  pairedTokenAddress: string;
+  // The exact decimal string used to convert this pool's on-chain reserve
+  // ratio into a USD price - itself either another on-chain-derived
+  // reference price (see lib/onchain/pricing/config.ts's dependency-ordered
+  // REFERENCE_ASSETS) or the hand-declared $1.00 anchor, never a fabricated
+  // value.
+  pairedTokenPriceUsd: string;
+  priceUsd: string; // this source's own derived price - exact decimal string
+  liquidityUsd: string; // this source's approximate USD depth - exact decimal string
+  reserveRaw: string; // this token's raw on-chain reserve, exact integer as a string
+  pairedReserveRaw: string; // the paired token's raw on-chain reserve, exact integer as a string
+  included: boolean;
+  exclusionReason?: string;
 }
 
 export const historicalObservations = pgTable(
@@ -433,7 +483,8 @@ export const historicalObservations = pgTable(
   {
     id: uuid("id").defaultRandom().primaryKey(),
     chainId: uuid("chain_id").references(() => chains.id, { onDelete: "cascade" }),
-    // e.g. "pool" - which table entityId's value refers to.
+    // "pool" | "vault" | "token" (Phase 5.3) - which table entityId's value
+    // refers to (pools.id / vaults.id / tokens.id respectively).
     entityType: varchar("entity_type", { length: 32 }).notNull(),
     entityId: uuid("entity_id").notNull(),
     // e.g. "tvl_usd" - which figure this row is a snapshot of, so the same
@@ -456,7 +507,12 @@ export const historicalObservations = pgTable(
     // replayable: the exact inputs, and where/when they came from.
     priceSource: varchar("price_source", { length: 64 }),
     priceRetrievedAt: timestamp("price_retrieved_at", { withTimezone: true }),
-    calculationInputs: jsonb("calculation_inputs").$type<HistoricalObservationCalculationInput[]>(),
+    // Two distinct shapes share this one column, picked by entityType/metric
+    // (see PriceSourceObservation's own comment for why a second table isn't
+    // needed for this): HistoricalObservationCalculationInput[] for
+    // entityType "pool"/"vault", metric "tvl_usd"; PriceSourceObservation[]
+    // for entityType "token", metric "price_usd" (Phase 5.3).
+    calculationInputs: jsonb("calculation_inputs").$type<HistoricalObservationCalculationInput[] | PriceSourceObservation[]>(),
     // e.g. "onchain-verification" - which subsystem computed this, for the
     // native-vs-external provenance distinction (never label externally-
     // sourced data as DeFiHub-native, or vice versa).
@@ -466,6 +522,27 @@ export const historicalObservations = pgTable(
     // observations computed the old way, without needing to backfill or
     // silently mix incompatible historical figures.
     calculationVersion: varchar("calculation_version", { length: 32 }),
+    // Phase 5.3: "HIGH" | "MEDIUM" | "LOW" | "INVALID" (see
+    // lib/onchain/pricing/types.ts's PriceConfidence and aggregate.ts's
+    // classifyConfidence for how this is derived) - null for any observation
+    // this engine doesn't produce (every pool/vault tvl_usd row, and any
+    // token/price_usd row predating this column). Deliberately its own
+    // top-level, queryable column rather than folded into calculationInputs'
+    // jsonb array: "is this price good enough to use for X" (e.g. Phase
+    // 5.3's own TVL source-selection policy) needs to be filterable in a
+    // plain WHERE clause without unpacking JSON, the same reason blockHash
+    // itself is a real column and not left inside calculationInputs.
+    confidence: varchar("confidence", { length: 16 }),
+    // Phase 5.3: "ONCHAIN_NATIVE" | "EXTERNAL_FALLBACK" | "HYBRID" (see
+    // lib/onchain/pricing/types.ts's PriceLabel) - distinguishes a price
+    // DeFiHub actually computed from its own on-chain reads from one that's
+    // still fundamentally sourced from a third-party aggregator, so a
+    // consumer can never mistake one for the other. Named "price_label", not
+    // "label" - onchain_verifications already has an unrelated `label`
+    // column (a human-readable pool/vault name), and reusing the same word
+    // for a different meaning on a different table would invite exactly the
+    // kind of confusion this column exists to prevent.
+    priceLabel: varchar("price_label", { length: 24 }),
     // Null (the default, for every row ever written by recordPoolVerification)
     // means this observation is still considered canonical history. Set only
     // by workers/onchain/recheck-reorgs.ts, the moment it determines this
@@ -565,6 +642,21 @@ export const historicalObservations = pgTable(
     check(
       "historical_observations_vault_tvl_requires_block_identity",
       sql`${table.entityType} <> 'vault' OR ${table.metric} <> 'tvl_usd' OR (${table.blockNumber} IS NOT NULL AND ${table.blockHash} IS NOT NULL AND ${table.blockHash} <> '')`,
+    ),
+    // Phase 5.3's third instance of this exact rule (see the pool/vault
+    // constraints above, and their own comments for the full reasoning this
+    // repeats unchanged) - a native on-chain token price observation without
+    // real block identity can't be checked against a reorg later, so
+    // recordTokenPriceObservation (lib/onchain/pricing/record-price-observation.ts)
+    // refuses to write one, same as recordPoolVerification/
+    // recordVaultVerification already do for their own entity types. Added
+    // NOT VALID for the same reason migration 0028's vault constraint was -
+    // entityType "token" is brand new, so there's no pre-existing row to
+    // grandfather, but a validated ADD CONSTRAINT still scans and locks the
+    // whole table regardless.
+    check(
+      "historical_observations_token_price_requires_block_identity",
+      sql`${table.entityType} <> 'token' OR ${table.metric} <> 'price_usd' OR (${table.blockNumber} IS NOT NULL AND ${table.blockHash} IS NOT NULL AND ${table.blockHash} <> '')`,
     ),
   ],
 );

@@ -10,6 +10,7 @@ import { logger } from "@/lib/observability/logger";
 import { VERIFIED_POOLS, type VerifiedPool } from "./config";
 import { syncPoolsFromConfig } from "./pools";
 import { recordVerification } from "./record-verification";
+import { resolveNativePriceOverrides, priceSourceForTokens, type NativePriceOverride } from "./pricing/tvl-integration";
 
 // Bumped only if the sum-of-balances methodology itself changes (e.g. a
 // future AMM adapter that isn't "sum this contract's own ERC-20 balances")
@@ -442,6 +443,37 @@ export async function recordPoolVerification(record: PoolVerificationRecord): Pr
   }
 }
 
+// Attaches native-pricing provenance to the specific calculationInputs
+// entries whose coingeckoId was natively priced this run, leaving every
+// other entry (still CoinGecko-priced) completely unchanged - see
+// HistoricalObservationCalculationInput's own nativePriceProvenance field
+// (schema.ts) and resolveNativePriceOverrides' own NativePriceOverride
+// shape (pricing/tvl-integration.ts), which this attaches verbatim, never
+// fabricated. Pure and directly testable: covers the fully-native, hybrid,
+// and fully-external cases with plain constructed inputs, no RPC/DB
+// involved - this is deliberately extracted rather than inlined into
+// verifyAllPools below for exactly that reason, the same "orchestration
+// stays thin, the actual decision is a pure function" pattern this file
+// already uses for computePoolTvl itself.
+export function attachNativeProvenance(
+  calculationInputs: HistoricalObservationCalculationInput[],
+  nativeOverridesByCoingeckoId: Map<string, NativePriceOverride>,
+): HistoricalObservationCalculationInput[] {
+  return calculationInputs.map((input) => {
+    const override = nativeOverridesByCoingeckoId.get(input.coingeckoId);
+    if (!override) return input;
+    return {
+      ...input,
+      nativePriceProvenance: {
+        sources: override.sources,
+        observedAt: override.observedAt.toISOString(),
+        blockNumber: override.blockNumber,
+        blockHash: override.blockHash,
+      },
+    };
+  });
+}
+
 export async function verifyAllPools(): Promise<{ key: string; ok: boolean; error?: string }[]> {
   if (VERIFIED_POOLS.length === 0) return [];
 
@@ -475,6 +507,32 @@ export async function verifyAllPools(): Promise<{ key: string; ok: boolean; erro
     const message = err instanceof Error ? err.message : String(err);
     return VERIFIED_POOLS.map((p) => ({ key: p.key, ok: false, error: `price lookup failed: ${message}` }));
   }
+
+  // Phase 5.3's controlled TVL source-selection policy: for any of these
+  // pools' tokens that this app's own on-chain reference-asset pricing
+  // engine (lib/onchain/pricing/) has independently priced with sufficient
+  // confidence, prefer that price over CoinGecko's - see
+  // resolveNativePriceOverrides' own comment for the exact confidence bar.
+  // Every existing pool keeps working via CoinGecko unchanged for any token
+  // that isn't a configured reference asset, or whose native price isn't
+  // confident enough yet. Wrapped in its own try/catch, deliberately never
+  // allowed to fail this function: a native-pricing lookup problem must
+  // degrade to the CoinGecko price this pipeline already trusted before
+  // Phase 5.3 existed, never abort a verification run that would otherwise
+  // have succeeded.
+  let nativeOverridesByCoingeckoId: Map<string, NativePriceOverride> = new Map();
+  try {
+    nativeOverridesByCoingeckoId = await resolveNativePriceOverrides(uniqueCoingeckoIds);
+    for (const [coingeckoId, override] of nativeOverridesByCoingeckoId) {
+      priceById.set(coingeckoId, override.priceUsd);
+    }
+  } catch (err) {
+    logger.warn("native reference-asset price lookup failed - falling back to CoinGecko pricing for this run", {
+      component: "onchain",
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  const nativelyPricedCoingeckoIds = new Set(nativeOverridesByCoingeckoId.keys());
 
   const poolsByChain = new Map<string, VerifiedPool[]>();
   for (const pool of VERIFIED_POOLS) {
@@ -540,9 +598,14 @@ export async function verifyAllPools(): Promise<{ key: string; ok: boolean; erro
         poolId: poolIdByConfigKey.get(pool.key) ?? null,
         tvlUsdForObservation,
         blockHash: outcome.blockHash ?? null,
-        priceSource: priceProvider.name,
+        // "onchain-pricing-engine" if every one of this pool's tokens used
+        // a native reference-asset price this run, a "hybrid:..." tag if
+        // only some did, or priceProvider.name unchanged if none did - see
+        // priceSourceForTokens' own comment for why a genuine mix must
+        // never be mislabeled as either pure kind.
+        priceSource: priceSourceForTokens(pool.tokens.map((t) => t.coingeckoId), nativelyPricedCoingeckoIds, priceProvider.name),
         priceRetrievedAt,
-        calculationInputs: outcome.calculationInputs ?? null,
+        calculationInputs: outcome.calculationInputs ? attachNativeProvenance(outcome.calculationInputs, nativeOverridesByCoingeckoId) : null,
         calculationVersion: TVL_CALCULATION_VERSION,
       });
 

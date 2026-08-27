@@ -729,11 +729,12 @@ export const swapEvents = pgTable(
     poolId: uuid("pool_id")
       .notNull()
       .references(() => pools.id, { onDelete: "cascade" }),
-    // e.g. "uniswap-v2" - which decoder/volume-math this event was
-    // produced by, the same purpose as PriceSourceObservation.sourceKind
-    // above (Phase 5.3) - extensible union at the application layer, plain
-    // varchar at the schema layer since jsonb-adjacent enums don't buy
-    // anything here that a documented string doesn't already give.
+    // "uniswap-v2" | "uniswap-v3" (Phase 5.6) - which decoder/volume-math
+    // this event was produced by, the same purpose as
+    // PriceSourceObservation.sourceKind above (Phase 5.3) - extensible
+    // union at the application layer, plain varchar at the schema layer
+    // since jsonb-adjacent enums don't buy anything here that a documented
+    // string doesn't already give.
     sourceKind: varchar("source_kind", { length: 32 }).notNull(),
     transactionHash: varchar("transaction_hash", { length: 128 }).notNull(),
     // A transaction can emit the same event shape more than once (e.g. a
@@ -760,6 +761,22 @@ export const swapEvents = pgTable(
     amount1In: numeric("amount1_in", { precision: 78, scale: 0 }).notNull(),
     amount0Out: numeric("amount0_out", { precision: 78, scale: 0 }).notNull(),
     amount1Out: numeric("amount1_out", { precision: 78, scale: 0 }).notNull(),
+    // Phase 5.6: Uniswap V3-only state, carried on the V3 Swap event itself
+    // - null for every V2 row (V2's Swap event has none of these), reused
+    // rather than a separate v3_swap_events table (see
+    // lib/onchain/volume/uniswap-v3.ts's own module comment for why one
+    // shared table, not a protocol-specific one, is the correct call here).
+    // sqrtPriceX96 is a uint160 (numeric(78,0) is generous headroom, same
+    // column type already used for the uint256 amount fields - simpler
+    // than a tighter-but-still-safe precision just for this one field).
+    // liquidity is a uint128. tick is an int24 (-8,388,608 to 8,388,607),
+    // comfortably inside a standard 32-bit integer column - never widened
+    // to numeric, since a real column type that already fits exactly is
+    // more honest about the actual value's range than reusing a
+    // wider-than-necessary type "just in case."
+    sqrtPriceX96: numeric("sqrt_price_x96", { precision: 78, scale: 0 }),
+    liquidity: numeric("liquidity", { precision: 78, scale: 0 }),
+    tick: integer("tick"),
     // Same reorg model as historicalObservations.reorgInvalidatedAt - null
     // means canonical; set once, additively, by
     // lib/onchain/volume/reorg.ts's own recheck, never deleted or

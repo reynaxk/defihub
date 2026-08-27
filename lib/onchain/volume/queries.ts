@@ -142,6 +142,7 @@ export async function getDailyVolumeHistory(
 }
 
 export interface SwapEventSummary {
+  sourceKind: string;
   transactionHash: string;
   logIndex: number;
   blockNumber: string;
@@ -150,6 +151,11 @@ export interface SwapEventSummary {
   amount1In: string;
   amount0Out: string;
   amount1Out: string;
+  // V3-only (Phase 5.6) - null for every V2 row, since V2's Swap event
+  // carries none of these (see schema.ts's own comment on these columns).
+  sqrtPriceX96: string | null;
+  liquidity: string | null;
+  tick: number | null;
 }
 
 // Bounded raw-event read for provenance drill-down (Section 7's "a
@@ -159,6 +165,7 @@ export interface SwapEventSummary {
 export async function getRecentSwapEvents(poolId: string, limit: number): Promise<SwapEventSummary[]> {
   const rows = await db
     .select({
+      sourceKind: swapEvents.sourceKind,
       transactionHash: swapEvents.transactionHash,
       logIndex: swapEvents.logIndex,
       blockNumber: swapEvents.blockNumber,
@@ -167,6 +174,9 @@ export async function getRecentSwapEvents(poolId: string, limit: number): Promis
       amount1In: swapEvents.amount1In,
       amount0Out: swapEvents.amount0Out,
       amount1Out: swapEvents.amount1Out,
+      sqrtPriceX96: swapEvents.sqrtPriceX96,
+      liquidity: swapEvents.liquidity,
+      tick: swapEvents.tick,
     })
     .from(swapEvents)
     .where(and(eq(swapEvents.poolId, poolId), isNull(swapEvents.reorgInvalidatedAt)))

@@ -108,4 +108,22 @@ describe("getVolumeCoverage", () => {
     expect(revenue?.knownLimitations).toEqual([]);
     expect(revenue?.lastObservationValueUsd).toBe("0.00000000");
   });
+
+  // Phase 5.6 regression test for a real bug caught live: the revenue
+  // limitation TEXT must describe the pool's OWN protocol mechanism, not
+  // always V2's feeTo()/kLast explanation regardless of sourceKind.
+  it("describes V3's own slot0().feeProtocol mechanism for a V3 pool's unsupported revenue - never V2's feeTo()/kLast text", async () => {
+    const { chainSlug, poolId, configKey } = await makeChainAndPool();
+    void poolId; // no observations inserted - revenue stays unsupported
+
+    const v3Pool: VolumeSourcePool = { ...fakePool(chainSlug, configKey), sourceKind: "uniswap-v3" };
+    const coverage = await getVolumeCoverage([v3Pool]);
+    const revenue = coverage.find((c) => c.metric === "revenue_usd");
+
+    expect(revenue?.source).toBe("UNSUPPORTED");
+    expect(revenue?.knownLimitations.join(" ")).toContain("feeProtocol");
+    expect(revenue?.knownLimitations.join(" ")).toContain("collectProtocol");
+    expect(revenue?.knownLimitations.join(" ")).not.toContain("feeTo");
+    expect(revenue?.knownLimitations.join(" ")).not.toContain("kLast");
+  });
 });

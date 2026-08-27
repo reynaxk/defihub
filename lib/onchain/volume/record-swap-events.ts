@@ -46,6 +46,12 @@ export async function recordSwapEvents(records: SwapEventRecord[]): Promise<numb
         amount1In: r.event.amount1In.toString(),
         amount0Out: r.event.amount0Out.toString(),
         amount1Out: r.event.amount1Out.toString(),
+        // V3-only (Phase 5.6) - undefined on every V2 event, which drizzle
+        // writes as SQL NULL, exactly matching these columns' nullable
+        // definition in schema.ts.
+        sqrtPriceX96: r.event.sqrtPriceX96?.toString(),
+        liquidity: r.event.liquidity?.toString(),
+        tick: r.event.tick,
       })),
     )
     .onConflictDoNothing({

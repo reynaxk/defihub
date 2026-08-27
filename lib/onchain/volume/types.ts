@@ -11,21 +11,29 @@ import type { VolumeCalculationInput } from "@/lib/database/schema";
 
 export type { VolumeCalculationInput };
 
-// The one on-chain volume-source adapter this phase implements and
-// verifies end-to-end (see lib/onchain/volume/uniswap-v2.ts). Deliberately
-// narrow, matching lib/onchain/pricing/types.ts's own PriceSourceKind
-// precedent: adding a second adapter kind (e.g. Uniswap V3) means adding a
+// The on-chain volume-source adapter kinds this phase implements and
+// verifies end-to-end (lib/onchain/volume/uniswap-v2.ts,
+// lib/onchain/volume/uniswap-v3.ts, added Phase 5.6). Deliberately a
+// closed union, matching lib/onchain/pricing/types.ts's own
+// PriceSourceKind precedent: adding a third adapter kind means adding a
 // member here and a matching arm everywhere this type is switched on, so
 // an incomplete rollout fails to compile instead of silently falling
 // through a default case.
-export type VolumeSourceKind = "uniswap-v2";
+export type VolumeSourceKind = "uniswap-v2" | "uniswap-v3";
 
-// One decoded Swap event, independent of which specific V2-style contract
-// produced it - the raw shape every genuine IUniswapV2Pair-compatible
+// One decoded Swap event, ALREADY NORMALIZED to a single common shape
+// regardless of which protocol produced it. For V2, this is the raw shape
+// every genuine IUniswapV2Pair-compatible
 // Swap(sender, amount0In, amount1In, amount0Out, amount1Out, to) event
-// decodes into. Never includes USD values - pricing is applied later,
-// separately, so a pricing failure can never affect whether this shape
-// itself is considered valid.
+// decodes into directly. For V3 (Phase 5.6), whose own Swap event instead
+// carries a single SIGNED amount0/amount1 pair, decodeV3SwapLog
+// (uniswap-v3.ts) normalizes that signed pair into this same
+// amount0In/amount1In/amount0Out/amount1Out shape BEFORE this type is ever
+// constructed - see that function's own comment for exactly how, and why
+// that normalization is a correct, lossless representation of the V3
+// event's real semantics, not a "pretend it's V2" shortcut. Never includes
+// USD values - pricing is applied later, separately, so a pricing failure
+// can never affect whether this shape itself is considered valid.
 export interface DecodedSwapEvent {
   transactionHash: string;
   logIndex: number;
@@ -37,6 +45,15 @@ export interface DecodedSwapEvent {
   amount1In: bigint;
   amount0Out: bigint;
   amount1Out: bigint;
+  // V3-only (Phase 5.6) - undefined for every V2 event, since V2's Swap
+  // event carries none of these. Preserved verbatim from the V3 Swap event
+  // for provenance/future methodology (see docs/native-data.md's own
+  // "Native Uniswap V3 volume/fees" section for what this phase does and
+  // does NOT yet use them for) - never derived, never assumed, never
+  // substituted with current state for a historical row.
+  sqrtPriceX96?: bigint;
+  liquidity?: bigint;
+  tick?: number;
 }
 
 // The result of pricing one decoded swap - the USD value of whichever

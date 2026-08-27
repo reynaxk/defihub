@@ -232,6 +232,13 @@
       "when": 1787756754346,
       "tag": "0032_swap_events_include_block_hash",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1787774051410,
+      "tag": "0033_swap_events_v3_fields",
+      "breakpoints": true
     }
   ]
 }

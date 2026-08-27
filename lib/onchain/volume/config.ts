@@ -38,18 +38,30 @@ export interface VolumeSourcePool {
   // established), never assumed from config alone.
   token0: VolumeSourceToken;
   token1: VolumeSourceToken;
-  // The factory that deployed this pool - needed to read feeTo() for
-  // protocol-revenue determination (lib/onchain/volume/protocol-fee.ts).
-  // Kept per-entry rather than a single shared constant: a different
-  // V2-style fork would have a different factory, and this config already
-  // treats every deployment's identity as independently verified rather
-  // than assumed.
-  factoryAddress: string;
-  // The swap fee this deployment charges, in basis points (30 = 0.30%).
-  // NEVER a global default applied to every V2-shaped pool - see
-  // this file's own header and each entry's `feeVerification` field for
-  // why this specific value is trusted for this specific deployment.
+  // V2-only: the factory that deployed this pool, needed to read feeTo()
+  // for protocol-revenue determination
+  // (lib/onchain/volume/protocol-fee.ts's readV2ProtocolFeeState). V3
+  // pools (Phase 5.6) read their own protocol-fee state directly from the
+  // pool contract itself (slot0().feeProtocol) - no factory needed - so
+  // this is optional and only ever set for sourceKind "uniswap-v2".
+  factoryAddress?: string;
+  // The swap fee this deployment charges, ALWAYS expressed in the shared
+  // bps-out-of-10000 unit math.ts's computeSwapFeeUsd expects (30 =
+  // 0.30%), regardless of source protocol. NEVER a global default applied
+  // to every pool - see this file's own header and each entry's
+  // `feeVerification` field for why this specific value is trusted for
+  // this specific deployment. For a V3 entry, this is the pool's own
+  // immutable on-chain fee() value CONVERTED to this unit (divide by 100 -
+  // V3's native unit is hundredths-of-a-bip, denominator 1,000,000, vs
+  // this shared unit's denominator of 10,000; the conversion is always
+  // exact for every standard V3 tier: 100->1, 500->5, 3000->30, 10000->100)
+  // - see v3FeeTierRaw below for the untouched on-chain value this was
+  // derived from.
   feeBps: number;
+  // V3-only, purely for traceability - the exact raw fee() value read live
+  // from the pool contract (e.g. 500), before the /100 conversion into
+  // feeBps above. Never used in any calculation itself.
+  v3FeeTierRaw?: number;
   feeVerification: string;
   // A FLOOR, not a guarantee, for where indexing starts if no cursor
   // exists yet - deliberately a recent block, not this pool's deployment
@@ -109,6 +121,56 @@ export const VOLUME_SOURCE_POOLS: VolumeSourcePool[] = [
     // DEFAULT_VOLUME_CHUNK_SIZE), and the exact window this phase's own
     // Swap-event fixtures (uniswap-v2.test.ts) were pulled from live.
     startBlock: BigInt(25838000),
+  },
+  {
+    // Phase 5.6's Uniswap V3 entry - the SAME pool address already
+    // verified and live in VERIFIED_POOLS as "uniswap-v3-eth-usdc-weth-005"
+    // (lib/onchain/config.ts), where its TVL has been natively computed
+    // since Phase 4/5 via direct ERC20 balanceOf(pool) reads (see that
+    // config's own module comment: "every token this pool contract itself
+    // holds a balance of" - a V3 pool contract holds every LP's locked
+    // tokens directly, across every position, so that balance-based
+    // methodology is already the CORRECT, COMPLETE total for V3 too, not
+    // an approximation - no new TVL work needed or attempted here). This
+    // entry adds the genuinely new piece: native volume/fees from the
+    // pool's own Swap events, which nothing in this app computed before
+    // Phase 5.6.
+    key: "uniswap-v3-eth-usdc-weth-005",
+    chainSlug: "ethereum",
+    poolAddress: "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+    sourceKind: "uniswap-v3",
+    token0: { address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6, coingeckoId: "usd-coin" },
+    token1: { address: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", symbol: "WETH", decimals: 18, coingeckoId: "weth" },
+    // 500 (0.05%) verified live via this pool's own fee() call - the V3
+    // fee tier is immutable per-pool (set once at deployment, has no
+    // "toggle" the way V2's optional protocol fee does), so verifying it
+    // once here and trusting it going forward is safe, the same
+    // "config-verified-once, immutable for the pool's lifetime" precedent
+    // V2's own feeBps already established. 500 / 100 = 5.
+    feeBps: 5,
+    v3FeeTierRaw: 500,
+    // Verified live on-chain, all three together confirming this is
+    // genuinely the pool this config entry claims: token0() ==
+    // 0xa0b86991...(USDC), token1() == 0xc02aaa39...(WETH), fee() == 500.
+    // Also independently confirmed factory() == 0x1F98431c8aD98523631AE4a
+    // 59f267346ea31F984 (the real, canonical Uniswap V3 Factory) and
+    // slot0().feeProtocol == 68 (nonzero - both token0 and token1 have an
+    // active 1/4 protocol-fee cut) - the SAME "protocol-fee mechanism is
+    // active, so revenue is not verifiably zero" situation as the V2 pool
+    // above. See lib/onchain/volume/protocol-fee.ts's readV3ProtocolFeeState/
+    // resolveV3ProtocolRevenueForRange for the resulting "unavailable"
+    // outcome for this specific pool, and why - unlike V2's kLast-based
+    // mechanism - V3's realized protocol-fee amount would additionally
+    // require tracking every Mint/Burn/Collect event plus historical
+    // feeGrowthGlobal state, a different and larger scope this phase does
+    // not implement.
+    feeVerification: "pool.token0()/token1()/fee() match config; pool.factory() == 0x1F98431c8aD98523631AE4a59f267346ea31F984 (verified live)",
+    // ~1,600 blocks before the chain head at verification time (25,841,622)
+    // - the same "recent window, not a historical backfill" boundary the
+    // V2 entry's own startBlock comment establishes, subject to the same
+    // effectiveStartBlock runtime correction (engine.ts) if this value
+    // goes stale before the first real indexing run.
+    startBlock: BigInt(25840000),
   },
   // Phase 5.7: PancakeSwap V2 (BNB Chain) - confirmed live to be a
   // byte-for-byte Uniswap V2 fork (identical getReserves()/token0()/

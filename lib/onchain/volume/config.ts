@@ -172,4 +172,49 @@ export const VOLUME_SOURCE_POOLS: VolumeSourcePool[] = [
     // goes stale before the first real indexing run.
     startBlock: BigInt(25840000),
   },
+  // Phase 5.7: PancakeSwap V2 (BNB Chain) - confirmed live to be a
+  // byte-for-byte Uniswap V2 fork (identical getReserves()/token0()/
+  // token1()/Swap-event shape and topic0), so this reuses the existing
+  // uniswap-v2.ts decode/math adapter with zero new code, same as
+  // engine.ts's sourceKind dispatch already does for it. The SAME pool
+  // address already verified in VERIFIED_POOLS
+  // ("pancakeswap-amm-bsc-usdt-wbnb", lib/onchain/config.ts) and now also
+  // reused as this chain's WBNB reference-price source
+  // (lib/onchain/pricing/config.ts's "wbnb-bnb-chain" entry) - one verified
+  // pool serving TVL, pricing, and volume/fees, the same "verify once, reuse
+  // everywhere" discipline the Ethereum USDC/WETH pool already established.
+  {
+    key: "pancakeswap-amm-bsc-usdt-wbnb",
+    chainSlug: "bnb-chain",
+    poolAddress: "0x16b9a82891338f9ba80e2d6970fdda79d1eb0dae",
+    sourceKind: "uniswap-v2",
+    token0: { address: "0x55d398326f99059ff775485246999027b3197955", symbol: "USDT", decimals: 18, coingeckoId: "tether" },
+    token1: { address: "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c", symbol: "WBNB", decimals: 18, coingeckoId: "wbnb" },
+    // The real, canonical PancakeSwap V2 Factory - confirmed live via this
+    // pool's own factory() call.
+    factoryAddress: "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73",
+    // 25 bps (0.25%) - PancakeSwap V2's own fixed, immutable swap fee,
+    // hardcoded into its pair contract's swap() constant-product check (a
+    // 9975/10000 factor, PancakeSwap's own well-known deviation from
+    // Uniswap V2's 9970/10000/30bps) - NOT configurable per-pool the way
+    // Aerodrome's factory-governed fee is (see docs/native-data.md's Phase
+    // 5.7 section for why Aerodrome was audited and rejected this round on
+    // exactly that basis). Trusting this value reduces to confirming this
+    // IS a genuine PancakeSwap-V2-factory-deployed pair, which
+    // feeVerification below does directly.
+    feeBps: 25,
+    // Verified live on-chain: this pair's own factory() call returns
+    // 0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73 - the real, well-known
+    // PancakeSwap V2 Factory address. Also independently confirmed
+    // factory.feeTo() at the same time: it returns
+    // 0x0ed943Ce24BaEBF257488771759F9BF482C39706 (non-zero) - the
+    // protocol-fee mechanism IS active for this deployment, the same
+    // "active but unavailable without Mint/Burn + K-growth tracking"
+    // situation as the Ethereum V2 pool - see protocol-fee.ts's existing V2
+    // revenue logic, reused unmodified via engine.ts's sourceKind dispatch.
+    feeVerification: "pair.factory() == 0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73 (verified live)",
+    // ~1,257 blocks before BNB Chain's head at verification time
+    // (118,258,257), comfortably within one indexing run's reach.
+    startBlock: BigInt(118257000),
+  },
 ];

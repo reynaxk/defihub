@@ -1159,6 +1159,29 @@ one configured V3 pool: `feeProtocol == 68` (both token0 and token1 have
 an active 1/4 protocol cut) - revenue is therefore unavailable for it
 specifically, the same situation as the V2 pool.
 
+**PR #14 follow-up fix**: the initial implementation determined the
+active/inactive classification for an indexed range by reading
+`slot0().feeProtocol` at only the range's two boundaries and trusting "both
+boundaries agree" as proof the state was constant throughout. That is false
+whenever `feeProtocol` changes twice within the range and lands back on its
+starting value (e.g. inactive → active → inactive) - both boundary reads
+agree "inactive," so the range was wrongly reported verified-zero even
+though a real active window existed in between. Fixed by reconstructing
+every `feeProtocol` transition that actually happened inside the range from
+the pool's own real `SetFeeProtocol` events (the canonical Uniswap V3 core
+event a factory-owner's `setFeeProtocol()` call emits), splitting the range
+into segments at those transitions, and classifying the whole range as
+verified-zero only if **every** reconstructed segment was inactive - a
+single active segment anywhere in the range, even one bounded by two
+inactive readings, now correctly marks the whole range's revenue
+unavailable instead of fabricating zero. Reuses the existing
+`scanBlockRange` primitive (no second historical scanner); cross-checks the
+event-reconstructed state against an independent `slot0()` read so an
+incomplete event scan or a reorg between reads can never silently produce a
+wrong classification. See `lib/onchain/volume/protocol-fee.ts`'s own
+"Historical-transition bug fix" module comment and
+`protocol-fee.test.ts`'s two `REGRESSION` tests for the full detail.
+
 ### What this phase deliberately did NOT build
 
 No tick indexing, no Mint/Burn/Collect event indexing, no position
@@ -1181,6 +1204,153 @@ none of these needed a single V3-specific change. Verified live: the
 reorg-recheck worker checked both pools' events and observations together
 in one run with zero code awareness of which was which.
 
+## Native protocol coverage expansion (Phase 5.7)
+
+Phase 5.4/5.5 built the native volume/fee/revenue engine and proved it once,
+against exactly one pool (Uniswap V2 USDC/WETH on Ethereum). Phase 5.6 (a
+separately-developed branch at the time this phase was written, since merged
+alongside it - see the section above) adds native Uniswap V3 support; this
+phase's own work did not depend on it and was built and verified
+independently. This phase asks a different question: **given the
+already-merged primitives, what's the next real, correctly-computed piece of
+coverage to add** - not the largest number of protocols, one genuinely
+verified expansion.
+
+### Audit and candidate matrix
+
+Every entry already in `VERIFIED_POOLS`/`VERIFIED_PROTOCOL_TVLS`
+(`lib/onchain/config.ts`) that wasn't already covered by native volume/fees
+was evaluated as a candidate:
+
+| Candidate | On-chain shape | Verdict |
+| --- | --- | --- |
+| **PancakeSwap V2** (`pancakeswap-amm-bsc-usdt-wbnb`, BNB Chain) | Byte-for-byte Uniswap V2 fork | **Selected** - see below |
+| **Aerodrome V1** (`aerodrome-v1-base-usdc-weth`, Base) | Solidly/Velodrome-fork AMM, V2-compatible `getReserves()` | **Audited and rejected this round** - see below |
+| Lido (`lido-eth-steth`) | Single-sided ETH deposit (`Submitted` events), no token0/token1 pair | Not attempted - a fundamentally different accounting shape than the swap-pair model `swap_events`/`VOLUME_SOURCE_POOLS` is built around; would need its own table and adapter, not a config addition |
+| Aave V3 (`aave-v3-eth-ausdc`) | Supply/Withdraw/Borrow/Repay, interest accrual | Not attempted - "volume" isn't a coherent concept for a lending market, and this task's own revenue caution (interest accrual, reserve factor) makes lending revenue especially risky; matches the existing lending-boundary discussion in [Known limitations](#known-limitations) |
+| sDAI/sUSDe (`sdai-ethereum`, `susde-ethereum`) | ERC-4626 share-price accounting | Not attempted - yet another distinct model (share price, not swap events); already has TVL coverage via the existing vault adapter, volume/fees not a meaningful concept for a single-asset vault |
+
+PancakeSwap and Aerodrome were the two candidates actually audited live
+on-chain this phase (RPC calls against real deployed contracts, not
+assumption); Lido/Aave/vault-style protocols were reasoned about structurally
+but not live-audited, since their accounting shape alone already disqualifies
+them from a config-only, `swap_events`-reuse expansion - forcing them in
+would mean a new adapter and a new table, out of scope for "prove one
+protocol using existing primitives first."
+
+### PancakeSwap V2 (BNB Chain) - selected
+
+Confirmed live against the real, already-verified pool
+(`0x16b9a82891338f9ba80e2d6970fdda79d1eb0dae`):
+
+- `pool.factory()` returns `0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73` - the
+  real, canonical PancakeSwap V2 Factory.
+- `pool.token0()`/`token1()` return the exact USDT/WBNB addresses already
+  configured, in that order.
+- The Swap event's `topic0` is byte-for-byte identical to Uniswap V2's
+  (`0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d82`) - a
+  genuine Uniswap V2 fork, not merely V2-shaped.
+
+Because of that, this expansion needed **zero new decode or math code**:
+`lib/onchain/volume/config.ts` gained one new `VOLUME_SOURCE_POOLS` entry
+with `sourceKind: "uniswap-v2"`, reusing `decodeSwapLog`/
+`computeSwapVolumeUsd`/`computeSwapFeeUsd` (`uniswap-v2.ts`) exactly as
+written for the Ethereum pool - see `lib/onchain/volume/pancakeswap.test.ts`,
+which decodes a real, live-captured PancakeSwap Swap event (block
+118,258,974) through the unmodified V2 decoder as direct proof of reuse.
+
+**Data contract**:
+- **TVL**: already native since an earlier phase (`VERIFIED_POOLS`'
+  balance-based methodology - direct ERC20 `balanceOf(pool)` reads).
+- **Volume/fees**: native, from real Swap events, at PancakeSwap's own fee
+  tier - **25 bps (0.25%)**, not Uniswap V2's 30 bps. This is PancakeSwap
+  V2's fixed, contract-hardcoded swap fee (a `9975/10000` factor baked into
+  `swap()`'s constant-product check), not a governance-configurable
+  parameter - trusting it reduces to confirming the pair was genuinely
+  deployed by the canonical factory, which the live `factory()` check above
+  does directly. Live smoke test: 53 real swaps indexed across 3 chunks, 53
+  priced, 0 unpriced.
+- **Revenue**: **unavailable**, not fabricated. `factory.feeTo()` returns
+  `0x0ed943Ce24BaEBf257488771759F9BF482C39706` (non-zero, confirmed live) -
+  the protocol-fee switch is active, the same "active but unrealized without
+  Mint/Burn + `kLast` tracking" situation as the Ethereum V2 pool. Reused
+  `protocol-fee.ts`'s existing V2 revenue logic unmodified via
+  `engine.ts`'s `sourceKind` dispatch - no PancakeSwap-specific revenue code
+  was written.
+- **Confidence**: `HIGH` for volume/fees when every swap in a run's chunk
+  was priced (confirmed live - see below); the same `classifyVolumeConfidence`
+  thresholds already governing the Ethereum pool, not a new rule.
+
+### The BNB Chain pricing gap (found, then fixed)
+
+Auditing PancakeSwap's viability surfaced a real blocker: Phase 5.3's
+`REFERENCE_ASSETS` (`lib/onchain/pricing/config.ts`) was Ethereum-only -
+zero BSC entries. Without a native USD price for USDT/WBNB,
+`getNativeTokenPrice` would never resolve for BSC, and every PancakeSwap
+swap would be permanently unpriced - technically "NATIVE" by config, but
+practically useless (always `LOW` confidence, `$0` volume).
+
+The pricing *engine* (`priceReferenceAssetsOnChain`, `deriveV2Price`,
+`resolveReferenceOrder`) was already fully chain-parameterized - the
+Ethereum-only limitation was purely a config gap, not an architectural one.
+`bnb-chain` was also already a fully supported chain elsewhere
+(`VIEM_CHAIN_BY_SLUG`, `confirmations.ts`, `rpc-client.ts` default URLs, and
+an existing `VERIFIED_POOLS` entry) - so this is extending an
+already-supported chain's pricing coverage, not adding a new chain.
+
+Fix: two new `REFERENCE_ASSETS` entries, mirroring the exact
+anchor+derived shape `usdc-ethereum`/`weth-ethereum` already established -
+`usdt-bnb-chain` (anchor, hand-declared $1.00, same role as `usdc-ethereum`)
+and `wbnb-bnb-chain` (derived, priced from the SAME PancakeSwap
+USDT/WBNB pool used for TVL and volume - one verified pool serving three
+purposes, the same reuse precedent the Ethereum USDC/WETH pool already set).
+No pricing engine code changed - reused Phase 5.3's mechanism exactly as
+instructed, not a new external provider.
+
+Live smoke test (`npm run price:onchain`): both new assets priced
+successfully. `usdt-bnb-chain` at the anchor's fixed `$1.00`;
+`wbnb-bnb-chain` derived at `$698.97`, `MEDIUM` confidence (single
+uncorroborated source, ~$81.4M pool liquidity - comfortably above the
+minimum-liquidity floor), the same confidence class a single-source
+Ethereum derived asset would get.
+
+### Aerodrome V1 (Base) - audited and rejected this round
+
+Confirmed live: a genuine Solidly/Velodrome-fork AMM, real factory
+(`0x420DD381b31aEf6683db6B902084cB0FfECe40Da`), real
+`getReserves()`-compatible pool, `stable() == false` (this configured pool
+is volatile), current fee `factory.getFee(pool, false) == 30` (0.30%).
+
+**Why it's disqualified this round**: Aerodrome's factory exposes
+governance-controlled `setFee(bool, uint256)` and `setCustomFee(address,
+uint256)` - the fee is **not immutable per-pool** the way PancakeSwap's or
+Uniswap V2/V3's fee is. The established "verify once at config time, trust
+forever" pattern this app uses for `feeBps` (safe for PancakeSwap/Uniswap V2
+because their fee is contract-hardcoded) would be unsafe here: the fee could
+change after verification without any code noticing, silently miscomputing
+every subsequent fee calculation for historical ranges that predate the
+change - a direct violation of "never assume current configuration applied
+historically." Safely including Aerodrome needs either live per-run fee
+verification or fee-history event tracking, both real extensions beyond this
+phase's scope - left for a future phase, not implemented as a
+known-unsafe shortcut.
+
+### What this phase deliberately did not build
+
+- No new adapter code, no new event-decode logic, no new database table or
+  migration - PancakeSwap reuses the existing V2 adapter and `swap_events`
+  table entirely unmodified.
+- No Aerodrome (or any governance-mutable-fee protocol) support - see above.
+- No Lido/Aave/vault-shaped volume or revenue - structurally out of scope
+  for a swap-pair-based expansion, not merely deferred for time.
+- No new chain support - `bnb-chain` was already supported; only its
+  pricing *coverage* was extended.
+- No DeFiLlama shadow-comparison automation - PancakeSwap's live-indexed
+  volume was cross-checked by hand against the swap fixtures' own implied
+  price (~$700/WBNB, consistent across three independent live captures)
+  rather than an automated DefiLlama diff, which this phase didn't build
+  tooling for.
+
 ## Known limitations
 
 - Six verified pools across five chains, plus two verified ERC-4626 vaults
@@ -1191,16 +1361,18 @@ in one run with zero code awareness of which was which.
   [Native TVL calculation](#native-tvl-calculation) above for why that
   would currently be dishonest, not just incomplete.
 - Price is still entirely external (CoinGecko) for **vaults**, and for
-  **every pool token that isn't one of Phase 5.3's five reference assets**
-  (USDC/WETH/USDT/DAI/WBTC on Ethereum) — see
-  [Native price engine (Phase 5.3)](#native-price-engine-phase-53) and
-  [Price provider abstraction](#price-provider-abstraction). For the
+  **every pool token that isn't one of the seven hand-curated reference
+  assets** (USDC/WETH/USDT/DAI/WBTC on Ethereum; USDT/WBNB on BNB Chain as
+  of Phase 5.7) — see
+  [Native price engine (Phase 5.3)](#native-price-engine-phase-53),
+  [Native protocol coverage expansion (Phase 5.7)](#native-protocol-coverage-expansion-phase-57),
+  and [Price provider abstraction](#price-provider-abstraction). For the
   reference assets themselves, on a pool where `verifyAllPools` runs, the
   USD conversion is DeFiHub-computed from a real, verified on-chain reserve
   ratio whenever confidence is `HIGH`/`MEDIUM`; below that bar, or for any
   other token, it's still CoinGecko. Be precise about what "native pricing"
-  covers here: five hand-curated assets, one chain, one AMM adapter — not a
-  general on-chain price feed for arbitrary tokens.
+  covers here: seven hand-curated assets across two chains, one AMM adapter
+  — not a general on-chain price feed for arbitrary tokens.
 - `historical_observations` only has real depth from the point Phase 4
   shipped forward — there's no backfill of pre-Phase-4 verified-TVL history
   (the pre-existing `onchain_verifications` table only ever stored the
@@ -1233,13 +1405,16 @@ in one run with zero code awareness of which was which.
   have no block-hash provenance at all - `onchain_verifications` has no
   `blockHash` column - so they remain outside this recheck's coverage; see
   `recheck-reorgs.ts`'s own module comment.
-- **Volume/fees/revenue (Phase 5.4) cover exactly one pool** - the Uniswap
-  V2 USDC/WETH pair on Ethereum. See
+- **Volume/fees/revenue cover exactly two pools** - the Uniswap V2 USDC/WETH
+  pair on Ethereum (Phase 5.4) and PancakeSwap V2 USDT/WBNB on BNB Chain
+  (Phase 5.7). See
   [Native volume/fee/revenue engine (Phase 5.4)](#native-volumefeerevenue-engine-phase-54)
-  above for the full picture, including why revenue is reported as
-  unavailable for that one pool specifically (its protocol-fee switch is
-  live and active, and this phase does not implement the `Mint`/`Burn` +
-  `kLast` tracking a nonzero-`feeTo()` deployment requires).
+  and
+  [Native protocol coverage expansion (Phase 5.7)](#native-protocol-coverage-expansion-phase-57)
+  for the full picture, including why revenue is reported as unavailable for
+  *both* pools specifically (each one's protocol-fee switch is live and
+  active, and this phase does not implement the `Mint`/`Burn` + `kLast`
+  tracking a nonzero-`feeTo()` deployment requires).
 - **No Uniswap V3 volume** - the existing verified V3 pool
   (`uniswap-v3-eth-usdc-weth-005` in `VERIFIED_POOLS`) has TVL coverage from
   Phase 4/5 but no volume/fee adapter; V3's concentrated-liquidity swap math
@@ -1270,16 +1445,6 @@ in one run with zero code awareness of which was which.
   problem this phase exists to solve. A genuinely separate historical
   window (disconnected from the live cursor) was judged unnecessary this
   round.
-- **No dedicated multi-chain smoke test** - `VOLUME_SOURCE_POOLS`
-  (`lib/onchain/volume/config.ts`) has two real entries as of Phase 5.6
-  (one V2, one V3), both on Ethereum. Multi-pool isolation IS now
-  genuinely exercised live (both pools indexed together in the same real
-  run - see the Phase 5.6 section above); multi-CHAIN isolation (Section
-  30) is still only verified at the code level
-  (`indexAllPoolVolume`'s per-pool try/catch,
-  `engine.integration.test.ts`'s own regression test), not against two
-  genuinely different live chains, since only Ethereum is configured for
-  volume/fees today.
 - **No V3 tick/position/liquidity accounting, Mint/Burn/Collect indexing,
   or active-in-range-only TVL** (Phase 5.6) - deliberately not built,
   because this app's existing balance-based TVL methodology never needed
@@ -1292,3 +1457,25 @@ in one run with zero code awareness of which was which.
   1/4 protocol cut) - the same "mechanism active, realized amount not
   tracked" situation as the V2 pool, for the same class of reason
   (Mint/Burn/kLast for V2, Swap fee-growth + `collectProtocol()` for V3).
+  Realized revenue for an active period is still never computed - but the
+  range-wide "active vs. verifiably zero" classification itself is now
+  reconstructed from real `SetFeeProtocol` transition events across the
+  whole indexed range, not just its two boundaries (see the "PR #14
+  follow-up fix" note in the Revenue section above), so a transition that
+  happens to return to the same state at both boundaries can no longer be
+  silently mis-reported as verified-zero.
+- **Multi-pool and multi-chain volume indexing have now been exercised live
+  together in a single combined run** - `VOLUME_SOURCE_POOLS`
+  (`lib/onchain/volume/config.ts`) has three real entries: two on Ethereum
+  (Uniswap V2, Uniswap V3 - Phase 5.6) and one on BNB Chain (PancakeSwap V2
+  - Phase 5.7). Each pair was previously verified live in isolation during
+  its own phase's development; after merging both phases onto this branch,
+  a real `npm run index:volume` run indexed all three together in one pass
+  with zero cross-pool/cross-chain interference: `uniswap-v2-eth-usdc-weth`
+  (17 swaps, 17 priced), `uniswap-v3-eth-usdc-weth-005` (46 swaps, 46
+  priced, revenue correctly reported unavailable via the PR #14 fix's
+  segment-reconstruction logic rather than the old boundary-only check),
+  and `pancakeswap-amm-bsc-usdt-wbnb` (36 swaps, 36 priced) - all three
+  `outcome: "success"`. Still only two chains, both EVM; Aerodrome (Base)
+  remains audited-but-unsupported (see
+  [Native protocol coverage expansion (Phase 5.7)](#native-protocol-coverage-expansion-phase-57)).

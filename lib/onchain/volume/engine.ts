@@ -9,13 +9,7 @@ import { logger } from "@/lib/observability/logger";
 import { aggregateSwapVolume, classifyVolumeConfidence } from "./aggregate";
 import { type VolumeSourcePool, type VolumeSourceToken, VOLUME_SOURCE_POOLS } from "./config";
 import { computeSwapVolumeUsd, type SwapTokenPrice } from "./math";
-import {
-  readV2ProtocolFeeStateAcrossRange,
-  readV3ProtocolFeeStateAcrossRange,
-  resolveProtocolRevenueForRange,
-  resolveV3ProtocolRevenueForRange,
-  type ProtocolRevenueOutcome,
-} from "./protocol-fee";
+import { readV2ProtocolFeeStateAcrossRange, resolveProtocolRevenueForRange, resolveV3ProtocolRevenueForRange, type ProtocolRevenueOutcome } from "./protocol-fee";
 import { checkRevenueConsistency, checkVolumeFeeConsistency, checkVolumeSpike } from "./quality";
 import { getChainId, getLatestVolumeObservation, getPoolIdByConfigKey } from "./queries";
 import { recordSwapEvents, type SwapEventRecord } from "./record-swap-events";
@@ -53,16 +47,18 @@ function calculationVersionFor(pool: VolumeSourcePool): string {
 
 // Reads and resolves this pool's protocol-revenue state for the given
 // range, dispatching to the correct protocol's own read (V2:
-// factory.feeTo(); V3: pool.slot0().feeProtocol - see protocol-fee.ts's
-// own module comments for why these are genuinely different mechanisms,
-// not the same concept renamed). Never throws - an RPC failure here
-// degrades to "no revenue outcome this chunk" (logged), the same
-// resilience the V2-only version of this code already had.
+// factory.feeTo(), boundary-pinned only - see protocol-fee.ts's own module
+// comment for that mechanism's own scope; V3: pool.slot0().feeProtocol,
+// reconstructed from real SetFeeProtocol transition events across the
+// whole range, not just its two boundaries - see protocol-fee.ts's
+// "Historical-transition bug fix" section for why the boundary-only check
+// was insufficient for V3 and what replaced it). Never throws - an RPC
+// failure here degrades to "no revenue outcome this chunk" (logged), the
+// same resilience the V2-only version of this code already had.
 async function resolveProtocolRevenueForPool(pool: VolumeSourcePool, fromBlock: bigint, toBlock: bigint): Promise<ProtocolRevenueOutcome | null> {
   try {
     if (pool.sourceKind === "uniswap-v3") {
-      const check = await readV3ProtocolFeeStateAcrossRange(pool.chainSlug, pool.poolAddress, fromBlock, toBlock);
-      return resolveV3ProtocolRevenueForRange(check);
+      return await resolveV3ProtocolRevenueForRange(pool.chainSlug, pool.poolAddress, fromBlock, toBlock);
     }
     if (!pool.factoryAddress) {
       throw new Error(`pool "${pool.key}" is sourceKind "uniswap-v2" but has no configured factoryAddress`);

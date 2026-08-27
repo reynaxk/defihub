@@ -106,7 +106,7 @@ export async function getVolumeCoverage(pools = VOLUME_SOURCE_POOLS): Promise<Vo
       protocolKey: pool.key,
       metric: "revenue_usd",
       // Revenue is architecturally native (protocol-fee.ts's
-      // readV2ProtocolFeeStateAcrossRange/readV3ProtocolFeeStateAcrossRange)
+      // readV2ProtocolFeeStateAcrossRange/resolveV3ProtocolRevenueForRange)
       // but not reliably computable for every deployment - see that
       // module's own header comment. NATIVE only when a real revenue_usd
       // observation actually exists (revenueObs != null) - a pool whose

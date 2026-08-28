@@ -501,6 +501,104 @@ describe("scanFromCursor - multi-chunk catch-up (Phase 5.5)", () => {
     expect(result.chunksAttempted).toBe(2);
     expect(result.scannedTo).toBe(BigInt(3999)); // only the first 2 of 3 chunks were allowed to run
   });
+
+  // Phase 5.8: deadlineAt - a soft internal deadline (typically derived from
+  // a caller's real serverless maxDuration) so a large catch-up backlog
+  // stops gracefully with a real stoppedReason instead of plausibly getting
+  // killed by the platform mid-run, well within maxChunkAttempts's own
+  // budget - see deadlineAt's own comment in events.ts.
+  describe("deadlineAt", () => {
+    it("stops gracefully (partial, not thrown) when the deadline has already passed before ANY chunk is attempted", async () => {
+      mockGetIndexingState.mockResolvedValue(null);
+      mockGetLogs.mockResolvedValue([]); // every chunk would succeed if attempted
+      const onLogs = vi.fn().mockResolvedValue(undefined);
+
+      const result = await scanFromCursor({
+        chainSlug: "ethereum",
+        component: "test-component",
+        address: "0xpool",
+        eventSignature: SWAP_EVENT,
+        currentBlock: BigInt(5999),
+        startBlock: BigInt(0),
+        chunkSize: BigInt(2000),
+        deadlineAt: Date.now() - 1, // already in the past
+        onLogs,
+      });
+
+      // The real bug this fix closes: zero chunks completed used to ALWAYS
+      // throw ("failed"), even when the true reason was simply "never got
+      // a turn this run" rather than anything actually failing.
+      expect(result.outcome).toBe("partial");
+      expect(result.stoppedReason).toBe(STOP_REASON.DEADLINE_APPROACHING);
+      expect(result.chunksCompleted).toBe(0);
+      expect(onLogs).not.toHaveBeenCalled();
+      expect(mockGetLogs).not.toHaveBeenCalled();
+      // The cursor must stay exactly where it was - untouched, not
+      // regressed - so the next invocation resumes from the same place.
+      for (const call of mockUpdateIndexingState.mock.calls) {
+        expect(call[2]).not.toHaveProperty("lastProcessedBlock");
+      }
+    });
+
+    it("preserves real progress and reports partial when the deadline is reached mid-catch-up, after some chunks already completed", async () => {
+      mockGetIndexingState.mockResolvedValue(null);
+      const onLogs = vi.fn().mockResolvedValue(undefined);
+
+      // Fake timers so the deadline check is deterministic rather than
+      // racing real wall-clock time: the first chunk's own fetch pushes the
+      // fake clock past the deadline before resolving, so the loop's next
+      // top-of-iteration check (before attempting a second chunk) sees it
+      // as already passed.
+      vi.useFakeTimers();
+      const deadlineAt = Date.now() + 1000;
+      mockGetLogs
+        .mockImplementationOnce(async () => {
+          vi.advanceTimersByTime(2000);
+          return [];
+        })
+        .mockResolvedValue([]); // would succeed if a second chunk were ever attempted
+
+      const resultPromise = scanFromCursor({
+        chainSlug: "ethereum",
+        component: "test-component",
+        address: "0xpool",
+        eventSignature: SWAP_EVENT,
+        currentBlock: BigInt(5999),
+        startBlock: BigInt(0),
+        chunkSize: BigInt(2000),
+        deadlineAt,
+        onLogs,
+      });
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+      vi.useRealTimers();
+
+      expect(result.outcome).toBe("partial");
+      expect(result.stoppedReason).toBe(STOP_REASON.DEADLINE_APPROACHING);
+      expect(result.chunksCompleted).toBe(1);
+      expect(result.scannedTo).toBe(BigInt(1999)); // only the first chunk's own progress
+      expect(mockGetLogs).toHaveBeenCalledTimes(1); // never started a second chunk past the deadline
+    });
+
+    it("is unaffected when deadlineAt is omitted - existing callers keep their exact previous behavior", async () => {
+      mockGetIndexingState.mockResolvedValue(null);
+      mockGetLogs.mockResolvedValue([{ transactionHash: "0xabc", logIndex: 0 }]);
+      const onLogs = vi.fn().mockResolvedValue(undefined);
+
+      const result = await scanFromCursor({
+        chainSlug: "ethereum",
+        component: "test-component",
+        address: "0xpool",
+        eventSignature: SWAP_EVENT,
+        currentBlock: BigInt(100),
+        startBlock: BigInt(50),
+        onLogs,
+      });
+
+      expect(result.outcome).toBe("success");
+      expect(result.stoppedReason).toBeUndefined();
+    });
+  });
 });
 
 // Section 41's property/boundary tests for the chunk planner - every block

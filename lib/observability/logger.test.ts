@@ -130,6 +130,40 @@ describe("logger", () => {
     expect(line).toContain("eth-mainnet.example.com");
   });
 
+  // Phase 5.8 regression tests for a real gap caught during the master
+  // integration audit: the old whole-string-only URL check
+  // (`^scheme://...$`) missed a URL embedded mid-string, and the top-level
+  // `message` argument was never redacted at all, regardless of what it
+  // contained.
+  it("REGRESSION: redacts a URL's credentials even when embedded mid-string within a field value, not just when the field IS the URL", () => {
+    logger.warn("provider failed", {
+      component: "test",
+      detail: `request to https://eth-mainnet.example.com/v2/super-secret-api-key-12345 failed: timeout`,
+    });
+
+    const line = warnSpy.mock.calls[0][0] as string;
+    expect(line).not.toContain("super-secret-api-key-12345");
+    expect(line).toContain("eth-mainnet.example.com");
+    expect(line).toContain("failed: timeout"); // surrounding text preserved, not just the URL
+  });
+
+  it("REGRESSION: redacts a URL's credentials embedded in the top-level message argument itself, not just in fields", () => {
+    logger.error(`fetch failed: https://eth-mainnet.example.com/v2/super-secret-api-key-12345`, { component: "test" });
+
+    const line = errorSpy.mock.calls[0][0] as string;
+    expect(line).not.toContain("super-secret-api-key-12345");
+    expect(line).toContain("eth-mainnet.example.com");
+  });
+
+  it("leaves an ordinary, non-URL message and field values completely unchanged", () => {
+    logger.info("volume indexed", { component: "test", pool: "uniswap-v2-eth-usdc-weth", outcome: "success" });
+
+    const line = logSpy.mock.calls[0][0] as string;
+    expect(line).toContain("volume indexed");
+    expect(line).toContain("uniswap-v2-eth-usdc-weth");
+    expect(line).toContain("success");
+  });
+
   it("does not throw when a field is a bigint, and still shows its value", () => {
     expect(() =>
       logger.info("scanned", { component: "test", blockNumber: BigInt(123456) }),

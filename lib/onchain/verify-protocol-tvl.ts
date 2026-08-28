@@ -1,4 +1,4 @@
-import { parseAbi } from "viem";
+import { formatUnits, parseAbi, parseUnits } from "viem";
 import { db } from "@/lib/database/client";
 import { onchainVerifications, protocols, chains } from "@/lib/database/schema";
 import { priceProvider } from "@/lib/providers";
@@ -6,6 +6,16 @@ import { VIEM_CHAIN_BY_SLUG } from "@/lib/chains/rpc-client";
 import { confirmationsFor } from "@/lib/chains/confirmations";
 import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import { VERIFIED_PROTOCOL_TVLS, type VerifiedProtocolTvl } from "./config";
+import { priceToExactDecimalString, roundExactDecimal } from "./verify-pool";
+
+// Phase 5.8 fix: same generous fixed-point scale as verify-pool.ts's
+// computePoolTvl, declared as its own local copy rather than imported -
+// each calculation module in this codebase owns its own copy of this
+// constant (see uniswap-v2.ts's own comment for why: a future change to
+// one calculation kind's precision must never silently affect an
+// unrelated one).
+const CALCULATION_SCALE = 30;
+const SCALE_FACTOR = BigInt(10) ** BigInt(CALCULATION_SCALE);
 
 // Rescales a raw fixed-point amount by 10^exponent in either direction.
 // BigInt's own `**` throws a RangeError for a negative exponent (it can't
@@ -20,10 +30,40 @@ export function rescaleByPow10(amount: bigint, exponent: number): bigint {
   return amount * BigInt(10) ** BigInt(-exponent);
 }
 
+export type ProtocolTvlComputationResult = { ok: true; tvlUsd: string } | { ok: false; error: string };
+
+// Pure - the actual "raw on-chain amount + decimals + USD price -> TVL"
+// math, split out from readOne (below) so it's directly unit-testable with
+// plain BigInts, no RPC involved - mirroring the same split verify-pool.ts's
+// own computePoolTvl already establishes for the identical reason. Phase
+// 5.8 fix: this replaces an earlier `(Number(rawAmount) / 10 **
+// entry.decimals) * price` implementation, the exact anti-pattern
+// computePoolTvl was rewritten to avoid - Number() silently loses precision
+// for any raw amount beyond Number.MAX_SAFE_INTEGER (2^53 ~= 9.007e15),
+// which a real 18-decimal token balance worth even a few cents already
+// exceeds, and that earlier version had zero test coverage of its own
+// tvlUsd output, only of rescaleByPow10 - see this file's own test suite
+// for the precision-regression tests that would have caught it. Every step
+// here is exact BigInt/fixed-point arithmetic: rawAmount is rescaled to
+// CALCULATION_SCALE, the provider's floating-point price is converted to an
+// exact decimal string exactly once (priceToExactDecimalString,
+// verify-pool.ts - the same unavoidable number->string boundary
+// computePoolTvl's own caller already establishes), and the result stays an
+// exact decimal string throughout.
+export function computeProtocolTvlUsd(rawAmount: bigint, decimals: number, priceUsd: number): ProtocolTvlComputationResult {
+  if (decimals > CALCULATION_SCALE) {
+    return { ok: false, error: `unsupported decimals: ${decimals} exceeds this calculation's ${CALCULATION_SCALE}-decimal scale` };
+  }
+  const rawAmountAtScale = rawAmount * BigInt(10) ** BigInt(CALCULATION_SCALE - decimals);
+  const priceAtScale = parseUnits(priceToExactDecimalString(priceUsd), CALCULATION_SCALE);
+  const usdValueAtScale = (rawAmountAtScale * priceAtScale) / SCALE_FACTOR;
+  return { ok: true, tvlUsd: formatUnits(usdValueAtScale, CALCULATION_SCALE) };
+}
+
 async function readOne(
   entry: VerifiedProtocolTvl,
   priceById: Map<string, number>,
-): Promise<{ key: string; ok: boolean; error?: string; tvlUsd?: number; blockNumber?: bigint }> {
+): Promise<{ key: string; ok: boolean; error?: string; tvlUsd?: string; blockNumber?: bigint }> {
   if (!VIEM_CHAIN_BY_SLUG.has(entry.chainSlug)) {
     return { key: entry.key, ok: false, error: `no RPC configured for chain "${entry.chainSlug}"` };
   }
@@ -103,8 +143,9 @@ async function readOne(
       return [rawAmount, blockNumber] as const;
     });
 
-    const tvlUsd = (Number(rawAmount) / 10 ** entry.decimals) * price;
-    return { key: entry.key, ok: true, tvlUsd, blockNumber };
+    const computation = computeProtocolTvlUsd(rawAmount, entry.decimals, price);
+    if (!computation.ok) return { key: entry.key, ok: false, error: `${computation.error} (${entry.key})` };
+    return { key: entry.key, ok: true, tvlUsd: computation.tvlUsd, blockNumber };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { key: entry.key, ok: false, error: `chain read failed: ${message}` };
@@ -148,7 +189,11 @@ export async function verifyAllProtocolTvls(): Promise<{ key: string; ok: boolea
     }
 
     const protocolId = protocolIdBySlug.get(entry.protocolDefillamaSlug) ?? null;
-    const tvlUsd = outcome.tvlUsd!.toFixed(2);
+    // roundExactDecimal, not .toFixed(2) - tvlUsd is now an exact decimal
+    // string (see readOne's own comment), and .toFixed(2) would force it
+    // back through a floating-point Number, discarding the exactness this
+    // fix exists to preserve.
+    const tvlUsd = roundExactDecimal(outcome.tvlUsd!, 2);
     const blockNumber = String(outcome.blockNumber!);
 
     try {

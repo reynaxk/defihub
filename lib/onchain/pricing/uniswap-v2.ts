@@ -118,6 +118,22 @@ export function deriveV2Price(params: DeriveV2PriceParams): DeriveV2PriceResult 
   // first so the division itself doesn't collapse to zero for a
   // low-price/high-supply token.
   const priceAtScale = (pairedValueUsdAtScale * SCALE_FACTOR) / pricedAtScale;
+
+  // Phase 5.8 fix: this integer division CAN still floor to exactly zero
+  // for an extreme enough reserve asymmetry (a very low-value/huge-raw-
+  // supply priced token whose pool nonetheless clears minLiquidityUsd on
+  // the PAIRED side) even though minLiquidityUsd above only guards the
+  // pool's total USD depth, not this specific division's own result. Not
+  // reachable with today's REFERENCE_ASSETS (ordinary stablecoins/WETH/
+  // WBTC, normal decimals and reserves), but this function's own contract
+  // is "exact result or an explicit failure, never a silently wrong
+  // number" (see this function's own header comment) - a fabricated $0
+  // price is exactly the kind of silently-wrong number that contract
+  // exists to prevent, and a $0 reference price reaching a caller could
+  // zero out every downstream TVL/volume figure priced against it.
+  if (priceAtScale <= BigInt(0)) {
+    return { ok: false, error: "derived price underflowed to zero - reserve ratio too extreme to represent at this calculation's precision" };
+  }
   const priceUsd = formatUnits(priceAtScale, CALCULATION_SCALE);
 
   return { ok: true, priceUsd, liquidityUsd };

@@ -124,7 +124,35 @@ async function runIndexOnchainVolume(): Promise<PoolVolumeRunResult[]> {
 // /api/cron/health rather than blurred into price.ts's or verify.ts's own
 // success rate. Phase 5.5 adds a session-scoped advisory lock around the
 // whole indexing pass - see VOLUME_INDEX_ADVISORY_LOCK_KEY's own comment.
+//
+// Phase 5.8 fix: withSyncRun (lib/observability/sync-run.ts) only re-throws
+// when its own callback throws - a callback that instead RETURNS `outcome:
+// "failed"` (summarizeVolumeResults's own genuine "nothing succeeded
+// anywhere" classification) resolves normally. Since this function's only
+// caller (the /api/cron/index-volume route) does `await
+// indexOnchainVolume(); return NextResponse.json({ ok: true })` with no
+// outcome inspection of its own, a run where EVERY pool failed used to
+// still return HTTP 200 - invisible to Vercel's own cron-failure detection
+// and any external monitoring keyed off HTTP status, even though
+// sync_runs.status was already being correctly recorded as "failed" the
+// whole time. `outcome` is now captured from inside the withSyncRun
+// callback (via a closure, not by changing withSyncRun's own shared
+// contract, which every other worker also depends on) and explicitly
+// re-thrown as an Error once withSyncRun itself has already finished
+// recording the (unchanged, already-correct) sync_runs row - the cron
+// route's existing try/catch then does the right thing with zero route-level
+// changes needed. "partial" (including the lock-contention skip) and
+// "success" are unaffected - only a genuine total failure now propagates.
 export async function indexOnchainVolume(): Promise<void> {
+  // A mutable object, not a plain `let` - TypeScript's control-flow
+  // narrowing treats a `let` reassigned only inside a closure as if it
+  // were never reassigned by the time control returns here (it can't see
+  // across the withSyncRun callback boundary), which would falsely narrow
+  // `outcome` to its initial literal and reject the `=== "failed"` check
+  // below as unreachable. A property on a plain object isn't narrowed the
+  // same way, so this reads its real, post-callback value correctly.
+  const run: { outcome: VolumeRunSummary["outcome"] | "skipped"; failureDetail: string } = { outcome: "skipped", failureDetail: "" };
+
   await withSyncRun("onchain-volume", async () => {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) throw new Error("DATABASE_URL is not set");
@@ -146,6 +174,10 @@ export async function indexOnchainVolume(): Promise<void> {
 
       const results = await runIndexOnchainVolume();
       const summary = summarizeVolumeResults(results);
+      run.outcome = summary.outcome;
+      if (summary.outcome === "failed") {
+        run.failureDetail = results.map((r) => `${r.poolKey}: ${r.error ?? "unknown error"}`).join("; ");
+      }
 
       return {
         result: undefined,
@@ -164,6 +196,10 @@ export async function indexOnchainVolume(): Promise<void> {
       }
     }
   });
+
+  if (run.outcome === "failed") {
+    throw new Error(`onchain-volume indexing failed - every configured pool failed this run: ${run.failureDetail}`);
+  }
 }
 
 if (require.main === module) {

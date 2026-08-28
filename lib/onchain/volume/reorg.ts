@@ -214,6 +214,7 @@ function recheckSwapEvents(
     onReorged: (candidate) =>
       logger.warn("volume reorg recheck: swap event no longer canonical", {
         component: "onchain-volume-reorg-recheck",
+        chain: pool.chainSlug,
         pool: pool.key,
         blockNumber: candidate.blockNumber.toString(),
       }),
@@ -248,6 +249,7 @@ function recheckAggregateMetric(
     onReorged: (candidate) =>
       logger.warn("volume reorg recheck: aggregate observation no longer canonical", {
         component: "onchain-volume-reorg-recheck",
+        chain: pool.chainSlug,
         pool: pool.key,
         metric,
         blockNumber: candidate.blockNumber.toString(),

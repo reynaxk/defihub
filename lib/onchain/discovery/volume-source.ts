@@ -1,5 +1,7 @@
+import { logger } from "@/lib/observability/logger";
 import { FACTORY_DEPLOYMENTS } from "./config";
 import { getActiveDiscoveredPools } from "./queries";
+import { discoveredPoolConfigKey } from "./register";
 import { VOLUME_SOURCE_POOLS, type VolumeSourcePool } from "../volume/config";
 
 // The bridge Section 11 asks for: every "active" discovered pool mapped
@@ -10,10 +12,12 @@ import { VOLUME_SOURCE_POOLS, type VolumeSourcePool } from "../volume/config";
 // (chunking, checkpointing, retry/failover, reorg-safe identity,
 // confidence-gated pricing, honest coverage) with no bypass of any of it.
 //
-// `key` reuses the same discoveredPoolConfigKey format register.ts already
-// wrote into `pools.configKey` - the two must stay in lockstep, since
-// engine.ts's own getPoolIdByConfigKey lookup depends on this exact string
-// resolving to the same `pools` row register.ts created.
+// `key` calls the SAME discoveredPoolConfigKey function register.ts itself
+// uses to write `pools.configKey` (not a re-implementation of its format)
+// - engine.ts's own getPoolIdByConfigKey lookup depends on this exact
+// string resolving to the same `pools` row register.ts created, so the two
+// computations could never be allowed to silently drift apart by being
+// maintained as two separate copies of the same format string.
 //
 // `coingeckoId` is deliberately the empty string, never fabricated or
 // guessed - a discovered token has no CoinGecko contract-lookup ever
@@ -29,7 +33,7 @@ import { VOLUME_SOURCE_POOLS, type VolumeSourcePool } from "../volume/config";
 // docs/native-data.md's Phase 5.9 section).
 function toVolumeSourcePool(deployment: (typeof FACTORY_DEPLOYMENTS)[number], row: Awaited<ReturnType<typeof getActiveDiscoveredPools>>[number]): VolumeSourcePool {
   return {
-    key: `discovered:${row.poolAddress.toLowerCase()}`,
+    key: discoveredPoolConfigKey(deployment.chainSlug, row.poolAddress),
     chainSlug: deployment.chainSlug,
     poolAddress: row.poolAddress,
     sourceKind: deployment.dexKind,
@@ -66,7 +70,26 @@ export async function getAllVolumeSourcePools(): Promise<VolumeSourcePool[]> {
   const discovered: VolumeSourcePool[] = [];
   for (const row of active) {
     const deployment = deploymentByKey.get(row.deploymentKey);
-    if (!deployment) continue; // a deployment removed from config after pools were discovered under it - simply excluded, not an error
+    if (!deployment) {
+      // A deployment removed from FACTORY_DEPLOYMENTS after pools were
+      // already discovered/activated under it - this pool's own
+      // pools/swap_events/historical_observations rows all still exist
+      // and are still "active" in discovered_pools, but it would
+      // otherwise silently stop being indexed AND reorg-rechecked with no
+      // record anywhere of why (Section 21/24's "no silent success" - a
+      // config edit that quietly and permanently stops covering existing
+      // real data is exactly the kind of thing that must be visible, not
+      // absorbed). FACTORY_DEPLOYMENTS entries are not expected to be
+      // removed once added (this module's own header comment: "facts
+      // about the deployment itself... that don't change"), so this is a
+      // loud signal something unusual happened, not routine log noise.
+      logger.warn("pool discovery: active discovered pool's deployment is no longer configured - excluded from this run, indexing/reorg-checking has silently stopped for it", {
+        component: "onchain-discovery",
+        deploymentKey: row.deploymentKey,
+        poolAddress: row.poolAddress,
+      });
+      continue;
+    }
     discovered.push(toVolumeSourcePool(deployment, row));
   }
 

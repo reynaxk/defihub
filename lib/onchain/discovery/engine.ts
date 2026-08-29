@@ -5,6 +5,8 @@ import { db } from "@/lib/database/client";
 import { chains, protocols } from "@/lib/database/schema";
 import { scanFromCursor } from "@/lib/indexing/events";
 import { logger } from "@/lib/observability/logger";
+import type { ReorgCheckResult } from "@/lib/onchain/reorg";
+import { effectiveStartBlock } from "@/lib/onchain/volume/engine";
 import { FACTORY_DEPLOYMENTS, type FactoryDeployment } from "./config";
 import { getPendingDiscoveredPools, markDiscoveredPoolActive, markDiscoveredPoolRejected, recordDiscoveredPools } from "./queries";
 import { registerDiscoveredPoolAsPool } from "./register";
@@ -51,6 +53,31 @@ async function scanForNewPools(deployment: FactoryDeployment, chainId: string): 
   let discoveredCount = 0;
 
   const currentBlock = await withResilientClient(deployment.chainSlug, (client) => client.getBlockNumber());
+  // Reuses volume/engine.ts's own effectiveStartBlock unmodified - the
+  // identical "never further back than this provider's live-servable
+  // window" correction VolumeSourcePool.startBlock already needed
+  // (see that function's own comment). FactoryDeployment.startBlock is
+  // exactly as vulnerable to going stale as a config-curated pool's own
+  // startBlock is - a value that was a safe recent floor at config-
+  // authoring time becomes unreachable the moment real time moves the
+  // chain head far enough past it, which happens routinely (and is
+  // exactly what this app's own free RPC tier already hit for volume
+  // indexing multiple times across earlier phases) - only mattering on a
+  // genuinely first-ever scan for this deployment (scanFromCursor only
+  // consults startBlock when no cursor is persisted yet), but that first
+  // scan must not be a guaranteed, permanent range-limit failure the
+  // moment a NEW deployment is added or a fresh environment starts from
+  // an empty indexing_state table.
+  const { startBlock: effectiveStart, skippedBlocks } = effectiveStartBlock(deployment, currentBlock);
+  if (skippedBlocks > BigInt(0)) {
+    logger.warn("pool discovery: configured startBlock is stale relative to the confirmed chain head - skipping ahead to a range this RPC provider can actually serve", {
+      component: "onchain-discovery",
+      deployment: deployment.key,
+      configuredStartBlock: deployment.startBlock.toString(),
+      effectiveStartBlock: effectiveStart.toString(),
+      skippedBlocks: skippedBlocks.toString(),
+    });
+  }
 
   const scanResult = await scanFromCursor({
     chainSlug: deployment.chainSlug,
@@ -58,7 +85,7 @@ async function scanForNewPools(deployment: FactoryDeployment, chainId: string): 
     address: deployment.factoryAddress as `0x${string}`,
     eventSignature: PAIR_CREATED_EVENT_SIGNATURE,
     currentBlock,
-    startBlock: deployment.startBlock,
+    startBlock: effectiveStart,
     chunkSize: DISCOVERY_CHUNK_SIZE,
     confirmations: confirmationsFor(deployment.chainSlug),
     onLogs: async (logs) => {
@@ -88,26 +115,55 @@ async function validatePendingPools(deployment: FactoryDeployment, chainId: stri
   const pending = await getPendingDiscoveredPools(deployment.key, VALIDATION_BATCH_SIZE);
   let activated = 0;
   let rejected = 0;
+  // Shared across every candidate in THIS page, never across separate
+  // validatePendingPools calls (deliberately created fresh here, per run -
+  // a stale canonical-block verdict from a much earlier run must never be
+  // reused) - see validateDiscoveredPool's own comment for exactly what
+  // this dedupes and why.
+  const canonicalCheckCache: Map<string, Promise<ReorgCheckResult>> = new Map();
 
   for (const row of pending) {
     let outcome;
     try {
-      outcome = await validateDiscoveredPool(deployment, {
-        token0: row.token0Address,
-        token1: row.token1Address,
-        poolAddress: row.poolAddress,
-        blockNumber: BigInt(row.creationBlockNumber),
-        blockHash: row.creationBlockHash,
-        transactionHash: row.creationTransactionHash,
-        logIndex: row.creationLogIndex,
-      });
+      outcome = await validateDiscoveredPool(
+        deployment,
+        {
+          token0: row.token0Address,
+          token1: row.token1Address,
+          poolAddress: row.poolAddress,
+          blockNumber: BigInt(row.creationBlockNumber),
+          blockHash: row.creationBlockHash,
+          transactionHash: row.creationTransactionHash,
+          logIndex: row.creationLogIndex,
+        },
+        undefined,
+        canonicalCheckCache,
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.warn("pool discovery: validation read failed - leaving pending for retry", { component: "onchain-discovery", deployment: deployment.key, pool: row.poolAddress, error: message });
       continue; // left in "discovered" status - retried next run, never rejected merely because this run's RPC read failed
     }
 
-    if (!outcome.accepted) {
+    if (outcome.status === "retry") {
+      // Transient (an unresolvable canonical-block check or a whole-batch
+      // RPC failure inside validateDiscoveredPool itself) - the row is
+      // left completely untouched in "discovered" status, tried again
+      // next run. Never persisted as "rejected": that status is reserved
+      // for a genuinely, deterministically invalid candidate (see the
+      // "rejected" branch below) - conflating the two would permanently
+      // blacklist a real, valid pool over nothing more than a passing RPC
+      // hiccup.
+      logger.warn("pool discovery: validation could not be completed this run - leaving pending for retry", {
+        component: "onchain-discovery",
+        deployment: deployment.key,
+        pool: row.poolAddress,
+        reason: outcome.reason,
+      });
+      continue;
+    }
+
+    if (outcome.status === "rejected") {
       await markDiscoveredPoolRejected(row.id, outcome.reason);
       rejected++;
       logger.info("pool discovery: candidate rejected", { component: "onchain-discovery", deployment: deployment.key, pool: row.poolAddress, reason: outcome.reason });
@@ -177,7 +233,7 @@ export async function discoverPoolsForDeployment(deployment: FactoryDeployment):
 // try/catch (already inside discoverPoolsForDeployment) so one
 // deployment's failure never stops the rest - the same failure-isolation
 // discipline indexAllPoolVolume already established.
-export async function discoverAllPools(deployments: FactoryDeployment[] = FACTORY_DEPLOYMENTS): Promise<DiscoveryRunResult[]> {
+export async function discoverAllPools(deployments: readonly FactoryDeployment[] = FACTORY_DEPLOYMENTS): Promise<DiscoveryRunResult[]> {
   const results: DiscoveryRunResult[] = [];
   for (const deployment of deployments) {
     results.push(await discoverPoolsForDeployment(deployment));

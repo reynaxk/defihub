@@ -161,7 +161,18 @@ export interface EffectiveStartBlockResult {
 // "multiple competing safe-head calculations" Phase 5.5 forbids. Pure and
 // directly testable with a plain currentBlock input, no RPC call of its
 // own.
-export function effectiveStartBlock(pool: VolumeSourcePool, currentBlock: bigint): EffectiveStartBlockResult {
+//
+// Deliberately typed against a minimal structural shape ({chainSlug,
+// startBlock}) rather than the full VolumeSourcePool - both this module's
+// own pools AND lib/onchain/discovery/config.ts's FactoryDeployment share
+// exactly these two fields for exactly the same reason (a configured
+// floor that can go stale relative to a free RPC provider's narrow
+// live-servable window), so discovery's own first-ever scan reuses this
+// exact function rather than carrying a second, textually-identical copy
+// of the same safe-window formula - the same "one safe-head calculation,
+// not several" discipline this function's own header comment already
+// establishes for safeHeadFor itself.
+export function effectiveStartBlock(pool: { chainSlug: string; startBlock: bigint }, currentBlock: bigint): EffectiveStartBlockResult {
   const safeHead = safeHeadFor(pool.chainSlug, currentBlock);
   const recentFloor = safeHead > SAFE_LOOKBACK_BLOCKS ? safeHead - SAFE_LOOKBACK_BLOCKS : BigInt(0);
   const startBlock = pool.startBlock > recentFloor ? pool.startBlock : recentFloor;

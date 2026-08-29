@@ -60,7 +60,7 @@ export interface FactoryDeployment {
   startBlock: bigint;
 }
 
-export const FACTORY_DEPLOYMENTS: FactoryDeployment[] = [
+export const FACTORY_DEPLOYMENTS: readonly FactoryDeployment[] = [
   {
     key: "uniswap-v2-ethereum",
     chainSlug: "ethereum",

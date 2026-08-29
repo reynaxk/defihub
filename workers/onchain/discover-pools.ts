@@ -56,7 +56,6 @@ export function summarizeDiscoveryResults(results: DiscoveryRunResult[]): Discov
 export const DISCOVER_POOLS_ADVISORY_LOCK_KEY = 583920174;
 
 const LOCK_CONNECTION_TIMEOUT_SECONDS = 10;
-const LOCK_IDLE_TIMEOUT_SECONDS = 300;
 
 async function runDiscoverPools(): Promise<DiscoveryRunResult[]> {
   const results = await discoverAllPools();
@@ -91,11 +90,30 @@ export async function discoverOnchainPools(): Promise<void> {
   await withSyncRun("onchain-discovery", async () => {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) throw new Error("DATABASE_URL is not set");
+    // CodeRabbit PR #17 fix: idle_timeout was previously set to 300s, but
+    // this connection is used for exactly two queries - pg_try_advisory_lock
+    // at the very start and pg_advisory_unlock at the very end - and sits
+    // completely idle for the ENTIRE discovery run in between (the actual
+    // scanning/validation work runs through the separate, regular `db`
+    // client). A run genuinely exceeding 300s (a large catch-up backlog,
+    // stacked RPC retries) would have its postgres.js client silently
+    // CLOSE this idle connection out from under it - and since
+    // pg_advisory_lock is a SESSION-level lock tied to that specific
+    // backend connection, closing it releases the lock automatically,
+    // letting a second concurrent invocation acquire it and run in
+    // parallel (defeating the whole point of this lock). Not reachable in
+    // the actual deployed cron path (maxDuration=60 on the route itself
+    // already kills the function well before 300s), but this worker is
+    // also run directly via `npm run discover:pools` with no such ceiling.
+    // idle_timeout is omitted entirely here, reverting to postgres.js's
+    // own default (null - never idle-timeout) - safe because lockConn is
+    // always explicitly `.end()`ed in the finally block below regardless
+    // of how long the run takes, so there is no actual leak risk from
+    // never timing out.
     const lockConn = postgres(connectionString, {
       max: 1,
       prepare: false,
       connect_timeout: LOCK_CONNECTION_TIMEOUT_SECONDS,
-      idle_timeout: LOCK_IDLE_TIMEOUT_SECONDS,
     });
     let locked = false;
 

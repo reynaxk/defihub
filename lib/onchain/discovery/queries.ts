@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, discoveredPools } from "@/lib/database/schema";
 import type { FactoryDeployment } from "./config";
@@ -53,9 +53,21 @@ export async function recordDiscoveredPools(chainId: string, deployment: Factory
         chainId,
         deploymentKey: deployment.key,
         factoryAddress: deployment.factoryAddress,
-        poolAddress: c.poolAddress,
-        token0Address: c.token0,
-        token1Address: c.token1,
+        // Lowercased at this persistence boundary, not at decode time
+        // (scan.ts's own decode output stays a faithful, unmodified
+        // representation of what the chain actually returned - useful for
+        // testability and for anything that later wants the real EIP-55
+        // checksum form). EVM addresses are case-INSENSITIVE identity (the
+        // mixed-case form is a checksum encoding, not a different
+        // address) - discovered_pools_chain_address_unique is a plain
+        // varchar comparison at the DB level, so a real pool re-discovered
+        // with different casing (or one whose casing happens to differ
+        // from an existing curated `pools` row for the same real address)
+        // would otherwise silently bypass this uniqueness/collision check
+        // entirely.
+        poolAddress: c.poolAddress.toLowerCase(),
+        token0Address: c.token0.toLowerCase(),
+        token1Address: c.token1.toLowerCase(),
         creationBlockNumber: c.blockNumber.toString(),
         creationBlockHash: c.blockHash,
         creationTransactionHash: c.transactionHash,
@@ -87,6 +99,17 @@ export async function recordDiscoveredPools(chainId: string, deployment: Factory
 // already follows, e.g. volume/reorg.ts's DEFAULT_BATCH_SIZE). A page
 // left over from this run is simply picked up next run; there is no
 // unbounded "validate everything now" path.
+//
+// Ordered by (creationBlockNumber, creationLogIndex, id) - a deterministic
+// FIFO, oldest-discovered-first order (Section 18's own fairness
+// requirement), not whatever arbitrary order Postgres's heap scan happens
+// to return. Without an explicit ORDER BY, a bounded LIMIT read has no
+// guarantee of ever converging on the full pending set across repeated
+// calls - the same page (or a re-shuffled subset) could keep being
+// returned indefinitely. `id` is the final tiebreak for the vanishingly
+// rare case of two candidates sharing the exact same creation block AND
+// log index (cannot happen for genuinely distinct real events, but the
+// ordering must still be total/deterministic either way).
 export async function getPendingDiscoveredPools(deploymentKey: string, limit: number): Promise<DiscoveredPoolRow[]> {
   return db
     .select({
@@ -105,6 +128,7 @@ export async function getPendingDiscoveredPools(deploymentKey: string, limit: nu
     })
     .from(discoveredPools)
     .where(and(eq(discoveredPools.deploymentKey, deploymentKey), eq(discoveredPools.status, "discovered")))
+    .orderBy(asc(discoveredPools.creationBlockNumber), asc(discoveredPools.creationLogIndex), asc(discoveredPools.id))
     .limit(limit);
 }
 

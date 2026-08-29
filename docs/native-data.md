@@ -1458,8 +1458,29 @@ exact line; discovery draws it in the same place.
 `lib/onchain/discovery/register.ts` bridges a validated pool into the
 SAME `pools`/`pool_tokens` tables config-curated pools already use -
 upserted on `pools_chain_address_unique` (chainId, address), with a
-deterministic `discovered:<lowercased address>` `configKey` (legible, but
-never load-bearing for identity). `lib/onchain/discovery/volume-source.ts`'s
+deterministic `discovered:<chain discriminator>:<lowercased address>`
+`configKey` (the chain discriminator is an 8-hex-char hash of the chain's
+slug, not the raw slug itself, to stay within `config_key`'s varchar(64)
+budget regardless of slug length - see `discoveredPoolConfigKey`'s own
+comment). The chain discriminator IS load-bearing for `configKey`'s own
+global uniqueness (two different chains' pools at the identical address
+would otherwise collide on this one un-scoped column) - `configKey` IS
+still the real lookup key volume indexing/reorg-checking uses
+(`getPoolIdByConfigKey`, same mechanism a curated `VerifiedPool.key` uses),
+via `toVolumeSourcePool`'s own `key` field computing the exact same string
+`register.ts` persisted. This means `discoveredPoolConfigKey`'s output
+format is a durable on-disk contract, not an internal implementation
+detail: changing it (as the CodeRabbit PR #17 fix round just did, adding
+the chain discriminator to an already-shipped format) orphans every
+already-registered discovered pool from that lookup until a one-time
+backfill runs (`workers/onchain/backfill-discovered-pool-configkeys.ts`,
+operator-run, mirrors `discover-pools-recover.ts`'s own never-cron-wired
+convention) to rewrite existing rows' stored `configKey` to the new
+format - confirmed live against the dev database (66 pre-existing
+discovered pools, all silently excluded from indexing/reorg-checking until
+the backfill ran). Any future change to this format needs the same
+backfill step before deploying.
+`lib/onchain/discovery/volume-source.ts`'s
 `getAllVolumeSourcePools()` then maps every "active" discovered pool into
 the exact `VolumeSourcePool` shape `indexAllPoolVolume`/
 `recheckVolumeReorgs` already consume - both `workers/onchain/volume.ts`

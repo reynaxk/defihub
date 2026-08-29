@@ -58,11 +58,77 @@ const LOCK_IDLE_TIMEOUT_SECONDS = 60;
 
 const AGGREGATE_METRICS = ["volume_usd", "fees_usd", "revenue_usd"] as const;
 
+// CodeRabbit PR #17 fix: this job's own batching (`poolsToCheck.slice(0,
+// batchSize)`, below) was written back when poolsToCheck had exactly 3
+// entries - always comfortably under DEFAULT_BATCH_SIZE, so every pool got
+// rechecked every run. Phase 5.9's getAllVolumeSourcePools bridge changed
+// that silently: with 60+ discovered pools now routinely in this same
+// list, a fixed `.slice(0, batchSize)` would ALWAYS recheck only the first
+// `batchSize` pools, forever - every pool after that never gets its
+// swap_events/observations reorg-rechecked again, a real, severe
+// regression this fix closes.
+//
+// Not scoped to indexing_state's own (chainSlug, component) shape -
+// poolsToCheck spans every configured chain at once, so the rotation
+// cursor itself isn't chain-scoped either. `lastProcessedBlock`'s
+// GREATEST()-protected atomic update (lib/indexing/state.ts) already
+// enforces "never move backward," which is exactly wrong for a WRAPPING
+// rotation offset (it would get permanently stuck at the highest offset
+// ever reached, never cycling back to the start of the list) - so the
+// persisted value here is deliberately an ever-INCREASING total-pools-
+// advanced counter, never the wrapped array index itself. The actual
+// index used each run is `offset % pools.length`, recomputed fresh every
+// time from whatever the CURRENT pool count is - safe even if pools are
+// added/removed between runs, and fully compatible with GREATEST()'s own
+// monotonic-only constraint without needing any change to that shared
+// primitive.
+const POOL_ROTATION_CHAIN_SLUG = "global"; // not a real chain - rotation isn't scoped to one
+const POOL_ROTATION_COMPONENT = `${COMPONENT_PREFIX}:pool-rotation`;
+
+export interface ReorgRecheckBatchSelection<T> {
+  batch: T[];
+  nextOffset: bigint;
+}
+
+// Pure, directly testable with a plain array + offset, no RPC/DB. Returns
+// up to `batchSize` pools starting at `offset % pools.length` and wrapping
+// around the end of the list back to the start - the same round-robin
+// shape ensures that across enough successive calls (each one's own
+// `nextOffset` fed back in as the next call's `offset`), every pool in the
+// list eventually gets included, not just whichever ones happen to sit in
+// the first `batchSize` array slots.
+export function selectReorgRecheckBatch<T>(pools: readonly T[], batchSize: number, offset: bigint): ReorgRecheckBatchSelection<T> {
+  if (pools.length === 0 || batchSize <= 0) return { batch: [], nextOffset: offset };
+
+  const len = BigInt(pools.length);
+  const start = ((offset % len) + len) % len; // defensively normalizes a negative/out-of-range offset, though one should never actually occur
+  const n = BigInt(Math.min(batchSize, pools.length));
+
+  const batch: T[] = [];
+  for (let i = BigInt(0); i < n; i++) {
+    batch.push(pools[Number((start + i) % len)]);
+  }
+
+  return { batch, nextOffset: offset + n };
+}
+
 export interface VolumeReorgRecheckOptions {
   batchSize?: number;
   lookbackDepth?: number;
   poolsOverride?: VolumeSourcePool[];
   readBlockHash?: (chainSlug: string, blockNumber: bigint) => Promise<string | null>;
+  // Test-only override for the rotation cursor's own (chainSlug,
+  // component) indexing_state key - defaults to the real, shared
+  // POOL_ROTATION_CHAIN_SLUG/POOL_ROTATION_COMPONENT pair used in
+  // production. Unlike every other cursor in this app (each namespaced by
+  // a real chain/pool/entity identifier), the rotation cursor is
+  // deliberately one single, un-namespaced row shared across the whole
+  // job - a test exercising rotation behavior must never read from or
+  // write to that real, shared row (risking either flaky cross-test
+  // interference or, worse, corrupting the actual production rotation
+  // position in a shared dev database), so tests inject a disposable,
+  // randomized key pair here instead.
+  rotationCursorKey?: { chainSlug: string; component: string };
 }
 
 export interface VolumeReorgRecheckStats {
@@ -289,8 +355,19 @@ async function runVolumeReorgRecheck(options: VolumeReorgRecheckOptions = {}): P
       return null;
     }
 
+    const rotationCursorChainSlug = options.rotationCursorKey?.chainSlug ?? POOL_ROTATION_CHAIN_SLUG;
+    const rotationCursorComponent = options.rotationCursorKey?.component ?? POOL_ROTATION_COMPONENT;
+    const rotationState = await getIndexingState(rotationCursorChainSlug, rotationCursorComponent);
+    const rotationOffset = rotationState?.lastProcessedBlock ?? BigInt(0);
+    const { batch, nextOffset } = selectReorgRecheckBatch(poolsToCheck, batchSize, rotationOffset);
+
     const stats: VolumeReorgRecheckStats = {
-      poolsConsidered: poolsToCheck.length,
+      // The pools ACTUALLY attempted this run (the rotated batch), not
+      // the full eligible universe - CodeRabbit PR #17 fix: reporting the
+      // full poolsToCheck.length here (the pre-fix behavior) would make
+      // this stat misleadingly imply every pool was rechecked every run,
+      // exactly the silent-coverage-gap this whole fix exists to close.
+      poolsConsidered: batch.length,
       poolsFailed: 0,
       swapEventsChecked: 0,
       swapEventsReorged: 0,
@@ -300,7 +377,7 @@ async function runVolumeReorgRecheck(options: VolumeReorgRecheckOptions = {}): P
       observationsUnknown: 0,
     };
 
-    for (const pool of poolsToCheck.slice(0, batchSize)) {
+    for (const pool of batch) {
       try {
         const poolId = await getPoolIdByConfigKey(pool.key);
         if (!poolId) {
@@ -329,6 +406,13 @@ async function runVolumeReorgRecheck(options: VolumeReorgRecheckOptions = {}): P
         });
       }
     }
+
+    // Advanced regardless of individual pool outcomes above (poolsFailed
+    // is tracked separately and never blocks rotation progress) - every
+    // pool must keep getting its turn even if some of them keep failing
+    // transiently, otherwise a persistently-broken pool at the front of
+    // the rotation could stall coverage for everything behind it.
+    await updateIndexingState(rotationCursorChainSlug, rotationCursorComponent, { status: "idle", lastProcessedBlock: nextOffset, lastSuccessfulSyncAt: new Date() });
 
     return stats;
   } finally {

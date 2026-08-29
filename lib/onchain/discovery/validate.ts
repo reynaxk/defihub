@@ -1,6 +1,6 @@
 import { erc20Abi, parseAbi, type Address } from "viem";
 import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
-import { checkBlockHashStillCanonical, readBlockHashOnChain } from "@/lib/onchain/reorg";
+import { checkBlockHashStillCanonical, readBlockHashOnChain, type ReorgCheckResult } from "@/lib/onchain/reorg";
 import { CALCULATION_SCALE } from "@/lib/onchain/volume/math";
 import type { FactoryDeployment } from "./config";
 import type { DecodedPairCreated } from "./scan";
@@ -76,17 +76,31 @@ export interface DecodedCandidateRead {
   token1Symbol: string | null;
 }
 
+// Three-way, not a boolean accept/reject - "unavailable this run" is a
+// genuinely different outcome from "genuinely, deterministically invalid,"
+// and conflating them was a real bug this fix closes (CodeRabbit PR #17
+// review round): a transient RPC hiccup reading the canonical-block status
+// or the validation multicall must never permanently blacklist a real,
+// valid pool the same way a true factory-lineage mismatch or malformed
+// decimals() does. "rejected" is terminal (persisted, with a reason,
+// engine.ts marks the row "rejected"); "retry" leaves the row untouched in
+// "discovered" status so the exact same candidate is attempted again next
+// run - the same "unknown != permanently blacklisted" distinction this
+// codebase's reorg-check machinery (checkBlockHashStillCanonical's own
+// three-valued "confirmed"/"reorged"/"unknown" result) already established
+// for the identical class of problem.
 export type ValidationOutcome =
-  | { accepted: true; token0Decimals: number; token1Decimals: number; token0Symbol: string | null; token1Symbol: string | null }
-  | { accepted: false; reason: string };
+  | { status: "accepted"; token0Decimals: number; token1Decimals: number; token0Symbol: string | null; token1Symbol: string | null }
+  | { status: "rejected"; reason: string }
+  | { status: "retry"; reason: string };
 
-// Pure - the full per-candidate accept/reject decision, given already-
-// fetched on-chain reads and an already-resolved canonical-block check
-// (never fetched inside this function itself) - the same "extract the pure
-// decision, keep the RPC-touching orchestration separate and thin"
-// discipline resolveVaultOutcome (verify-vault.ts) already established.
-// Directly unit-testable with plain constructed inputs, no RPC/mocked
-// chain client needed.
+// Pure - the full per-candidate accept/reject/retry decision, given
+// already-fetched on-chain reads and an already-resolved canonical-block
+// check (never fetched inside this function itself) - the same "extract
+// the pure decision, keep the RPC-touching orchestration separate and
+// thin" discipline resolveVaultOutcome (verify-vault.ts) already
+// established. Directly unit-testable with plain constructed inputs, no
+// RPC/mocked chain client needed.
 export function resolveValidationOutcome(
   deployment: FactoryDeployment,
   candidate: DecodedPairCreated,
@@ -94,53 +108,60 @@ export function resolveValidationOutcome(
   canonicalStatus: "confirmed" | "reorged" | "unknown",
 ): ValidationOutcome {
   // Section 9: a discovered pool is never promoted based on a creation
-  // event that cannot be confirmed canonical - "unknown" (a transient RPC
-  // failure reading the current block hash) is NOT treated as license to
-  // proceed; it's retried next run (the row stays in "discovered" status),
-  // never silently accepted.
-  if (canonicalStatus !== "confirmed") {
+  // event that cannot be confirmed canonical. "reorged" is a genuine,
+  // terminal fact (the event was orphaned) - rejected, though the
+  // recordDiscoveredPools upsert lets it self-heal automatically if the
+  // real canonical creation for the same pool address is later
+  // re-discovered (see that function's own comment). "unknown" (a
+  // transient RPC failure reading the CURRENT block hash to compare
+  // against) proves nothing either way about this candidate - it is never
+  // treated as a rejection, only as "try again next run."
+  if (canonicalStatus === "reorged") {
     return {
-      accepted: false,
-      reason:
-        canonicalStatus === "reorged"
-          ? `creation block ${candidate.blockNumber} is no longer canonical for this chain - the PairCreated event this pool was discovered from was orphaned by a reorg`
-          : `could not confirm creation block ${candidate.blockNumber} is still canonical (RPC read failed) - will retry`,
+      status: "rejected",
+      reason: `creation block ${candidate.blockNumber} is no longer canonical for this chain - the PairCreated event this pool was discovered from was orphaned by a reorg`,
+    };
+  }
+  if (canonicalStatus === "unknown") {
+    return {
+      status: "retry",
+      reason: `could not confirm creation block ${candidate.blockNumber} is still canonical (RPC read failed) - will retry`,
     };
   }
 
   if (!decoded.onchainFactory) {
-    return { accepted: false, reason: "factory() read failed - pool contract may not exist or does not implement the expected interface" };
+    return { status: "rejected", reason: "factory() read failed - pool contract may not exist or does not implement the expected interface" };
   }
   if (decoded.onchainFactory.toLowerCase() !== deployment.factoryAddress.toLowerCase()) {
     return {
-      accepted: false,
+      status: "rejected",
       reason: `pool.factory() (${decoded.onchainFactory}) does not match the configured factory (${deployment.factoryAddress}) - this pool was not genuinely deployed by the trusted factory, never accepted merely because a PairCreated-shaped event named it`,
     };
   }
 
   if (!decoded.onchainToken0 || !decoded.onchainToken1) {
-    return { accepted: false, reason: "token0()/token1() read failed - pool contract does not implement the expected V2 pair interface" };
+    return { status: "rejected", reason: "token0()/token1() read failed - pool contract does not implement the expected V2 pair interface" };
   }
   if (decoded.onchainToken0.toLowerCase() !== candidate.token0.toLowerCase() || decoded.onchainToken1.toLowerCase() !== candidate.token1.toLowerCase()) {
     return {
-      accepted: false,
+      status: "rejected",
       reason: `pool.token0()/token1() (${decoded.onchainToken0}/${decoded.onchainToken1}) do not match the PairCreated event's own claimed tokens (${candidate.token0}/${candidate.token1}) - the event and the pool's own live state disagree`,
     };
   }
 
   if (!decoded.reservesCallSucceeded) {
-    return { accepted: false, reason: "getReserves() call failed - not a well-formed V2 pair contract" };
+    return { status: "rejected", reason: "getReserves() call failed - not a well-formed V2 pair contract" };
   }
 
   if (!isValidTokenDecimals(decoded.token0Decimals)) {
-    return { accepted: false, reason: `token0 (${candidate.token0}) decimals() returned an invalid or unreadable value: ${String(decoded.token0Decimals)}` };
+    return { status: "rejected", reason: `token0 (${candidate.token0}) decimals() returned an invalid or unreadable value: ${String(decoded.token0Decimals)}` };
   }
   if (!isValidTokenDecimals(decoded.token1Decimals)) {
-    return { accepted: false, reason: `token1 (${candidate.token1}) decimals() returned an invalid or unreadable value: ${String(decoded.token1Decimals)}` };
+    return { status: "rejected", reason: `token1 (${candidate.token1}) decimals() returned an invalid or unreadable value: ${String(decoded.token1Decimals)}` };
   }
 
   return {
-    accepted: true,
+    status: "accepted",
     token0Decimals: decoded.token0Decimals,
     token1Decimals: decoded.token1Decimals,
     token0Symbol: decoded.token0Symbol,
@@ -156,12 +177,32 @@ export function resolveValidationOutcome(
 // - this single-candidate form exists for direct testability and for
 // engine.ts's own error-isolation (one candidate's chain-read failure must
 // never abort the rest of the batch).
+//
+// `canonicalCheckCache` is an optional, caller-owned Map shared across a
+// whole batch of validateDiscoveredPool calls (engine.ts's
+// validatePendingPools creates ONE per run and threads it through every
+// candidate) - keyed on `${blockNumber}:${blockHash}`, the exact same
+// cache-key shape lib/onchain/volume/reorg.ts's own runRecheckWorkflow
+// already established for the identical problem: multiple candidates
+// discovered in the same block (a real, observed pattern live - several
+// pairs created in one block during a busy period) would otherwise trigger
+// one redundant checkBlockHashStillCanonical/readBlockHash RPC round-trip
+// EACH for what is provably the same answer. Omitting the cache (the
+// default) makes every call independent, which is what direct unit tests
+// of this function still rely on.
 export async function validateDiscoveredPool(
   deployment: FactoryDeployment,
   candidate: DecodedPairCreated,
   readBlockHash: (chainSlug: string, blockNumber: bigint) => Promise<string | null> = readBlockHashOnChain,
+  canonicalCheckCache?: Map<string, Promise<ReorgCheckResult>>,
 ): Promise<ValidationOutcome> {
-  const canonicalCheck = await checkBlockHashStillCanonical(candidate.blockNumber, candidate.blockHash, (bn) => readBlockHash(deployment.chainSlug, bn));
+  const cacheKey = `${candidate.blockNumber}:${candidate.blockHash}`;
+  let canonicalCheckPromise = canonicalCheckCache?.get(cacheKey);
+  if (!canonicalCheckPromise) {
+    canonicalCheckPromise = checkBlockHashStillCanonical(candidate.blockNumber, candidate.blockHash, (bn) => readBlockHash(deployment.chainSlug, bn));
+    canonicalCheckCache?.set(cacheKey, canonicalCheckPromise);
+  }
+  const canonicalCheck = await canonicalCheckPromise;
 
   let decoded: DecodedCandidateRead;
   try {
@@ -178,8 +219,13 @@ export async function validateDiscoveredPool(
       token1Symbol: results[7]?.status === "success" && typeof results[7].result === "string" ? results[7].result : null,
     };
   } catch (err) {
+    // A whole-multicall RPC failure (network blip, rate limit, provider
+    // outage) proves nothing about whether this candidate is genuinely
+    // valid or not - "retry," never "rejected," for the same reason an
+    // "unknown" canonical-check result is never treated as a rejection
+    // above.
     const message = err instanceof Error ? err.message : String(err);
-    return { accepted: false, reason: `on-chain validation read failed: ${message}` };
+    return { status: "retry", reason: `on-chain validation read failed: ${message}` };
   }
 
   return resolveValidationOutcome(deployment, candidate, decoded, canonicalCheck.status);

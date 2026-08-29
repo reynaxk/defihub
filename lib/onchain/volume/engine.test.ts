@@ -6,8 +6,9 @@
 // confirmations.test.ts for its own direct coverage; effectiveStartBlock
 // below now just calls it.
 import { describe, expect, it } from "vitest";
-import { effectiveStartBlock } from "./engine";
+import { effectiveStartBlock, toSwapTokenPrice } from "./engine";
 import type { VolumeSourcePool } from "./config";
+import type { NativeTokenPrice } from "@/lib/onchain/pricing/queries";
 
 function fakePool(overrides: Partial<VolumeSourcePool> = {}): VolumeSourcePool {
   return {
@@ -76,5 +77,65 @@ describe("effectiveStartBlock", () => {
     const result = effectiveStartBlock(pool, BigInt(100000));
     expect(result.startBlock).toBe(BigInt(99999));
     expect(result.skippedBlocks).toBe(BigInt(0));
+  });
+});
+
+function fakeToken(): VolumeSourcePool["token0"] {
+  return { address: "0xusdc", symbol: "USDC", decimals: 6, coingeckoId: "usd-coin" };
+}
+
+function fakeNativePrice(overrides: Partial<NativeTokenPrice> = {}): NativeTokenPrice {
+  return {
+    priceUsd: "1.00",
+    confidence: "HIGH",
+    label: "ONCHAIN_NATIVE",
+    blockNumber: 100,
+    blockHash: "0x" + "aa".repeat(32),
+    observedAt: new Date("2026-01-01T00:00:00.000Z"),
+    sources: [],
+    ...overrides,
+  };
+}
+
+// Phase 5.8 regression tests for a real bug caught during the master
+// integration audit: toSwapTokenPrice used to check freshness only,
+// never native.confidence - a LOW-confidence reference-asset price could
+// still price every swap in a run, and the resulting observation would then
+// get classified HIGH confidence (classifyVolumeConfidence only counts
+// priced-vs-unpriced swaps, never inspects the underlying price's own
+// confidence). This must use the exact same bar TVL already enforces
+// (isNativePriceEligibleForTvl, tvl-integration.ts) - confidence AND
+// freshness, not freshness alone.
+describe("toSwapTokenPrice", () => {
+  const NOW = new Date("2026-01-01T00:05:00.000Z"); // 5 minutes after observedAt - well within freshness
+
+  it("accepts a fresh, HIGH-confidence native price", () => {
+    const result = toSwapTokenPrice(fakeToken(), fakeNativePrice({ confidence: "HIGH" }), NOW);
+    expect(result).toEqual({ symbol: "USDC", decimals: 6, priceUsd: "1.00", priceSource: "onchain-pricing-engine" });
+  });
+
+  it("accepts a fresh, MEDIUM-confidence native price - the same bar TVL uses", () => {
+    const result = toSwapTokenPrice(fakeToken(), fakeNativePrice({ confidence: "MEDIUM" }), NOW);
+    expect(result).not.toBeNull();
+  });
+
+  it("REGRESSION: rejects a fresh but LOW-confidence native price - never silently prices a swap off a shaky single source", () => {
+    const result = toSwapTokenPrice(fakeToken(), fakeNativePrice({ confidence: "LOW" }), NOW);
+    expect(result).toBeNull();
+  });
+
+  it("rejects a fresh but INVALID-confidence native price", () => {
+    const result = toSwapTokenPrice(fakeToken(), fakeNativePrice({ confidence: "INVALID" }), NOW);
+    expect(result).toBeNull();
+  });
+
+  it("rejects a stale HIGH-confidence native price - confidence and freshness are both required, independently", () => {
+    const farFuture = new Date("2026-01-05T00:00:00.000Z"); // days later - stale
+    const result = toSwapTokenPrice(fakeToken(), fakeNativePrice({ confidence: "HIGH" }), farFuture);
+    expect(result).toBeNull();
+  });
+
+  it("returns null when no native price exists at all", () => {
+    expect(toSwapTokenPrice(fakeToken(), null, NOW)).toBeNull();
   });
 });

@@ -76,6 +76,29 @@ describe("getVolumeCoverage", () => {
     });
   }
 
+  // Phase 5.8 regression test for a real bug caught during the master
+  // integration audit: getVolumeCoverage used to hardcode NATIVE for
+  // volume_usd/fees_usd regardless of whether an observation actually
+  // existed - a pool synced into `pools` but never yet indexed (or
+  // permanently failing to produce an observation) was reported as
+  // genuinely NATIVE with nothing behind it.
+  it("never reports volume/fees as NATIVE when the pool is synced but no volume_usd/fees_usd observation has ever been recorded", async () => {
+    const { chainSlug, configKey } = await makeChainAndPool();
+    // Deliberately insert ZERO observations - the pool exists in `pools`
+    // (synced), but the indexer has never produced a real volume/fees row
+    // for it (e.g. a brand-new config entry, or one whose indexing has
+    // consistently failed).
+
+    const coverage = await getVolumeCoverage([fakePool(chainSlug, configKey)]);
+    const volume = coverage.find((c) => c.metric === "volume_usd");
+    const fees = coverage.find((c) => c.metric === "fees_usd");
+
+    expect(volume?.source).toBe("UNSUPPORTED");
+    expect(volume?.knownLimitations.length).toBeGreaterThan(0);
+    expect(fees?.source).toBe("UNSUPPORTED");
+    expect(fees?.knownLimitations.length).toBeGreaterThan(0);
+  });
+
   it("never reports revenue as NATIVE when no revenue_usd observation exists - even though volume/fees do", async () => {
     const { chainSlug, chainId, poolId, configKey } = await makeChainAndPool();
     await insertObservation(poolId, chainId, "volume_usd", "1000");

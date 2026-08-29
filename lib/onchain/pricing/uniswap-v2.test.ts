@@ -128,6 +128,33 @@ describe("deriveV2Price", () => {
     if (!result.ok) expect(result.error).toMatch(/zero/);
   });
 
+  // Phase 5.8 regression test for a real gap caught during the master
+  // integration audit: this function's own header comment claims "exact
+  // result or an explicit failure, never a silently wrong number," but
+  // nothing actually enforced that for the OUTPUT priceUsd itself - only
+  // the pool's total liquidityUsd was checked against a floor. An extreme
+  // enough reserve asymmetry (an astronomically-supplied, 0-decimal priced
+  // token against a paired reserve that still comfortably clears the
+  // liquidity floor) makes the final integer division underflow to exactly
+  // zero, which - before this fix - would have returned `ok: true,
+  // priceUsd: "0"`, a fabricated $0 reference price that could zero out
+  // every downstream TVL/volume figure priced against it. Not reachable
+  // with today's real REFERENCE_ASSETS (ordinary decimals/reserves), but a
+  // genuine, provable gap in what this function actually guaranteed.
+  it("REGRESSION: rejects a derived price that underflows to exactly zero, rather than returning a fabricated $0 price", () => {
+    const result = deriveV2Price({
+      pricedReserve: BigInt(10) ** BigInt(40), // astronomically large raw supply, 0-decimal token
+      pricedDecimals: 0,
+      pairedReserve: BigInt(20000) * BigInt(10) ** BigInt(18), // 20,000 paired-token reserve, 18 decimals
+      pairedDecimals: 18,
+      pairedPriceUsd: "1.00",
+      minLiquidityUsd: MIN_LIQUIDITY, // liquidityUsd here is $40,000 - comfortably clears this floor
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/underflow/);
+  });
+
   it("rejects a pool below the configured minimum liquidity threshold", () => {
     // A genuinely tiny pool: 1 WETH against 1 USDC-equivalent ($1) -
     // nowhere near the $10,000 floor.

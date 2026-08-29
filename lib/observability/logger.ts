@@ -76,9 +76,28 @@ function redactUrlCredentials(value: string): string {
 // walking an arbitrarily deep structure.
 const MAX_REDACT_DEPTH = 4;
 
+// Phase 5.8 hardening: matches a URL ANYWHERE within a string, not just
+// when the whole value IS a URL - the earlier whole-string-only check
+// (`^scheme://...$`) missed a URL embedded mid-message (e.g. "request to
+// https://foo.com/v2/<key> failed: timeout"), which would pass through
+// completely unredacted since the string doesn't itself start with a
+// scheme. No known production call site does this today - the one
+// highest-risk site (lib/chains/rpc-resilient-client.ts, provider error
+// messages that embed the full request URL) already has its own dedicated,
+// narrower redaction applied before anything reaches this logger - but this
+// closes the gap for any future call site that logs/throws a message with
+// an embedded URL, matching the "the logger itself is the backstop" role
+// SENSITIVE_KEY_PATTERN already plays for field names. Global so every
+// embedded URL in one string is caught, not just the first.
+const EMBEDDED_URL_PATTERN = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+
+function redactUrlsInString(value: string): string {
+  return value.replace(EMBEDDED_URL_PATTERN, (match) => redactUrlCredentials(match));
+}
+
 function redactValue(value: unknown, depth: number): unknown {
-  if (typeof value === "string" && /^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
-    return redactUrlCredentials(value);
+  if (typeof value === "string") {
+    return redactUrlsInString(value);
   }
   // By value type, not by the field name "error" - any field can hold an
   // Error (cause, lastError, rpcError, ...), and JSON.stringify(new
@@ -146,11 +165,17 @@ function safeStringify(value: unknown): string {
 function emit(level: LogLevel, message: string, fields: LogFields): void {
   const { component, ...rest } = fields;
   const safeFields = redact(rest);
-  const entry = { timestamp: new Date().toISOString(), level, component, message, ...safeFields };
+  // Phase 5.8 hardening: `message` used to reach the log line completely
+  // unredacted - only `fields` went through redact(). A call site that
+  // builds its own message string with an embedded URL (e.g.
+  // `logger.error("fetch failed: " + url, ...)`) would have leaked it
+  // regardless of how well-redacted every other field was.
+  const safeMessage = redactUrlsInString(message);
+  const entry = { timestamp: new Date().toISOString(), level, component, message: safeMessage, ...safeFields };
 
   const line = isProduction
     ? safeStringify(entry)
-    : formatForDevelopment(level, component, message, safeFields);
+    : formatForDevelopment(level, component, safeMessage, safeFields);
 
   const write = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
   write(line);

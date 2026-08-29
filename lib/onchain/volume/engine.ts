@@ -3,7 +3,8 @@ import { confirmationsFor, safeHeadFor } from "@/lib/chains/confirmations";
 import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import type { VolumeCalculationInput } from "@/lib/database/schema";
 import { scanFromCursor, type ScanChunk } from "@/lib/indexing/events";
-import { getNativeTokenPrice, isNativeTokenPriceFresh, type NativeTokenPrice } from "@/lib/onchain/pricing/queries";
+import { getNativeTokenPrice, type NativeTokenPrice } from "@/lib/onchain/pricing/queries";
+import { isNativePriceEligibleForTvl } from "@/lib/onchain/pricing/tvl-integration";
 import { roundExactDecimal } from "@/lib/onchain/verify-pool";
 import { logger } from "@/lib/observability/logger";
 import { aggregateSwapVolume, classifyVolumeConfidence } from "./aggregate";
@@ -229,18 +230,31 @@ export interface PoolVolumeRunResult {
 
 // Phase 5.3's native price engine is reused exactly as-is (Section 21:
 // "never reinvent price discovery per-adapter") - looked up ONCE per run
-// per token, not once per swap, and only trusted if still fresh by the
-// exact same isNativeTokenPriceFresh bar Phase 5.3's own TVL override
-// already relies on (lib/onchain/pricing/tvl-integration.ts). No
-// CoinGecko fallback is added here: both this pool's tokens (USDC, WETH)
-// are already-configured Phase 5.3 REFERENCE_ASSETS, priced on their own
-// independent schedule (workers/onchain/price.ts) - a swap whose tokens
-// haven't been priced recently enough is genuinely unpriced for this run
+// per token, not once per swap, and only trusted if it clears the exact
+// same isNativePriceEligibleForTvl bar Phase 5.3's own TVL override relies
+// on (lib/onchain/pricing/tvl-integration.ts) - CONFIDENCE (HIGH/MEDIUM
+// only) AND freshness, not freshness alone. No CoinGecko fallback is added
+// here: both this pool's tokens (USDC, WETH) are already-configured Phase
+// 5.3 REFERENCE_ASSETS, priced on their own independent schedule
+// (workers/onchain/price.ts) - a swap whose tokens haven't been priced
+// recently/confidently enough is genuinely unpriced for this run
 // (contributes to unpricedSwapCount, never a fabricated $0 - Section 22),
 // not silently patched over with a second, different pricing source.
-function toSwapTokenPrice(token: VolumeSourceToken, native: NativeTokenPrice | null, now: Date): SwapTokenPrice | null {
+//
+// Phase 5.8 fix: this used to check freshness only (isNativeTokenPriceFresh
+// directly), never native.confidence - a LOW-confidence reference-asset
+// price (a single, thinly-liquid source that barely cleared the minimum
+// liquidity floor but never reached the comfortable-confidence threshold)
+// could still price every swap in a run, and classifyVolumeConfidence
+// (aggregate.ts) then labels the resulting volume_usd/fees_usd observation
+// "HIGH" whenever every swap got priced - laundering a shaky underlying
+// price into an observation that LOOKS fully trustworthy. This is the same
+// bar TVL already enforces via isNativePriceEligibleForTvl; volume/fees
+// pricing must never be a weaker gate than TVL for the identical
+// reference-asset price.
+export function toSwapTokenPrice(token: VolumeSourceToken, native: NativeTokenPrice | null, now: Date): SwapTokenPrice | null {
   if (!native) return null;
-  if (!isNativeTokenPriceFresh(native.observedAt, now)) return null;
+  if (!isNativePriceEligibleForTvl(native.confidence, native.observedAt, now)) return null;
   return { symbol: token.symbol, decimals: token.decimals, priceUsd: native.priceUsd, priceSource: "onchain-pricing-engine" };
 }
 
@@ -496,7 +510,7 @@ function logIfNotPersisted(
 // single call here can legitimately process many chunks while catching up
 // a large gap - every chunk's own ChunkVolumeResult is accumulated into
 // `chunks` below, never overwritten.
-export async function indexPoolVolume(pool: VolumeSourcePool): Promise<PoolVolumeRunResult> {
+export async function indexPoolVolume(pool: VolumeSourcePool, deadlineAt?: number): Promise<PoolVolumeRunResult> {
   const component = `volume:${pool.sourceKind}:${pool.key}`;
 
   const [chainId, poolId] = await Promise.all([getChainId(pool.chainSlug), getPoolIdByConfigKey(pool.key)]);
@@ -550,21 +564,11 @@ export async function indexPoolVolume(pool: VolumeSourcePool): Promise<PoolVolum
       startBlock: startBlockForThisRun,
       chunkSize: DEFAULT_VOLUME_CHUNK_SIZE,
       confirmations: confirmationsFor(pool.chainSlug),
+      deadlineAt,
       onLogs: async (logs, chunk) => {
         chunks.push(await processSwapLogs({ pool, chainId, poolId, logs, token0Price, token1Price, chunk }));
       },
     });
-
-    if (scanResult.outcome === "partial") {
-      logger.warn("volume indexing: catch-up run stopped before reaching the safe head - will resume next run", {
-        component: "onchain-volume",
-        pool: pool.key,
-        stoppedReason: scanResult.stoppedReason,
-        chunksCompleted: scanResult.chunksCompleted,
-        chunksAttempted: scanResult.chunksAttempted,
-        scannedTo: scanResult.scannedTo.toString(),
-      });
-    }
 
     const safeHead = safeHeadFor(pool.chainSlug, currentBlock);
     // scanResult.scannedTo is the cursor's position AFTER this run - for
@@ -573,6 +577,27 @@ export async function indexPoolVolume(pool: VolumeSourcePool): Promise<PoolVolum
     // which is exactly right for lag reporting too.
     const cursorAfterRun = scanResult.scannedTo;
     const lag = safeHead > cursorAfterRun ? safeHead - cursorAfterRun : BigInt(0);
+
+    if (scanResult.outcome === "partial") {
+      // Phase 5.8 fix: this log line used to be emitted BEFORE
+      // safeHead/cursorAfterRun/lag were computed, so it omitted exactly
+      // the two fields (safeHead, lag) an operator most needs to gauge how
+      // far behind this run actually left the pool - moved after that
+      // computation, with chain/lag/safeHead added, rather than making a
+      // reader cross-reference a separate log line or the run's own
+      // eventual result object.
+      logger.warn("volume indexing: catch-up run stopped before reaching the safe head - will resume next run", {
+        component: "onchain-volume",
+        chain: pool.chainSlug,
+        pool: pool.key,
+        stoppedReason: scanResult.stoppedReason,
+        chunksCompleted: scanResult.chunksCompleted,
+        chunksAttempted: scanResult.chunksAttempted,
+        scannedTo: scanResult.scannedTo.toString(),
+        safeHead: safeHead.toString(),
+        lag: lag.toString(),
+      });
+    }
 
     return {
       poolKey: pool.key,
@@ -615,11 +640,25 @@ export async function indexPoolVolume(pool: VolumeSourcePool): Promise<PoolVolum
 // count (1); a future larger VOLUME_SOURCE_POOLS should reach for the same
 // bounded-chunk pattern lib/utils/chunk.ts already establishes elsewhere in
 // this app rather than parallelizing every pool at once.
+//
+// Phase 5.8: `app/api/cron/index-volume/route.ts` sets `maxDuration = 60`
+// (Vercel's hard execution ceiling for this function) - this is the ONE
+// place that real-world constraint is translated into an internal deadline
+// (see scanFromCursor's own deadlineAt comment for why maxChunkAttempts
+// alone doesn't already cover this). Computed ONCE, here, and shared across
+// every pool in this call - not a fresh budget per pool - so a slow first
+// pool correctly leaves less time for the next one instead of each pool
+// independently assuming it has the whole window to itself. 10s margin
+// below the 60s ceiling for connection teardown/final writes/logging after
+// the last chunk completes.
+const SHARED_RUN_DEADLINE_MS = 50_000;
+
 export async function indexAllPoolVolume(pools: VolumeSourcePool[] = VOLUME_SOURCE_POOLS): Promise<PoolVolumeRunResult[]> {
+  const deadlineAt = Date.now() + SHARED_RUN_DEADLINE_MS;
   const results: PoolVolumeRunResult[] = [];
   for (const pool of pools) {
     try {
-      results.push(await indexPoolVolume(pool));
+      results.push(await indexPoolVolume(pool, deadlineAt));
     } catch (err) {
       results.push({
         poolKey: pool.key,

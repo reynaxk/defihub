@@ -85,21 +85,37 @@ export async function getVolumeCoverage(pools = VOLUME_SOURCE_POOLS): Promise<Vo
       chainSlug: pool.chainSlug,
       protocolKey: pool.key,
       metric: "volume_usd",
-      source: "NATIVE",
+      // Phase 5.8 fix: this used to hardcode NATIVE regardless of whether
+      // volumeObs actually existed - a configured-but-never-yet-indexed (or
+      // not-yet-synced) pool was reported as genuinely NATIVE with no
+      // observation behind it, the exact "adapter exists" dishonesty this
+      // registry's own header comment says to never allow. NATIVE now
+      // requires a real volume_usd row, matching the revenue_usd rule
+      // below exactly.
+      source: volumeObs != null ? "NATIVE" : "UNSUPPORTED",
       lastIndexedBlock,
       lastObservationAt: volumeObs?.timestamp ?? null,
       lastObservationValueUsd: volumeObs?.value ?? null,
-      knownLimitations: poolId ? [] : ["pool not yet synced into `pools` - run TVL verification first"],
+      knownLimitations: volumeObs
+        ? []
+        : poolId
+          ? ["no volume_usd observation has been recorded yet for this pool - run the volume indexer (npm run index:volume)"]
+          : ["pool not yet synced into `pools` - run TVL verification first"],
     });
     entries.push({
       chainSlug: pool.chainSlug,
       protocolKey: pool.key,
       metric: "fees_usd",
-      source: "NATIVE",
+      // Same fix as volume_usd above - NATIVE only when a real fees_usd row exists.
+      source: feesObs != null ? "NATIVE" : "UNSUPPORTED",
       lastIndexedBlock,
       lastObservationAt: feesObs?.timestamp ?? null,
       lastObservationValueUsd: feesObs?.value ?? null,
-      knownLimitations: poolId ? [] : ["pool not yet synced into `pools` - run TVL verification first"],
+      knownLimitations: feesObs
+        ? []
+        : poolId
+          ? ["no fees_usd observation has been recorded yet for this pool - run the volume indexer (npm run index:volume)"]
+          : ["pool not yet synced into `pools` - run TVL verification first"],
     });
     entries.push({
       chainSlug: pool.chainSlug,

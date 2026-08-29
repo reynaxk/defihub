@@ -107,6 +107,24 @@ export interface ScanFromCursorParams {
   // different logIndex, not redelivered identically. Defaults to 0 for
   // callers that already pass a pre-confirmed height.
   confirmations?: bigint;
+  // Phase 5.8 fix: epoch-ms deadline (typically `Date.now() +
+  // someSafeMarginBelowTheCallerOwnServerlessMaxDuration`) this call must
+  // stop BEFORE, checked at the top of the loop before starting each new
+  // chunk attempt - never mid-chunk. Without this, maxChunkAttempts (100 by
+  // default) has no relationship to a real caller's actual execution
+  // ceiling (e.g. Vercel's `maxDuration = 60` on the cron routes that call
+  // this): a large catch-up backlog can plausibly still be well within its
+  // attempt budget when the PLATFORM kills the function first, which
+  // produces an abrupt SIGKILL-equivalent instead of this module's own
+  // graceful "partial" outcome with a real, diagnosable stoppedReason - the
+  // per-chunk checkpointing already makes either case safe/idempotent (no
+  // data corruption either way), but only the graceful stop is actually
+  // observable in logs/sync_runs the way this module's own design intends.
+  // Omitted (the default) preserves the exact previous behavior - no
+  // deadline, bounded only by maxChunkAttempts - for any caller that
+  // doesn't have (or doesn't want to think about) a serverless execution
+  // ceiling.
+  deadlineAt?: number;
   // Called once PER CHUNK (see this file's own module comment for why this
   // changed from Phase 5's original "called once for the whole run") with
   // that chunk's logs and its own [fromBlock, toBlock] boundaries - must
@@ -151,6 +169,9 @@ export const STOP_REASON = {
   RANGE_LIMIT_AT_MINIMUM: "range-limit-at-minimum-chunk-size",
   RPC_UNAVAILABLE: "rpc-unavailable",
   ATTEMPT_BUDGET_EXHAUSTED: "attempt-budget-exhausted",
+  // Phase 5.8: stopped because `deadlineAt` was reached, not because
+  // anything failed - see ScanFromCursorParams.deadlineAt's own comment.
+  DEADLINE_APPROACHING: "deadline-approaching",
 } as const;
 
 const DEFAULT_MIN_CHUNK_SIZE = BigInt(10);
@@ -226,6 +247,7 @@ export async function scanFromCursor(params: ScanFromCursorParams): Promise<Scan
     minChunkSize = DEFAULT_MIN_CHUNK_SIZE,
     maxChunkAttempts = DEFAULT_MAX_CHUNK_ATTEMPTS,
     confirmations = BigInt(0),
+    deadlineAt,
     onLogs,
   } = params;
   const event = parseAbiItem(eventSignature);
@@ -261,6 +283,13 @@ export async function scanFromCursor(params: ScanFromCursorParams): Promise<Scan
     while (planIndex < plan.length) {
       if (attempts >= maxChunkAttempts) {
         stoppedReason = STOP_REASON.ATTEMPT_BUDGET_EXHAUSTED;
+        break;
+      }
+      // Checked BEFORE starting a new chunk attempt, never mid-chunk - see
+      // deadlineAt's own comment above. An in-flight chunk's own RPC call/
+      // onLogs write is never interrupted by this check.
+      if (deadlineAt != null && Date.now() >= deadlineAt) {
+        stoppedReason = STOP_REASON.DEADLINE_APPROACHING;
         break;
       }
       attempts++;
@@ -306,7 +335,24 @@ export async function scanFromCursor(params: ScanFromCursorParams): Promise<Scan
     // call - Section 26's "failed" (no meaningful progress) - surfaces as
     // a genuine thrown error, the same contract a total failure has always
     // had.
+    //
+    // Phase 5.8 exception: a deadline stop with zero chunks completed means
+    // this call never even ATTEMPTED a chunk (e.g. a shared cross-pool time
+    // budget was already exhausted by an earlier pool/chain in the same
+    // invocation - see deadlineAt's own comment) - nothing failed, this
+    // pool simply didn't get a turn this run. Treating that as a thrown
+    // "failed" error would misreport a healthy pool as broken to callers
+    // like indexAllPoolVolume's own per-pool try/catch. Reported as
+    // "partial" with zero progress instead, so the next invocation picks up
+    // from exactly the same, unchanged cursor.
     if (cursorAdvancedTo == null) {
+      if (stoppedReason === STOP_REASON.DEADLINE_APPROACHING) {
+        await updateIndexingState(chainSlug, component, {
+          status: "idle",
+          error: "skipped this run - shared time budget was already exhausted before this component's turn",
+        });
+        return { scannedFrom: fromBlock, scannedTo: fromBlock - BigInt(1), logCount: 0, outcome: "partial", chunksCompleted: 0, chunksAttempted: attempts, stoppedReason };
+      }
       const message = stoppingError instanceof Error ? stoppingError.message : `scanFromCursor stopped before any chunk completed: ${stoppedReason}`;
       throw new Error(message);
     }

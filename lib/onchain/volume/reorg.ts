@@ -1,10 +1,11 @@
 import postgres from "postgres";
 import { getObservationsNeedingRecheck, markObservationReorged } from "@/lib/database/queries/onchain-recheck";
 import { getIndexingState, updateIndexingState } from "@/lib/indexing/state";
+import { getAllVolumeSourcePools } from "@/lib/onchain/discovery/volume-source";
 import { checkBlockHashStillCanonical, readBlockHashOnChain, type ReorgCheckResult } from "@/lib/onchain/reorg";
 import { logger } from "@/lib/observability/logger";
 import { withSyncRun } from "@/lib/observability/sync-run";
-import { VOLUME_SOURCE_POOLS, type VolumeSourcePool } from "./config";
+import type { VolumeSourcePool } from "./config";
 import { getPoolIdByConfigKey, getSwapEventsNeedingRecheck, markSwapEventsReorged } from "./queries";
 
 // A dedicated, deliberately SEPARATE reorg-recheck path for Phase 5.4's own
@@ -261,7 +262,12 @@ async function runVolumeReorgRecheck(options: VolumeReorgRecheckOptions = {}): P
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
   const lookbackDepth = options.lookbackDepth ?? DEFAULT_LOOKBACK_DEPTH;
   const readBlockHash = options.readBlockHash ?? readBlockHashOnChain;
-  const poolsToCheck = options.poolsOverride ?? VOLUME_SOURCE_POOLS;
+  // Phase 5.9: config-curated pools PLUS discovery-validated "active"
+  // pools - a discovered pool's own swap_events/observations must be
+  // reorg-rechecked by the exact same job as everything else, not a
+  // second, discovery-specific recheck path. `poolsOverride` (tests) skips
+  // the DB read entirely, same as before.
+  const poolsToCheck = options.poolsOverride ?? (await getAllVolumeSourcePools());
 
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL is not set");

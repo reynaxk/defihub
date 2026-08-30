@@ -76,6 +76,24 @@ describe("selectReorgRecheckBatch", () => {
     expect(batch).toEqual(["b", "c"]);
   });
 
+  it("REGRESSION (Phase 5.10, live-observed): a pool list that GROWS between successive calls stays correct - `pools.length` is recomputed fresh every call, never cached from an earlier, smaller list", () => {
+    // Mirrors what actually happened live this phase: the offset started
+    // mid-rotation over a 69-pool list, then discovery activated 28 more
+    // pools (97 total) between successive recheck runs. The persisted
+    // offset itself never resets - only the modulo base changes.
+    const smallList = Array.from({ length: 69 }, (_, i) => `pool-${i}`);
+    const first = selectReorgRecheckBatch(smallList, 10, BigInt(20));
+    expect(first.batch).toEqual(smallList.slice(20, 30));
+    expect(first.nextOffset).toBe(BigInt(30));
+
+    // The list grows before the NEXT call - offset is fed back in
+    // unchanged, exactly as runVolumeReorgRecheck does via indexing_state.
+    const largerList = Array.from({ length: 97 }, (_, i) => `pool-${i}`);
+    const second = selectReorgRecheckBatch(largerList, 10, first.nextOffset);
+    expect(second.batch).toEqual(largerList.slice(30, 40));
+    expect(second.nextOffset).toBe(BigInt(40));
+  });
+
   it("single-element list always returns that one element regardless of offset", () => {
     for (const offset of [BigInt(0), BigInt(1), BigInt(5), BigInt(100)]) {
       const { batch } = selectReorgRecheckBatch(["only"], 3, offset);

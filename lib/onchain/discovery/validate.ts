@@ -169,64 +169,102 @@ export function resolveValidationOutcome(
   };
 }
 
-// RPC-touching orchestration for ONE candidate: reads the canonical-block
-// status and the validation multicall, then hands off to
-// resolveValidationOutcome for the actual decision. Bulk validation
-// (engine.ts) batches the on-chain reads for a whole page of candidates
-// into one multicall rather than calling this per-candidate in production
-// - this single-candidate form exists for direct testability and for
-// engine.ts's own error-isolation (one candidate's chain-read failure must
-// never abort the rest of the batch).
+// Pure - slices one candidate's own CALLS_PER_CANDIDATE-wide window out of
+// a whole-batch multicall result array at the given candidate index. The
+// single place both validateDiscoveredPoolsBatch and (via delegation)
+// validateDiscoveredPool decode a multicall response, so the two can never
+// silently drift into decoding the 8-call shape differently.
+function decodeCandidateReadAt(results: { status: "success" | "failure"; result?: unknown }[], index: number): DecodedCandidateRead {
+  const base = index * CALLS_PER_CANDIDATE;
+  return {
+    onchainToken0: results[base]?.status === "success" ? (results[base].result as Address) : null,
+    onchainToken1: results[base + 1]?.status === "success" ? (results[base + 1].result as Address) : null,
+    onchainFactory: results[base + 2]?.status === "success" ? (results[base + 2].result as Address) : null,
+    reservesCallSucceeded: results[base + 3]?.status === "success",
+    token0Decimals: results[base + 4]?.status === "success" ? results[base + 4].result : undefined,
+    token1Decimals: results[base + 5]?.status === "success" ? results[base + 5].result : undefined,
+    token0Symbol: results[base + 6]?.status === "success" && typeof results[base + 6].result === "string" ? (results[base + 6].result as string) : null,
+    token1Symbol: results[base + 7]?.status === "success" && typeof results[base + 7].result === "string" ? (results[base + 7].result as string) : null,
+  };
+}
+
+// RPC-touching orchestration for a WHOLE PAGE of candidates: exactly ONE
+// multicall round-trip covering every candidate's own CALLS_PER_CANDIDATE
+// reads (buildValidationMulticallCalls already flattens candidates this
+// way), rather than one multicall PER candidate. This is the real
+// production path engine.ts's validatePendingPools calls - previously that
+// function called the single-candidate validateDiscoveredPool once per
+// pending row in a sequential loop, which meant a page of
+// VALIDATION_BATCH_SIZE (25) candidates cost 25 separate RPC round-trips
+// (each paying its own network latency) instead of one - a real,
+// measurable wall-clock and RPC-count cost that only gets worse as this
+// phase grows the pending-candidate backlog. Every other batched on-chain
+// read in this app (verify-pool.ts, verify-vault.ts, the pricing engine)
+// already uses exactly this "one multicall per page" shape; this brings
+// discovery validation in line with that established convention instead of
+// being the one exception.
 //
-// `canonicalCheckCache` is an optional, caller-owned Map shared across a
-// whole batch of validateDiscoveredPool calls (engine.ts's
-// validatePendingPools creates ONE per run and threads it through every
-// candidate) - keyed on `${blockNumber}:${blockHash}`, the exact same
-// cache-key shape lib/onchain/volume/reorg.ts's own runRecheckWorkflow
-// already established for the identical problem: multiple candidates
-// discovered in the same block (a real, observed pattern live - several
-// pairs created in one block during a busy period) would otherwise trigger
-// one redundant checkBlockHashStillCanonical/readBlockHash RPC round-trip
-// EACH for what is provably the same answer. Omitting the cache (the
-// default) makes every call independent, which is what direct unit tests
-// of this function still rely on.
+// `canonicalCheckCache` is an optional, caller-owned Map shared across the
+// whole page (engine.ts's validatePendingPools creates ONE per run) -
+// keyed on `${blockNumber}:${blockHash}`, the exact same cache-key shape
+// lib/onchain/volume/reorg.ts's own runRecheckWorkflow already established
+// for the identical problem: multiple candidates discovered in the same
+// block (a real, observed pattern live - several pairs created in one
+// block during a busy period) would otherwise trigger one redundant
+// checkBlockHashStillCanonical/readBlockHash RPC round-trip EACH for what
+// is provably the same answer.
+//
+// A whole-multicall failure (network blip, rate limit, provider outage)
+// proves nothing about any individual candidate's validity - every
+// candidate in the page gets "retry", never "rejected", for the same
+// reason a single candidate's own multicall failure does below - a
+// transient RPC hiccup must never permanently blacklist a real, valid pool
+// just because it happened to share a page with others.
+export async function validateDiscoveredPoolsBatch(
+  deployment: FactoryDeployment,
+  candidates: readonly DecodedPairCreated[],
+  readBlockHash: (chainSlug: string, blockNumber: bigint) => Promise<string | null> = readBlockHashOnChain,
+  canonicalCheckCache?: Map<string, Promise<ReorgCheckResult>>,
+): Promise<ValidationOutcome[]> {
+  if (candidates.length === 0) return [];
+
+  const canonicalChecks = await Promise.all(
+    candidates.map((candidate) => {
+      const cacheKey = `${candidate.blockNumber}:${candidate.blockHash}`;
+      let canonicalCheckPromise = canonicalCheckCache?.get(cacheKey);
+      if (!canonicalCheckPromise) {
+        canonicalCheckPromise = checkBlockHashStillCanonical(candidate.blockNumber, candidate.blockHash, (bn) => readBlockHash(deployment.chainSlug, bn));
+        canonicalCheckCache?.set(cacheKey, canonicalCheckPromise);
+      }
+      return canonicalCheckPromise;
+    }),
+  );
+
+  let decodedResults: DecodedCandidateRead[];
+  try {
+    const calls = buildValidationMulticallCalls(candidates);
+    const results = await withResilientClient(deployment.chainSlug, (client) => client.multicall({ contracts: calls, allowFailure: true }));
+    decodedResults = candidates.map((_, i) => decodeCandidateReadAt(results, i));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return candidates.map(() => ({ status: "retry" as const, reason: `on-chain validation read failed: ${message}` }));
+  }
+
+  return candidates.map((candidate, i) => resolveValidationOutcome(deployment, candidate, decodedResults[i], canonicalChecks[i].status));
+}
+
+// Single-candidate convenience wrapper around validateDiscoveredPoolsBatch
+// (a one-element batch) - kept for direct testability (constructing one
+// candidate is simpler than a whole page) and for any caller that
+// genuinely only has one candidate to check. Delegating rather than
+// keeping a second, hand-duplicated decode path guarantees the two can
+// never silently diverge in behavior.
 export async function validateDiscoveredPool(
   deployment: FactoryDeployment,
   candidate: DecodedPairCreated,
   readBlockHash: (chainSlug: string, blockNumber: bigint) => Promise<string | null> = readBlockHashOnChain,
   canonicalCheckCache?: Map<string, Promise<ReorgCheckResult>>,
 ): Promise<ValidationOutcome> {
-  const cacheKey = `${candidate.blockNumber}:${candidate.blockHash}`;
-  let canonicalCheckPromise = canonicalCheckCache?.get(cacheKey);
-  if (!canonicalCheckPromise) {
-    canonicalCheckPromise = checkBlockHashStillCanonical(candidate.blockNumber, candidate.blockHash, (bn) => readBlockHash(deployment.chainSlug, bn));
-    canonicalCheckCache?.set(cacheKey, canonicalCheckPromise);
-  }
-  const canonicalCheck = await canonicalCheckPromise;
-
-  let decoded: DecodedCandidateRead;
-  try {
-    const calls = buildValidationMulticallCalls([candidate]);
-    const results = await withResilientClient(deployment.chainSlug, (client) => client.multicall({ contracts: calls, allowFailure: true }));
-    decoded = {
-      onchainToken0: results[0]?.status === "success" ? (results[0].result as Address) : null,
-      onchainToken1: results[1]?.status === "success" ? (results[1].result as Address) : null,
-      onchainFactory: results[2]?.status === "success" ? (results[2].result as Address) : null,
-      reservesCallSucceeded: results[3]?.status === "success",
-      token0Decimals: results[4]?.status === "success" ? results[4].result : undefined,
-      token1Decimals: results[5]?.status === "success" ? results[5].result : undefined,
-      token0Symbol: results[6]?.status === "success" && typeof results[6].result === "string" ? results[6].result : null,
-      token1Symbol: results[7]?.status === "success" && typeof results[7].result === "string" ? results[7].result : null,
-    };
-  } catch (err) {
-    // A whole-multicall RPC failure (network blip, rate limit, provider
-    // outage) proves nothing about whether this candidate is genuinely
-    // valid or not - "retry," never "rejected," for the same reason an
-    // "unknown" canonical-check result is never treated as a rejection
-    // above.
-    const message = err instanceof Error ? err.message : String(err);
-    return { status: "retry", reason: `on-chain validation read failed: ${message}` };
-  }
-
-  return resolveValidationOutcome(deployment, candidate, decoded, canonicalCheck.status);
+  const [outcome] = await validateDiscoveredPoolsBatch(deployment, [candidate], readBlockHash, canonicalCheckCache);
+  return outcome;
 }

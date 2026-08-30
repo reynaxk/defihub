@@ -11,7 +11,7 @@ import { FACTORY_DEPLOYMENTS, type FactoryDeployment } from "./config";
 import { getPendingDiscoveredPools, markDiscoveredPoolActive, markDiscoveredPoolRejected, recordDiscoveredPools } from "./queries";
 import { registerDiscoveredPoolAsPool } from "./register";
 import { decodePairCreatedLog, PAIR_CREATED_EVENT_SIGNATURE } from "./scan";
-import { validateDiscoveredPool } from "./validate";
+import { validateDiscoveredPoolsBatch } from "./validate";
 
 // Section 5's bounded discovery primitive: reuses scanFromCursor
 // (lib/indexing/events.ts) exactly as engine.ts (volume) does - the same
@@ -46,6 +46,15 @@ export interface DiscoveryRunResult {
   rejected: number;
   scanOutcome?: "success" | "partial";
   chunksCompleted?: number;
+  // Phase 5.10 fix: set when the SCAN phase itself failed (e.g. an
+  // eth_getLogs-specific RPC policy rejection) but validation still ran
+  // independently against whatever candidates already existed in
+  // `discovered_pools` - see discoverPoolsForDeployment's own comment for
+  // why these two phases are no longer coupled. `ok` can be true with this
+  // set (validation made real progress despite the scan failure); never
+  // silently dropped even when ok is true, so a scan-side failure stays
+  // visible instead of vanishing the moment validation happens to succeed.
+  scanError?: string;
 }
 
 async function scanForNewPools(deployment: FactoryDeployment, chainId: string): Promise<{ discovered: number; scanOutcome: "success" | "partial"; chunksCompleted: number }> {
@@ -115,35 +124,43 @@ async function validatePendingPools(deployment: FactoryDeployment, chainId: stri
   const pending = await getPendingDiscoveredPools(deployment.key, VALIDATION_BATCH_SIZE);
   let activated = 0;
   let rejected = 0;
+  if (pending.length === 0) return { validated: 0, activated: 0, rejected: 0 };
+
   // Shared across every candidate in THIS page, never across separate
   // validatePendingPools calls (deliberately created fresh here, per run -
   // a stale canonical-block verdict from a much earlier run must never be
-  // reused) - see validateDiscoveredPool's own comment for exactly what
-  // this dedupes and why.
+  // reused) - see validateDiscoveredPoolsBatch's own comment for exactly
+  // what this dedupes and why.
   const canonicalCheckCache: Map<string, Promise<ReorgCheckResult>> = new Map();
 
-  for (const row of pending) {
-    let outcome;
-    try {
-      outcome = await validateDiscoveredPool(
-        deployment,
-        {
-          token0: row.token0Address,
-          token1: row.token1Address,
-          poolAddress: row.poolAddress,
-          blockNumber: BigInt(row.creationBlockNumber),
-          blockHash: row.creationBlockHash,
-          transactionHash: row.creationTransactionHash,
-          logIndex: row.creationLogIndex,
-        },
-        undefined,
-        canonicalCheckCache,
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logger.warn("pool discovery: validation read failed - leaving pending for retry", { component: "onchain-discovery", deployment: deployment.key, pool: row.poolAddress, error: message });
-      continue; // left in "discovered" status - retried next run, never rejected merely because this run's RPC read failed
-    }
+  // ONE multicall covering the WHOLE page, not one per candidate - see
+  // validateDiscoveredPoolsBatch's own module comment for exactly why this
+  // matters at scale (VALIDATION_BATCH_SIZE candidates each paying their
+  // own RPC round-trip latency, sequentially, adds up fast once the
+  // pending backlog is routinely full). A whole-batch RPC failure here
+  // resolves to "retry" for every candidate (never thrown) - see that
+  // function's own contract - so this call itself is not expected to
+  // reject under normal operation; letting a genuinely unexpected throw
+  // propagate to discoverPoolsForDeployment's own catch is intentional,
+  // not an oversight.
+  const outcomes = await validateDiscoveredPoolsBatch(
+    deployment,
+    pending.map((row) => ({
+      token0: row.token0Address,
+      token1: row.token1Address,
+      poolAddress: row.poolAddress,
+      blockNumber: BigInt(row.creationBlockNumber),
+      blockHash: row.creationBlockHash,
+      transactionHash: row.creationTransactionHash,
+      logIndex: row.creationLogIndex,
+    })),
+    undefined,
+    canonicalCheckCache,
+  );
+
+  for (let i = 0; i < pending.length; i++) {
+    const row = pending[i];
+    const outcome = outcomes[i];
 
     if (outcome.status === "retry") {
       // Transient (an unresolvable canonical-block check or a whole-batch
@@ -201,6 +218,26 @@ async function validatePendingPools(deployment: FactoryDeployment, chainId: stri
   return { validated: activated + rejected, activated, rejected };
 }
 
+// Phase 5.10 fix: scan (eth_getLogs, finding NEW candidates) and validation
+// (eth_call/multicall, deciding on candidates ALREADY sitting in
+// `discovered_pools`) are genuinely independent RPC operations against
+// genuinely independent chain data - the only thing they share is a
+// deployment and a chain. Before this fix they were coupled inside one
+// try/catch: a scan failure (a "discovered" candidate range unreachable
+// through this provider, a factory-specific RPC error) short-circuited the
+// WHOLE call and skipped validation entirely, even though validation
+// doesn't touch eth_getLogs at all and had a completely independent chance
+// of succeeding against whatever candidates already existed. Live-observed
+// real bug: a public RPC provider policy change (this provider now
+// requires a personal archive token for every eth_getLogs call,
+// discovered live during this phase's own development) made scanning
+// fail 100% of the time for both configured deployments, which silently
+// blocked 28 already-discovered, already-real candidates from EVER being
+// validated - real pending work stuck behind an unrelated failure, exactly
+// the kind of avoidable cross-phase coupling Section 27's "failure
+// isolation" exists to prevent. Each phase now runs in its own try/catch;
+// a scan failure is recorded (scanError) but never prevents validation
+// from running, and vice versa.
 export async function discoverPoolsForDeployment(deployment: FactoryDeployment): Promise<DiscoveryRunResult> {
   const [chainRow] = await db.select({ id: chains.id }).from(chains).where(eq(chains.slug, deployment.chainSlug));
   if (!chainRow) {
@@ -209,23 +246,54 @@ export async function discoverPoolsForDeployment(deployment: FactoryDeployment):
   const [protocolRow] = await db.select({ id: protocols.id }).from(protocols).where(eq(protocols.defillamaSlug, deployment.protocolDefillamaSlug));
   const protocolId = protocolRow?.id ?? null;
 
+  let discovered = 0;
+  let scanOutcome: "success" | "partial" | undefined;
+  let chunksCompleted: number | undefined;
+  let scanError: string | undefined;
   try {
     const scan = await scanForNewPools(deployment, chainRow.id);
-    const validation = await validatePendingPools(deployment, chainRow.id, protocolId);
+    discovered = scan.discovered;
+    scanOutcome = scan.scanOutcome;
+    chunksCompleted = scan.chunksCompleted;
+  } catch (err) {
+    scanError = err instanceof Error ? err.message : String(err);
+    logger.warn("pool discovery: scan failed for this deployment - validation still runs independently against any already-discovered candidates", {
+      component: "onchain-discovery",
+      deployment: deployment.key,
+      error: scanError,
+    });
+  }
 
+  try {
+    const validation = await validatePendingPools(deployment, chainRow.id, protocolId);
     return {
       deploymentKey: deployment.key,
       ok: true,
-      discovered: scan.discovered,
+      discovered,
       validated: validation.validated,
       activated: validation.activated,
       rejected: validation.rejected,
-      scanOutcome: scan.scanOutcome,
-      chunksCompleted: scan.chunksCompleted,
+      scanOutcome,
+      chunksCompleted,
+      ...(scanError ? { scanError } : {}),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return { deploymentKey: deployment.key, ok: false, error: message, discovered: 0, validated: 0, activated: 0, rejected: 0 };
+    return {
+      deploymentKey: deployment.key,
+      // Genuinely ok only if the scan phase itself succeeded - both
+      // phases failing is this deployment's own total failure this run,
+      // matching the pre-fix contract for the case where nothing here has
+      // changed (a working scan, a broken validation).
+      ok: scanError == null,
+      error: scanError ? `scan: ${scanError}; validation: ${message}` : message,
+      discovered,
+      validated: 0,
+      activated: 0,
+      rejected: 0,
+      scanOutcome,
+      chunksCompleted,
+    };
   }
 }
 

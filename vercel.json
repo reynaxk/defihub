@@ -12,6 +12,7 @@
     { "path": "/api/cron/recheck-reorgs", "schedule": "27 * * * *" },
     { "path": "/api/cron/rollup-metrics", "schedule": "7 3 * * *" },
     { "path": "/api/cron/index-volume", "schedule": "*/15 * * * *" },
-    { "path": "/api/cron/recheck-volume-reorgs", "schedule": "48 * * * *" }
+    { "path": "/api/cron/recheck-volume-reorgs", "schedule": "48 * * * *" },
+    { "path": "/api/cron/discover-pools", "schedule": "22,52 * * * *" }
   ]
 }

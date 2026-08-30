@@ -346,6 +346,124 @@ export const poolTokens = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Discovered pools - Phase 5.9
+//
+// The chain-discovered analog of `pools` above: `pools` stays exactly what
+// it always was (a hand-curated config entry, synced by configKey, every
+// row human-reviewed before it exists) - this is the NEW, separate surface
+// for pool candidates found automatically from a factory's own
+// authoritative creation events (e.g. Uniswap V2's PairCreated), which must
+// pass real on-chain validation before they're trusted with anything.
+// Deliberately its own table rather than a few extra nullable columns on
+// `pools`: `pools.configKey` is NOT NULL UNIQUE and its own comment states
+// it's "the stable join back to the curated config entry" - conflating a
+// human-reviewed row with an unreviewed, automatically-discovered candidate
+// under that same column would blur exactly the "we discovered this" vs.
+// "we can correctly calculate data for this" distinction this phase exists
+// to keep sharp (see lib/onchain/discovery/'s own module comments for the
+// full pipeline this table drives).
+//
+// Identity: unique on (chainId, poolAddress), NOT the 4-column
+// (tx, logIndex, blockHash) event-identity pattern swap_events/
+// historical_observations use for genuinely repeating occurrences. A
+// factory-deployed pair's address is itself deterministic (CREATE2) and
+// permanent - there is exactly one real pool at that address regardless of
+// which specific creation transaction/block first revealed it to this
+// discovery job, so "one row per real pool" is the correct, simpler
+// identity here; swap events and price observations are repeating
+// occurrences of the SAME entity and need the wider identity for a
+// different reason (a canonical replacement must coexist with an orphaned
+// sibling). reorgInvalidatedAt still exists for the SAME reason it does
+// everywhere else in this app (mark, never delete) - see
+// lib/onchain/discovery/validate.ts's own comment on when this gets set: a
+// discovered pool is never promoted to "active" while its own creation
+// event's block hash cannot be confirmed canonical, and an already-active
+// pool whose creation block is later found non-canonical gets marked here
+// rather than silently continuing to look "active" - see also the module
+// comment's own note that the underlying deployed contract itself is
+// unaffected by this (a CREATE2 pair contract doesn't stop existing just
+// because the specific creation event batch discovery first saw got
+// reorged - only this row's OWN provenance metadata is what's in question).
+export const discoveredPoolStatusEnum = pgEnum("discovered_pool_status", ["discovered", "active", "rejected"]);
+
+export const discoveredPools = pgTable(
+  "discovered_pools",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    chainId: uuid("chain_id")
+      .notNull()
+      .references(() => chains.id, { onDelete: "cascade" }),
+    // Matches lib/onchain/discovery/config.ts's FactoryDeployment.key - the
+    // hand-curated deployment (chain + factory address + protocol + fee
+    // model) this pool was discovered from. Deployment identity is
+    // deliberately config, not discovered state - see that file's own
+    // module comment for the configuration/discovery boundary this phase's
+    // own instructions draw.
+    deploymentKey: varchar("deployment_key", { length: 64 }).notNull(),
+    // Redundant with the deployment config's own factoryAddress (kept here
+    // too, on the row itself) for the same reason swap_events.sourceKind is
+    // redundant with its own pool's config - an auditor reading this row in
+    // isolation, or a future deployment-config edit, should never require
+    // cross-referencing code to know which factory actually produced it.
+    factoryAddress: varchar("factory_address", { length: 128 }).notNull(),
+    poolAddress: varchar("pool_address", { length: 128 }).notNull(),
+    token0Address: varchar("token0_address", { length: 128 }).notNull(),
+    token1Address: varchar("token1_address", { length: 128 }).notNull(),
+    // Null until validation actually resolves them - never defaulted (same
+    // "unconfirmed stays null, never guessed" discipline as
+    // poolTokens.decimals above). A row can be rejected specifically
+    // because these came back malformed - see validate.ts.
+    token0Decimals: integer("token0_decimals"),
+    token1Decimals: integer("token1_decimals"),
+    token0Symbol: varchar("token0_symbol", { length: 64 }),
+    token1Symbol: varchar("token1_symbol", { length: 64 }),
+    // The PairCreated event's own block identity - this discovery's
+    // provenance, and what reorg validation checks against canonical before
+    // this row is ever trusted for indexing eligibility.
+    creationBlockNumber: numeric("creation_block_number", { precision: 20, scale: 0 }).notNull(),
+    creationBlockHash: varchar("creation_block_hash", { length: 128 }).notNull(),
+    creationTransactionHash: varchar("creation_transaction_hash", { length: 128 }).notNull(),
+    creationLogIndex: integer("creation_log_index").notNull(),
+    // "discovered": found, not yet validated (should be a brief, transient
+    // state in practice - validation runs immediately after discovery in
+    // the same job, see engine.ts). "active": passed every validation check
+    // - factory lineage, token interface, decimal sanity, canonical block -
+    // and is eligible for real indexing via the exact same engine every
+    // config-curated pool uses (see volume-source.ts). "rejected": failed
+    // validation, with rejectionReason set. There is no separate
+    // "validated" state distinct from "active" - validation is a single
+    // synchronous on-chain check with no human-review step in between, so a
+    // pool that passes it has nothing further gating its eligibility; an
+    // intermediate persisted state nothing would ever query differently
+    // would be a state machine for its own sake, not because this system
+    // needs it.
+    status: discoveredPoolStatusEnum("status").notNull().default("discovered"),
+    rejectionReason: text("rejection_reason"),
+    discoveredAt: timestamp("discovered_at", { withTimezone: true }).defaultNow().notNull(),
+    validatedAt: timestamp("validated_at", { withTimezone: true }),
+    reorgInvalidatedAt: timestamp("reorg_invalidated_at", { withTimezone: true }),
+    // Set once this row has been bridged into `pools`/`pool_tokens` (see
+    // register.ts) - null until then. The FK a discovered pool's own
+    // swap_events/historical_observations rows actually reference is
+    // ALWAYS pools.id, never this table's id - discoveredPools is
+    // provenance/lifecycle state about the discovery itself, not a second
+    // parallel identity the indexing engine needs to know about.
+    poolId: uuid("pool_id").references(() => pools.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("discovered_pools_chain_address_unique").on(table.chainId, table.poolAddress),
+    index("discovered_pools_deployment_status_idx").on(table.deploymentKey, table.status),
+  ],
+);
+
+export const discoveredPoolsRelations = relations(discoveredPools, ({ one }) => ({
+  chain: one(chains, { fields: [discoveredPools.chainId], references: [chains.id] }),
+  pool: one(pools, { fields: [discoveredPools.poolId], references: [pools.id] }),
+}));
+
+// ---------------------------------------------------------------------------
 // Vaults - Phase 5.2
 //
 // The canonical, queryable representation of lib/onchain/config.ts's

@@ -45,9 +45,27 @@ describe("recheckVolumeReorgs", () => {
   // here so afterEach can clean them up explicitly.
   const createdChainSlugs: string[] = [];
 
+  // CodeRabbit PR #17 fix: the pool-rotation cursor (selectReorgRecheckBatch's
+  // persisted offset) lives on ONE fixed, un-namespaced indexing_state row
+  // in production ("global" / "volume-reorg-recheck:pool-rotation") - unlike
+  // every other cursor here, it is not scoped to a per-test chainSlug, so a
+  // test that let recheckVolumeReorgs touch the real key would read/write
+  // that shared row, risking cross-test interference and contaminating real
+  // rotation state in the shared dev database. Every call below supplies its
+  // own disposable rotationCursorKey instead (see VolumeReorgRecheckOptions
+  // in reorg.ts), tracked here for cleanup exactly like createdChainSlugs.
+  const createdRotationComponents: string[] = [];
+
+  function rotationCursorKey(): { chainSlug: string; component: string } {
+    const component = `test-rotation-${randomUUID()}`;
+    createdRotationComponents.push(component);
+    return { chainSlug: "test-rotation-global", component };
+  }
+
   afterEach(async () => {
     for (const slug of createdChainSlugs.splice(0)) await db.delete(indexingState).where(eq(indexingState.chainSlug, slug));
     for (const id of createdChainIds.splice(0)) await db.delete(chains).where(eq(chains.id, id));
+    for (const component of createdRotationComponents.splice(0)) await db.delete(indexingState).where(eq(indexingState.component, component));
   });
 
   afterAll(async () => {
@@ -92,7 +110,7 @@ describe("recheckVolumeReorgs", () => {
       blockNumber: "100", blockHash: HASH_A, calculationInputs: CALC_INPUT, source: "onchain-volume-engine", confidence: "HIGH", priceLabel: "ONCHAIN_NATIVE",
     });
 
-    const stats = await recheckVolumeReorgs({ poolsOverride: [fakePool(chainSlug, configKey)], readBlockHash: async () => HASH_A });
+    const stats = await recheckVolumeReorgs({ poolsOverride: [fakePool(chainSlug, configKey)], readBlockHash: async () => HASH_A, rotationCursorKey: rotationCursorKey() });
 
     expect(stats?.swapEventsReorged).toBe(0);
     expect(stats?.observationsReorged).toBe(0);
@@ -118,7 +136,7 @@ describe("recheckVolumeReorgs", () => {
       blockNumber: "200", blockHash: HASH_A, calculationInputs: CALC_INPUT, source: "onchain-volume-engine", confidence: "HIGH", priceLabel: "ONCHAIN_NATIVE",
     });
 
-    const stats = await recheckVolumeReorgs({ poolsOverride: [fakePool(chainSlug, configKey)], readBlockHash: async () => HASH_B });
+    const stats = await recheckVolumeReorgs({ poolsOverride: [fakePool(chainSlug, configKey)], readBlockHash: async () => HASH_B, rotationCursorKey: rotationCursorKey() });
 
     expect(stats?.swapEventsReorged).toBe(1);
     expect(stats?.observationsReorged).toBe(1);
@@ -146,6 +164,7 @@ describe("recheckVolumeReorgs", () => {
       readBlockHash: async () => {
         throw new Error("RPC down");
       },
+      rotationCursorKey: rotationCursorKey(),
     });
 
     expect(stats?.swapEventsUnknown).toBe(1);
@@ -161,6 +180,7 @@ describe("recheckVolumeReorgs", () => {
     const stats = await recheckVolumeReorgs({
       poolsOverride: [fakePool("volume-reorg-unsynced-chain", "volume-reorg-unsynced-pool")],
       readBlockHash: async () => HASH_A,
+      rotationCursorKey: rotationCursorKey(),
     });
     expect(stats?.poolsFailed).toBe(0);
     expect(stats?.swapEventsChecked).toBe(0);
@@ -186,6 +206,7 @@ describe("recheckVolumeReorgs", () => {
         callCount++;
         return HASH_A;
       },
+      rotationCursorKey: rotationCursorKey(),
     });
 
     // Both candidates are still individually verified (the stat reflects
@@ -220,6 +241,7 @@ describe("recheckVolumeReorgs", () => {
         callCount++;
         return HASH_A;
       },
+      rotationCursorKey: rotationCursorKey(),
     });
 
     expect(stats?.swapEventsChecked).toBe(2);
@@ -242,12 +264,48 @@ describe("recheckVolumeReorgs", () => {
       blockNumber: "400", blockHash: HASH_A, blockTimestamp: new Date(), amount0In: "0", amount1In: "1", amount0Out: "1", amount1Out: "0",
     });
 
-    await recheckVolumeReorgs({ poolsOverride: [fakePool(chainSlug, configKey)], readBlockHash: async () => HASH_A });
+    await recheckVolumeReorgs({ poolsOverride: [fakePool(chainSlug, configKey)], readBlockHash: async () => HASH_A, rotationCursorKey: rotationCursorKey() });
 
     const rows = await db.select({ component: indexingState.component }).from(indexingState).where(eq(indexingState.chainSlug, chainSlug));
     for (const row of rows) {
       expect(row.component).toMatch(/^volume-reorg-recheck:pool:/);
       expect(row.component).not.toBe(`reorg-recheck:pool:${configKey}`);
     }
+  });
+
+  it("REGRESSION: advances the rotation cursor across successive runs so every pool is eventually rechecked, not just the first `batchSize` (CodeRabbit PR #17)", async () => {
+    // 3 pools, batchSize 2 - the pre-fix behavior (a fixed
+    // poolsToCheck.slice(0, batchSize)) would recheck pool A and B forever
+    // and NEVER touch pool C on any run.
+    const poolA = await makeChainAndPool();
+    const poolB = await makeChainAndPool();
+    const poolC = await makeChainAndPool();
+    const pools_ = [poolA, poolB, poolC];
+
+    for (const p of pools_) {
+      await db.insert(swapEvents).values({
+        chainId: p.chainId, poolId: p.poolId, sourceKind: "uniswap-v2", transactionHash: `0x${randomUUID().replace(/-/g, "").padEnd(64, "0")}`, logIndex: 0,
+        blockNumber: "700", blockHash: HASH_A, blockTimestamp: new Date(), amount0In: "0", amount1In: "1", amount0Out: "1", amount1Out: "0",
+      });
+    }
+
+    const key = rotationCursorKey();
+    const sourcePools = pools_.map((p) => fakePool(p.chainSlug, p.configKey));
+    const checkedAcrossRuns = new Set<string>();
+
+    for (let run = 0; run < 2; run++) {
+      const stats = await recheckVolumeReorgs({ poolsOverride: sourcePools, readBlockHash: async () => HASH_A, rotationCursorKey: key, batchSize: 2 });
+      expect(stats?.poolsConsidered).toBe(2);
+      // Identify which pools were actually touched this run via their
+      // per-pool swap-events cursor advancing to block 700.
+      for (const p of pools_) {
+        const state = await db.select().from(indexingState).where(eq(indexingState.component, `volume-reorg-recheck:pool:${p.configKey}:swap-events`));
+        if (state[0]?.lastProcessedBlock === "700") checkedAcrossRuns.add(p.configKey);
+      }
+    }
+
+    // After 2 runs of a 3-pool list at batchSize 2 (2 + 1, wrapping), every
+    // pool has been rechecked at least once.
+    expect(checkedAcrossRuns.size).toBe(3);
   });
 });

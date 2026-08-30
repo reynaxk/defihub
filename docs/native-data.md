@@ -1351,6 +1351,224 @@ known-unsafe shortcut.
   rather than an automated DefiLlama diff, which this phase didn't build
   tooling for.
 
+## Native pool discovery (Phase 5.9)
+
+Phase 5.4-5.7 proved the native volume/fee/pricing engine against a small,
+entirely hand-typed set of pools - every new pool meant a person manually
+researching an address, verifying it live, and writing a config entry.
+Phase 5.9 doesn't replace that judgment; it makes the *verification* part
+of onboarding automatic, so the human effort scales to "does this
+deployment's factory deserve to be trusted" (a handful of decisions) rather
+than "does this individual pool check out" (potentially thousands).
+
+### Discovery architecture
+
+`lib/onchain/discovery/config.ts`'s `FACTORY_DEPLOYMENTS` is the one thing
+that stays hand-curated - a short list of (chain, factory address,
+protocol, immutable fee model) tuples, exactly the deployment-level facts a
+person actually needs to verify once. Two entries this phase, both reusing
+factory addresses already independently verified in earlier phases:
+Uniswap V2 (Ethereum) and PancakeSwap V2 (BNB Chain).
+
+Everything else is discovered from the chain itself. `lib/onchain/discovery/scan.ts`
+decodes the real, canonical `PairCreated(address indexed token0, address
+indexed token1, address pair, uint256 allPairsLength)` event - the same
+event every genuine Uniswap V2 fork emits, confirmed live against the real
+PancakeSwap V2 Factory (topic0 `0x0d3648bd...28d0e9`, matching Uniswap V2's
+own). `lib/onchain/discovery/engine.ts` scans for it via the EXACT same
+`scanFromCursor` primitive (`lib/indexing/events.ts`) volume indexing
+already uses - chunked, checkpointed (its own `discovery:${deploymentKey}`
+`indexing_state` component, isolated from every volume-indexing cursor),
+resilient, never an unbounded single-request scan.
+
+**Real bug caught by live testing**: the initial implementation left the
+event's trailing `uint256` parameter unnamed (matching how the actual
+Solidity source declares it). Live testing found this made 100% of real
+`PairCreated` logs undecodable - viem's `decodeEventLog` returns `args` as
+a plain positional array, not a named object, the moment ANY parameter in
+an event signature is unnamed, even when every other parameter IS named.
+The hand-written unit test fixture had encoded the identical wrong
+assumption (a named-object fixture), so it passed despite being wrong -
+the same class of bug, caught the same way (live RPC testing against real
+data), as Phase 5.6's `int24 tick` bigint-vs-number issue. Fixed by naming
+the parameter (`allPairsLength`) - the topic0 hash is unaffected (only
+types are hashed, not names), and viem now returns proper named args.
+
+### Validation
+
+A discovered candidate is never trusted merely because a factory emitted
+an event naming it. `lib/onchain/discovery/validate.ts` runs, in one
+batched multicall per page of candidates:
+
+1. **Canonical block check** - the creation event's own block hash must
+   still match canonical (`checkBlockHashStillCanonical`, reused
+   unmodified from `lib/onchain/reorg.ts`). A reorged or undeterminable
+   result is never accepted - see "Reorg behavior" below.
+2. **Factory lineage** - `pool.factory()` must equal the deployment's own
+   configured factory address. This is what makes trusting the
+   deployment's fee model for an automatically-discovered pool as safe as
+   the existing hand-verified config entries: it reduces to "was this
+   genuinely deployed by the factory we already trust," not "does this
+   address merely look like a pair."
+3. **Token identity cross-check** - `pool.token0()`/`token1()` must match
+   what the `PairCreated` event itself claimed.
+4. **Interface check** - `getReserves()` must succeed (a well-formed V2
+   pair, not just an address with matching methods).
+5. **Decimals bound** - `decimals()` for both tokens must be a real
+   integer in `[0, CALCULATION_SCALE]` (30) - tighter than a bare "valid
+   uint8" check, since this app's own fixed-point math could never safely
+   price a token above that bound anyway. Rejected here, explicitly, with
+   a stored reason - not silently accepted and left permanently unpriced
+   with no record of why.
+6. **Symbol** (best-effort only) - `symbol()` is read but never blocks
+   acceptance; a real, non-trivial fraction of ERC-20 tokens deviate from
+   the standard ABI here (bytes32 instead of string, or omit it
+   entirely), and a missing symbol is cosmetic (the pool's label falls
+   back to a truncated address), never a correctness concern.
+
+A pool that passes every check moves straight to `active`; one that fails
+any check moves to `rejected`, with a human-readable reason persisted
+alongside it. There is no separate `discovered` → `validated` → `active`
+chain - validation is one synchronous on-chain decision with no
+human-review step in between, so an intermediate status nothing would ever
+query differently would be a state machine for its own sake.
+
+### Configuration vs. discovery
+
+Exactly the boundary Section 12 draws: chain, factory address, protocol,
+and fee model live in `FACTORY_DEPLOYMENTS` (code, human-reviewed, changed
+rarely); pool address, token0/token1, decimals, symbol, and creation block
+are discovered from the chain, every time, never hand-typed.
+
+### Protocol boundary
+
+Discovery this phase is V2-only, deliberately. Uniswap V3's discovery
+shape is genuinely different - `PoolCreated` carries a fee tier as part of
+the pool's own identity (a factory can deploy the *same* token pair at
+multiple fee tiers, each a distinct pool), and V3 has no single
+per-deployment fee the way V2 does. Rather than force it into the same
+`FactoryDeployment`/`PairCreated` shape, V3 discovery is left out of scope
+this phase - adding it later means a second, parallel `FactoryDeployment`-
+like config and a `PoolCreated` decoder, not a generalization of this
+one. The existing V2/V3 indexing split (Phase 5.6) already draws this
+exact line; discovery draws it in the same place.
+
+### Bridge into existing indexing
+
+`lib/onchain/discovery/register.ts` bridges a validated pool into the
+SAME `pools`/`pool_tokens` tables config-curated pools already use -
+upserted on `pools_chain_address_unique` (chainId, address), with a
+deterministic `discovered:<chain discriminator>:<lowercased address>`
+`configKey` (the chain discriminator is an 8-hex-char hash of the chain's
+slug, not the raw slug itself, to stay within `config_key`'s varchar(64)
+budget regardless of slug length - see `discoveredPoolConfigKey`'s own
+comment). The chain discriminator IS load-bearing for `configKey`'s own
+global uniqueness (two different chains' pools at the identical address
+would otherwise collide on this one un-scoped column) - `configKey` IS
+still the real lookup key volume indexing/reorg-checking uses
+(`getPoolIdByConfigKey`, same mechanism a curated `VerifiedPool.key` uses),
+via `toVolumeSourcePool`'s own `key` field computing the exact same string
+`register.ts` persisted. This means `discoveredPoolConfigKey`'s output
+format is a durable on-disk contract, not an internal implementation
+detail: changing it (as the CodeRabbit PR #17 fix round just did, adding
+the chain discriminator to an already-shipped format) orphans every
+already-registered discovered pool from that lookup until a one-time
+backfill runs (`workers/onchain/backfill-discovered-pool-configkeys.ts`,
+operator-run, mirrors `discover-pools-recover.ts`'s own never-cron-wired
+convention) to rewrite existing rows' stored `configKey` to the new
+format - confirmed live against the dev database (66 pre-existing
+discovered pools, all silently excluded from indexing/reorg-checking until
+the backfill ran). Any future change to this format needs the same
+backfill step before deploying.
+`lib/onchain/discovery/volume-source.ts`'s
+`getAllVolumeSourcePools()` then maps every "active" discovered pool into
+the exact `VolumeSourcePool` shape `indexAllPoolVolume`/
+`recheckVolumeReorgs` already consume - both `workers/onchain/volume.ts`
+and `lib/onchain/volume/reorg.ts` now build their pool list from this
+function instead of the bare config constant. `indexAllPoolVolume` itself
+is completely unaware discovery exists; it just receives a longer list,
+built the same way it always was. A discovered pool's own `startBlock` is
+its REAL creation block (a genuinely correct value, not a guessed recent
+floor) - `effectiveStartBlock` still applies the same safe-window
+correction if real time has since moved past it.
+
+### Reorg behavior
+
+Discovery rows are keyed uniquely on `(chainId, poolAddress)`, not the
+wider 4-column event identity `swap_events`/`historical_observations` use
+- a factory-deployed pair's address is itself deterministic (CREATE2) and
+permanent, so "one row per real pool" is the correct, simpler identity
+here (unlike a swap or a price observation, which are repeating
+occurrences of the same entity). An orphaned creation event cannot make a
+pool authoritative: validation checks the creation block's canonical
+status BEFORE any other check, and a "reorged" or "unknown" result is
+never accepted, regardless of how well-formed the pool otherwise looks. A
+candidate rejected specifically because its creation event was orphaned
+self-heals automatically - `recordDiscoveredPools`' upsert refreshes a
+`rejected` row's provenance and status on the NEXT real (canonical)
+`PairCreated` sighting for the same pool address, rather than leaving a
+genuinely valid pool locked out forever by one stale observation of it. An
+already-`active` row is never touched by a later re-discovery.
+
+### What this phase deliberately did not build
+
+- No V3 pool discovery (`PoolCreated`) - see "Protocol boundary" above.
+- No liquidity/activity-based prioritization - Section 16 explicitly
+  permits skipping this when the workload doesn't need it; a flat,
+  bounded-per-run FIFO batch (`VALIDATION_BATCH_SIZE`, 25 candidates/run)
+  already guarantees every discovered pool eventually gets validated
+  across enough runs, with nothing invented about which pools matter more.
+- No perpetual reorg-recheck loop for discovery rows specifically - the
+  validation-time canonical check is the actual safety boundary (Section
+  9 explicitly permits this: "do not invent an elaborate reorg system if
+  existing infrastructure is sufficient"); a discovered pool's own
+  swap/observation data has its OWN independent, already-correct,
+  continuously-rechecked reorg safety once indexing begins.
+- No new external dependency for discovery - purely on-chain
+  (`eth_getLogs` against a trusted factory), matching Section 23 exactly.
+
+### Live verification
+
+Ran the real discovery pipeline against both configured deployments
+against the real, live dev database:
+
+- **PancakeSwap V2 (BNB Chain)**: found 66 real pools across several
+  discovery runs (bounded to 25 validated/run), zero rejected - every
+  genuinely-discovered `PairCreated` candidate this phase encountered
+  turned out to be a real, well-formed pair. Symbols resolved live (e.g.
+  `DUCKY/DJTB`, `FUN/WBNB`), including a real 6-decimal token (`XAUt`,
+  Tether Gold) correctly validated alongside 18-decimal ones - a genuine
+  precision cross-check, not a synthetic one.
+- **Uniswap V2 (Ethereum)**: 0 pools found in the narrow live-servable
+  window this free RPC tier allows - expected; new Uniswap V2 pair
+  creation on Ethereum mainnet is now rare. The scan itself completed
+  successfully either way, proving the pipeline works even when it finds
+  nothing.
+- **Full pipeline, end to end**: ran `index:volume` against all 69 pools
+  (3 config-curated + 66 discovered) in one real pass - 66/66 discovered
+  pools indexed successfully, including real swaps on several of them
+  (e.g. one pool: 14 swaps, 8 priced / 6 unpriced - an honest real-world
+  split, since only swaps whose INPUT side was the reference-priced token
+  (WBNB) could be priced; the non-reference-asset side is genuinely
+  unpriced, exactly as documented, never fabricated as $0 or silently
+  dropped). Fee math cross-checked by hand against a real observation:
+  `fees_usd` / `volume_usd` = exactly PancakeSwap's own 0.25%.
+- **Coverage honesty, live-verified**: queried the real coverage registry
+  for all 66 discovered pools (198 metric entries) - exactly 10 had a
+  real observation and were correctly marked `NATIVE`; zero entries were
+  `NATIVE` without a backing observation.
+- **Cursor progression + idempotent rerun**: ran `index:volume` twice in
+  succession - both runs succeeded (69/69), the second run's cursors
+  correctly continued forward from the first (never re-processing an
+  already-indexed range), with zero duplicate writes.
+- The free RPC provider's own narrow historical-servable-window
+  limitation (documented since Phase 5.5) was hit again during this
+  phase's own live testing (both the discovery and volume-indexing
+  cursors fell behind between sessions) - resolved via the existing
+  `manuallyAdvanceCursor` recovery mechanism, now also available for
+  discovery cursors specifically via the new `recover:discovery-cursor`
+  script, mirroring `recover:volume-cursor` exactly.
+
 ## Known limitations
 
 - Six verified pools across five chains, plus two verified ERC-4626 vaults

@@ -1,6 +1,7 @@
 import "dotenv/config";
 import postgres from "postgres";
 import { closeDb } from "../../lib/database/client";
+import { getAllVolumeSourcePools } from "../../lib/onchain/discovery/volume-source";
 import { indexAllPoolVolume, type PoolVolumeRunResult } from "../../lib/onchain/volume/engine";
 import { logger } from "../../lib/observability/logger";
 import { withSyncRun } from "../../lib/observability/sync-run";
@@ -75,8 +76,14 @@ function summarizePoolChunks(result: PoolVolumeRunResult) {
   );
 }
 
+// Phase 5.9: indexes every config-curated pool PLUS every discovery-
+// validated "active" pool - see lib/onchain/discovery/volume-source.ts's
+// own comment for why this is the smallest safe bridge (indexAllPoolVolume
+// itself stays entirely unaware discovery exists; it just receives a
+// longer pool list built the same way as always).
 async function runIndexOnchainVolume(): Promise<PoolVolumeRunResult[]> {
-  const results = await indexAllPoolVolume();
+  const pools = await getAllVolumeSourcePools();
+  const results = await indexAllPoolVolume(pools);
 
   for (const r of results) {
     const totals = summarizePoolChunks(r);

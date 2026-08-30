@@ -24,6 +24,9 @@
     "index:volume": "dotenv -e .env.local -- tsx workers/onchain/volume.ts",
     "recheck:volume-reorgs": "dotenv -e .env.local -- tsx workers/onchain/volume-reorg-recheck.ts",
     "recover:volume-cursor": "dotenv -e .env.local -- tsx workers/onchain/volume-recover.ts",
+    "discover:pools": "dotenv -e .env.local -- tsx workers/onchain/discover-pools.ts",
+    "recover:discovery-cursor": "dotenv -e .env.local -- tsx workers/onchain/discover-pools-recover.ts",
+    "backfill:discovered-pool-configkeys": "dotenv -e .env.local -- tsx workers/onchain/backfill-discovered-pool-configkeys.ts",
     "sync:all": "npm run sync:chains && npm run sync:protocols && npm run sync:yields && npm run sync:prices && npm run sync:tokens && npm run verify:onchain",
     "check:alerts": "dotenv -e .env.local -- tsx workers/alerts/check.ts",
     "rollup:metrics": "dotenv -e .env.local -- tsx workers/retention/rollup.ts"

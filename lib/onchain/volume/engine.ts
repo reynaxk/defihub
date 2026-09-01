@@ -3,6 +3,8 @@ import { confirmationsFor, safeHeadFor } from "@/lib/chains/confirmations";
 import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
 import type { VolumeCalculationInput } from "@/lib/database/schema";
 import { scanFromCursor, type ScanChunk } from "@/lib/indexing/events";
+import { selectRotatingBatch } from "@/lib/indexing/rotation";
+import { getIndexingState, updateIndexingState } from "@/lib/indexing/state";
 import { getNativeTokenPrice, type NativeTokenPrice } from "@/lib/onchain/pricing/queries";
 import { isNativePriceEligibleForTvl } from "@/lib/onchain/pricing/tvl-integration";
 import { roundExactDecimal } from "@/lib/onchain/verify-pool";
@@ -648,7 +650,7 @@ export async function indexPoolVolume(pool: VolumeSourcePool, deadlineAt?: numbe
 // the rest (Section 34's "failure isolation" requirement). Sequential
 // rather than Promise.all across pools - deliberately bounded concurrency
 // (Section 33/27's "never unbounded Promise.all") at today's real pool
-// count (1); a future larger VOLUME_SOURCE_POOLS should reach for the same
+// count; a future larger VOLUME_SOURCE_POOLS should reach for the same
 // bounded-chunk pattern lib/utils/chunk.ts already establishes elsewhere in
 // this app rather than parallelizing every pool at once.
 //
@@ -664,14 +666,64 @@ export async function indexPoolVolume(pool: VolumeSourcePool, deadlineAt?: numbe
 // the last chunk completes.
 const SHARED_RUN_DEADLINE_MS = 50_000;
 
-export async function indexAllPoolVolume(pools: VolumeSourcePool[] = VOLUME_SOURCE_POOLS): Promise<PoolVolumeRunResult[]> {
+// Phase 5.10 fix, live-reproduced during this phase's own development: once
+// the discovered-pool bridge (Phase 5.9) grew this list from 3 pools to 97,
+// a run where the chain head had advanced enough that EVERY pool
+// simultaneously needed at least one new chunk of real work exceeded the
+// shared deadline above - and because pools were always attempted in the
+// SAME fixed order, the SAME ~19-30 pools at the front of the list
+// completed every single run while the SAME ~65-75 pools at the tail got
+// ZERO chunks processed, run after run, their lag growing without bound
+// (confirmed live across two consecutive real runs: the identical pool
+// addresses were stuck at zero progress both times). This is the exact
+// "one busy entity consumes the whole shared budget forever" failure this
+// app's own volume-reorg-recheck job already hit and fixed at a smaller
+// scale (CodeRabbit PR #17 - see lib/indexing/rotation.ts's own header for
+// the shared fix this reuses). A rotating PRIORITY subset - guaranteed to
+// be attempted FIRST, before the shared deadline can be exhausted by
+// earlier list members - cycles through the whole pool list across
+// successive runs via the same GREATEST()-safe ever-increasing offset
+// convention selectRotatingBatch already establishes, persisted under its
+// own component key (distinct from volume/reorg.ts's own rotation cursor -
+// these are two independent jobs with two independent fairness problems).
+// Every pool NOT in this run's priority subset is still attempted
+// afterward, in its normal order - this changes nothing for the common
+// case (most runs finish comfortably inside the deadline); it only changes
+// WHO gets guaranteed processing first when the deadline actually binds.
+const PRIORITY_BATCH_SIZE = 10;
+const POOL_ROTATION_CHAIN_SLUG = "global"; // not a real chain - rotation isn't scoped to one, mirrors volume/reorg.ts's own convention
+const POOL_ROTATION_COMPONENT = "volume-index:pool-rotation";
+
+export interface IndexAllPoolVolumeOptions {
+  // Test-only override for the rotation cursor's own (chainSlug,
+  // component) indexing_state key - see volume/reorg.ts's own
+  // rotationCursorKey for why tests must never touch the real, shared
+  // production row (VolumeReorgRecheckOptions.rotationCursorKey's own
+  // comment applies identically here).
+  rotationCursorKey?: { chainSlug: string; component: string };
+}
+
+export async function indexAllPoolVolume(pools: VolumeSourcePool[] = VOLUME_SOURCE_POOLS, options: IndexAllPoolVolumeOptions = {}): Promise<PoolVolumeRunResult[]> {
   const deadlineAt = Date.now() + SHARED_RUN_DEADLINE_MS;
-  const results: PoolVolumeRunResult[] = [];
-  for (const pool of pools) {
+
+  const rotationChainSlug = options.rotationCursorKey?.chainSlug ?? POOL_ROTATION_CHAIN_SLUG;
+  const rotationComponent = options.rotationCursorKey?.component ?? POOL_ROTATION_COMPONENT;
+  const rotationState = pools.length > 0 ? await getIndexingState(rotationChainSlug, rotationComponent) : null;
+  const rotationOffset = rotationState?.lastProcessedBlock ?? BigInt(0);
+  const { batch: priorityPools, nextOffset } = selectRotatingBatch(pools, PRIORITY_BATCH_SIZE, rotationOffset);
+
+  // Priority pools first (guaranteed attempted before the deadline can be
+  // exhausted), then everyone else in their normal order - never shrinks
+  // the pool list actually attempted, only reorders it.
+  const priorityKeys = new Set(priorityPools.map((p) => p.key));
+  const processingOrder = [...priorityPools, ...pools.filter((p) => !priorityKeys.has(p.key))];
+
+  const resultByKey = new Map<string, PoolVolumeRunResult>();
+  for (const pool of processingOrder) {
     try {
-      results.push(await indexPoolVolume(pool, deadlineAt));
+      resultByKey.set(pool.key, await indexPoolVolume(pool, deadlineAt));
     } catch (err) {
-      results.push({
+      resultByKey.set(pool.key, {
         poolKey: pool.key,
         ok: false,
         outcome: "failed",
@@ -682,5 +734,13 @@ export async function indexAllPoolVolume(pools: VolumeSourcePool[] = VOLUME_SOUR
       });
     }
   }
-  return results;
+
+  if (pools.length > 0) {
+    await updateIndexingState(rotationChainSlug, rotationComponent, { status: "idle", lastProcessedBlock: nextOffset, lastSuccessfulSyncAt: new Date() });
+  }
+
+  // Returned in the ORIGINAL pools order, not processing order - the
+  // rotation only changes which pools win the deadline race, never the
+  // shape/order callers already depend on.
+  return pools.map((pool) => resultByKey.get(pool.key)!);
 }

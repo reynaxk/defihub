@@ -19,7 +19,10 @@ export interface DiscoveryRunSummary {
 // "failed" means nothing succeeded anywhere, "partial" covers everything
 // in between (one deployment failed while another progressed, or a
 // deployment's own scan itself only made partial catch-up progress this
-// run).
+// run - or, since Phase 5.10, a deployment whose scan itself failed but
+// whose validation still made real progress against already-discovered
+// candidates - see DiscoveryRunResult.scanError and
+// discoverPoolsForDeployment's own comment).
 export function summarizeDiscoveryResults(results: DiscoveryRunResult[]): DiscoveryRunSummary {
   let succeeded = 0;
   let failed = 0;
@@ -35,7 +38,7 @@ export function summarizeDiscoveryResults(results: DiscoveryRunResult[]): Discov
     totalRejected += r.rejected;
   }
 
-  const anyPartialScan = results.some((r) => r.ok && r.scanOutcome === "partial");
+  const anyPartialScan = results.some((r) => r.ok && (r.scanOutcome === "partial" || r.scanError != null));
   const anyProgress = succeeded > 0;
   const outcome: DiscoveryRunSummary["outcome"] = failed === 0 ? (anyPartialScan ? "partial" : "success") : anyProgress ? "partial" : "failed";
 
@@ -61,7 +64,7 @@ async function runDiscoverPools(): Promise<DiscoveryRunResult[]> {
   const results = await discoverAllPools();
 
   for (const r of results) {
-    if (r.ok) {
+    if (r.ok && r.scanError == null) {
       logger.info("pool discovery run", {
         component: "onchain-discovery",
         deployment: r.deploymentKey,
@@ -70,6 +73,19 @@ async function runDiscoverPools(): Promise<DiscoveryRunResult[]> {
         rejected: r.rejected,
         scanOutcome: r.scanOutcome,
         chunksCompleted: r.chunksCompleted,
+      });
+    } else if (r.ok) {
+      // Scan failed but validation still ran independently and is
+      // reported here (Section 27's failure isolation - see
+      // discoverPoolsForDeployment's own comment) - warn-level, not info,
+      // since a scan failure is real and worth an operator's attention
+      // even though this deployment overall still made progress.
+      logger.warn("pool discovery: scan failed, validation still made independent progress", {
+        component: "onchain-discovery",
+        deployment: r.deploymentKey,
+        scanError: r.scanError,
+        activated: r.activated,
+        rejected: r.rejected,
       });
     } else {
       logger.warn("pool discovery failed for deployment", { component: "onchain-discovery", deployment: r.deploymentKey, reason: r.error });

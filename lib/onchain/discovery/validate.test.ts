@@ -10,7 +10,7 @@
 // validateDiscoveredPool-level tests below (canonical-check caching,
 // transient-failure retryability) are genuinely RPC-free and deterministic
 // - the multicall itself is never what those tests are actually checking.
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReorgCheckResult } from "@/lib/onchain/reorg";
 import { CALCULATION_SCALE } from "@/lib/onchain/volume/math";
 import type { FactoryDeployment } from "./config";
@@ -26,7 +26,16 @@ vi.mock("@/lib/chains/rpc-resilient-client", async (importActual) => {
   };
 });
 
-const { buildValidationMulticallCalls, CALLS_PER_CANDIDATE, isValidTokenDecimals, resolveValidationOutcome, validateDiscoveredPool } = await import("./validate");
+const { buildValidationMulticallCalls, CALLS_PER_CANDIDATE, isValidTokenDecimals, resolveValidationOutcome, validateDiscoveredPool, validateDiscoveredPoolsBatch } = await import("./validate");
+
+// mockMulticall is shared module-wide (real production code path calls
+// withResilientClient once per multicall - this mock stands in for that
+// single call site) - reset its call history before every test so a
+// toHaveBeenCalledTimes assertion in one test is never polluted by calls
+// made in a previous test in this same file.
+beforeEach(() => {
+  mockMulticall.mockReset();
+});
 
 const DEPLOYMENT: FactoryDeployment = {
   key: "pancakeswap-v2-bnb-chain",
@@ -256,5 +265,84 @@ describe("validateDiscoveredPool - transient failures are retryable, never termi
     const readBlockHash = vi.fn().mockRejectedValue(new Error("RPC down"));
     const outcome = await validateDiscoveredPool(DEPLOYMENT, CANDIDATE, readBlockHash);
     expect(outcome.status).toBe("retry");
+  });
+});
+
+describe("validateDiscoveredPoolsBatch - Phase 5.10: one multicall for a whole page, not one per candidate", () => {
+  function candidateAt(index: number): DecodedPairCreated {
+    return { ...CANDIDATE, poolAddress: `0x${index.toString().padStart(40, "0")}`, logIndex: CANDIDATE.logIndex + index };
+  }
+
+  it("REGRESSION: validating 5 candidates makes exactly ONE multicall call, not 5 - the whole page batched into one RPC round-trip", async () => {
+    const candidates = [0, 1, 2, 3, 4].map(candidateAt);
+    mockMulticall.mockImplementation(async () => candidates.flatMap(() => successfulMulticallResults()));
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    const outcomes = await validateDiscoveredPoolsBatch(DEPLOYMENT, candidates, readBlockHash, new Map());
+
+    expect(mockMulticall).toHaveBeenCalledTimes(1);
+    const callArgs = mockMulticall.mock.calls[0][0] as { contracts: unknown[] };
+    expect(callArgs.contracts).toHaveLength(candidates.length * CALLS_PER_CANDIDATE);
+    expect(outcomes).toHaveLength(5);
+    for (const outcome of outcomes) expect(outcome.status).toBe("accepted");
+  });
+
+  it("resolves each candidate's own outcome independently from its own slice of the batched multicall results - a rejected candidate does not affect its neighbors", async () => {
+    const candidates = [candidateAt(0), candidateAt(1), candidateAt(2)];
+    // Candidate 1 (the middle one) gets a mismatched onchainFactory in its
+    // own slice - every other candidate's slice is untouched and must
+    // still resolve to "accepted".
+    const combined = [...successfulMulticallResults(), ...successfulMulticallResults(), ...successfulMulticallResults()];
+    combined[1 * CALLS_PER_CANDIDATE + 2] = { status: "success" as const, result: "0x000000000000000000000000000000000bAd0" };
+    mockMulticall.mockResolvedValue(combined);
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    const outcomes = await validateDiscoveredPoolsBatch(DEPLOYMENT, candidates, readBlockHash, new Map());
+
+    expect(outcomes[0].status).toBe("accepted");
+    expect(outcomes[1].status).toBe("rejected");
+    expect((outcomes[1] as { reason: string }).reason).toContain("does not match the configured factory");
+    expect(outcomes[2].status).toBe("accepted");
+  });
+
+  it("a whole-batch multicall failure returns 'retry' for EVERY candidate in the page, never 'rejected'", async () => {
+    mockMulticall.mockRejectedValue(new Error("provider unavailable"));
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+    const candidates = [candidateAt(0), candidateAt(1), candidateAt(2)];
+
+    const outcomes = await validateDiscoveredPoolsBatch(DEPLOYMENT, candidates, readBlockHash, new Map());
+
+    expect(outcomes).toHaveLength(3);
+    for (const outcome of outcomes) expect(outcome.status).toBe("retry");
+  });
+
+  it("an empty candidate list makes zero RPC calls and returns an empty array", async () => {
+    mockMulticall.mockClear();
+    const readBlockHash = vi.fn();
+    const outcomes = await validateDiscoveredPoolsBatch(DEPLOYMENT, [], readBlockHash, new Map());
+    expect(outcomes).toEqual([]);
+    expect(mockMulticall).not.toHaveBeenCalled();
+    expect(readBlockHash).not.toHaveBeenCalled();
+  });
+
+  it("still dedupes canonical-block-hash reads across the batch via the shared cache, exactly like the single-candidate path", async () => {
+    // Both candidates share the exact same (blockNumber, blockHash).
+    const candidates = [candidateAt(0), { ...candidateAt(1), blockNumber: CANDIDATE.blockNumber, blockHash: CANDIDATE.blockHash }];
+    mockMulticall.mockImplementation(async () => candidates.flatMap(() => successfulMulticallResults()));
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    await validateDiscoveredPoolsBatch(DEPLOYMENT, candidates, readBlockHash, new Map());
+
+    expect(readBlockHash).toHaveBeenCalledTimes(1);
+  });
+
+  it("validateDiscoveredPool (single-candidate) delegates to validateDiscoveredPoolsBatch and produces an identical outcome to calling the batch function with a one-element array", async () => {
+    mockMulticall.mockResolvedValue(successfulMulticallResults());
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    const single = await validateDiscoveredPool(DEPLOYMENT, CANDIDATE, readBlockHash);
+    const [batched] = await validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash);
+
+    expect(single).toEqual(batched);
   });
 });

@@ -1569,6 +1569,144 @@ against the real, live dev database:
   discovery cursors specifically via the new `recover:discovery-cursor`
   script, mirroring `recover:volume-cursor` exactly.
 
+## Native coverage expansion & scaling hardening (Phase 5.10)
+
+Phase 5.9 proved the discovery pipeline once, at 66 pools. Phase 5.10 asks
+whether it actually *scales* - not by inventing a bigger pool count, but by
+running the existing pipeline harder against real conditions and fixing
+whatever genuinely breaks. Two real, live-reproduced bugs were found and
+fixed; a third suspected bottleneck was directly measured and found to be a
+non-issue at the achievable scale, so it was deliberately left alone.
+
+### Bug 1: scan and validation failure were coupled
+
+`discoverPoolsForDeployment` (`lib/onchain/discovery/engine.ts`) used to run
+scan (`eth_getLogs`, finding new candidates) and validation (`eth_call`/
+multicall, deciding on candidates already sitting in `discovered_pools`)
+inside one try/catch. Live-observed during this phase's own development: a
+public RPC provider (`publicnode.com`, this app's default free-tier
+Ethereum/BNB Chain provider) changed policy to require a personal archive
+token for every `eth_getLogs` call, with no width or depth exception -
+scanning failed 100% of the time for both configured deployments. Because
+scan ran first and its failure wasn't isolated, this silently blocked
+validation from EVER running too - even though validation doesn't touch
+`eth_getLogs` at all, and 28 real, already-discovered candidates sat
+unprocessed as a direct result. Fixed by running each phase in its own
+try/catch (`DiscoveryRunResult.scanError` reports a scan failure without
+ever suppressing validation's own independent chance to succeed) - live
+smoke-tested against exactly this real failure: with scanning still 100%
+broken, running `discover:pools` twice validated and activated all 28
+pending candidates (66 → 94 active discovered pools), fully offline from
+the scan failure. See `lib/onchain/discovery/engine.decoupling.test.ts`
+for the regression test (real DB, mocked RPC client, reproducing the exact
+live failure shape).
+
+### Bug 2: validation was one multicall per candidate, not one per page
+
+`validateDiscoveredPoolsBatch` (`lib/onchain/discovery/validate.ts`,
+renamed from `validateDiscoveredPool` - a single-candidate convenience
+wrapper now delegates to it) batches every pending candidate's on-chain
+reads into ONE multicall per validation run, not one multicall PER
+candidate as the pre-Phase-5.10 code actually did (the code's own comment
+had claimed page-level batching was already happening - it wasn't; this
+fix makes the comment true). At `VALIDATION_BATCH_SIZE` (25), this is a
+real, measurable cut in RPC round-trips and wall-clock validation time,
+not a theoretical one - the same "one multicall per page" shape every
+other batched on-chain read in this app already uses
+(`verify-pool.ts`/`verify-vault.ts`/the pricing engine).
+
+### Bug 3 (the real one): volume indexing had no fairness under its shared deadline
+
+`indexAllPoolVolume` (`lib/onchain/volume/engine.ts`) processes its pool
+list sequentially under one shared wall-clock deadline
+(`SHARED_RUN_DEADLINE_MS`, 50s). At 3 pools this was never a real problem.
+At the 97 pools this phase's own discovery growth produced, it became one:
+live-reproduced across several consecutive real `index:volume` runs, the
+SAME ~19-30 pools at the front of the (always-identical) processing order
+completed every single run, while the SAME ~65-75 pools at the tail got
+**zero** chunks processed, run after run, their lag growing without
+bound - the exact "one busy entity consumes the whole shared budget
+forever" failure this app's own `volume-reorg-recheck` job already hit and
+fixed at a smaller scale in the CodeRabbit PR #17 round
+(`selectReorgRecheckBatch`). Fixed the identical way: the rotation
+primitive moved to a shared home (`lib/indexing/rotation.ts`'s
+`selectRotatingBatch`, re-exported from `volume/reorg.ts` under its
+original name for zero call-site churn there) and reused by
+`indexAllPoolVolume` to compute a rotating PRIORITY subset
+(`PRIORITY_BATCH_SIZE`, 10) guaranteed to be attempted FIRST each run,
+persisted under its own `indexing_state` cursor
+(`volume-index:pool-rotation`, distinct from the reorg-recheck job's own
+rotation cursor - two independent jobs, two independent fairness
+problems). Pools not in the priority subset are still attempted
+afterward, in their normal order - nothing shrinks for the common case
+(most runs finish comfortably inside the deadline); only who gets
+guaranteed processing first when the deadline actually binds changes.
+Output order is unaffected: results are always returned in the caller's
+original pool order, never processing order.
+
+**Live-verified, not just unit-tested**: the specific pool sitting at
+array index 96 (the literal last position, out of 97) was one of the
+pools stuck at zero progress across the session's first several
+`index:volume` runs, its lag climbing past 6,000 blocks. Once nine
+successive runs advanced the rotation offset far enough for the priority
+window to reach index 96, that exact pool jumped from 0 to 44+ chunks
+completed in a single run (several other previously-stuck pools hit the
+100-chunk `maxChunkAttempts` ceiling the same run) - a real, observed
+recovery, not an inference from the math alone (the math is also
+independently covered: `lib/indexing/rotation.ts`'s existing unit tests,
+reused as-is, plus `lib/onchain/volume/engine.integration.test.ts`'s new
+rotation-fairness tests for this call site's own cursor wiring/isolation/
+output-order guarantees).
+
+### Investigated and deliberately NOT changed: per-pool RPC/DB budget at scale
+
+Section 16/37's own instruction ("do not optimize based on theoretical
+fear") was taken literally here. Before assuming `getNativeTokenPrice`
+being called twice per pool (up to ~194 DB reads at 97 pools) or the
+per-pool RPC call count needed a fix, both were measured live rather than
+guessed at - a full 97-pool `index:volume` pass immediately after a batch
+of 94 pools were freshly activated (the worst case: every pool needing a
+genuine first-ever scan) completed in 43.8s against the 50s shared
+deadline, all 94 fresh pools succeeding, with real headroom to spare. No
+change was made to either the pricing lookup or the RPC call shape as a
+result - Bug 3 above is the shared-deadline *ordering* problem specifically
+diagnosed to be real (the steady-state "everyone needs one more chunk"
+case, not the fresh-pool case), and fixing it did not require touching
+either.
+
+### What this phase's live scale test actually achieved, and why it stopped there
+
+The honest ceiling this session hit was NOT a code limit - it was
+`publicnode.com`'s own policy change blocking `eth_getLogs` entirely for
+both configured chains, discovered live. The failure is unambiguously
+provider-side, not application code: the RPC error text itself is
+`publicnode`'s own rejection message ("Archive requests require a
+personal token. Get one at: https://www.allnodes.com/publicnode"), it
+reproduced identically for both the pre-existing Ethereum deployment and
+the pre-existing BNB Chain deployment (neither touched by this phase's own
+changes), and it reproduced on `eth_call`-based RPC methods too
+(`getBlockNumber` succeeded; `eth_getLogs` specifically did not - a
+method-level distinction this app's code has no way to cause). With no
+fallback RPC provider configured for
+either chain (a pre-existing, documented limitation since Phase 5.5) and
+no mandate this phase to add a paid one, no NEW pools could be discovered
+via live scanning this session. Real progress was still made and
+measured: **66 → 94 active discovered pools** (all 28 previously-stuck
+pending candidates, via Bug 1's fix), and the full pipeline - discovery,
+validation, registration, indexing, pricing, volume, fees, coverage,
+reorg-recheck rotation - was exercised end-to-end against this larger,
+97-total-pool set, including two genuinely new failure modes this exact
+scale surfaced live (Bugs 2 and 3) that a purely synthetic/theoretical
+scale test would not have found. "Hundreds of pools" per Section 6's own
+50→100→250→500 framing was not reached this session - stated plainly,
+not glossed over. Late in the session, the same provider also began
+visibly rate-limiting/degrading under this phase's own repeated live
+smoke-testing (`eth_call` throughput dropping run over run even for
+requests that had worked minutes earlier) - a second, independent
+confirmation that the actual constraint this phase ran into is this
+app's single, free-tier, no-fallback RPC provider, not its own
+architecture.
+
 ## Known limitations
 
 - Six verified pools across five chains, plus two verified ERC-4626 vaults

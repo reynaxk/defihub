@@ -1,5 +1,6 @@
 import postgres from "postgres";
 import { getObservationsNeedingRecheck, markObservationReorged } from "@/lib/database/queries/onchain-recheck";
+import { selectRotatingBatch } from "@/lib/indexing/rotation";
 import { getIndexingState, updateIndexingState } from "@/lib/indexing/state";
 import { getAllVolumeSourcePools } from "@/lib/onchain/discovery/volume-source";
 import { checkBlockHashStillCanonical, readBlockHashOnChain, type ReorgCheckResult } from "@/lib/onchain/reorg";
@@ -85,32 +86,14 @@ const AGGREGATE_METRICS = ["volume_usd", "fees_usd", "revenue_usd"] as const;
 const POOL_ROTATION_CHAIN_SLUG = "global"; // not a real chain - rotation isn't scoped to one
 const POOL_ROTATION_COMPONENT = `${COMPONENT_PREFIX}:pool-rotation`;
 
-export interface ReorgRecheckBatchSelection<T> {
-  batch: T[];
-  nextOffset: bigint;
-}
-
-// Pure, directly testable with a plain array + offset, no RPC/DB. Returns
-// up to `batchSize` pools starting at `offset % pools.length` and wrapping
-// around the end of the list back to the start - the same round-robin
-// shape ensures that across enough successive calls (each one's own
-// `nextOffset` fed back in as the next call's `offset`), every pool in the
-// list eventually gets included, not just whichever ones happen to sit in
-// the first `batchSize` array slots.
-export function selectReorgRecheckBatch<T>(pools: readonly T[], batchSize: number, offset: bigint): ReorgRecheckBatchSelection<T> {
-  if (pools.length === 0 || batchSize <= 0) return { batch: [], nextOffset: offset };
-
-  const len = BigInt(pools.length);
-  const start = ((offset % len) + len) % len; // defensively normalizes a negative/out-of-range offset, though one should never actually occur
-  const n = BigInt(Math.min(batchSize, pools.length));
-
-  const batch: T[] = [];
-  for (let i = BigInt(0); i < n; i++) {
-    batch.push(pools[Number((start + i) % len)]);
-  }
-
-  return { batch, nextOffset: offset + n };
-}
+// Phase 5.10: the rotation primitive itself moved to lib/indexing/rotation.ts
+// (selectRotatingBatch) once lib/onchain/volume/engine.ts's
+// indexAllPoolVolume needed the identical mechanism for a live-reproduced
+// starvation bug at the volume-indexing scale (see that module's own
+// comment) - re-exported here under this module's original name so this
+// file's own existing call sites/tests need no changes.
+export type { RotatingBatchSelection as ReorgRecheckBatchSelection } from "@/lib/indexing/rotation";
+export const selectReorgRecheckBatch = selectRotatingBatch;
 
 export interface VolumeReorgRecheckOptions {
   batchSize?: number;

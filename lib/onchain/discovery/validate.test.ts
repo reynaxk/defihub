@@ -196,16 +196,21 @@ describe("resolveValidationOutcome", () => {
   });
 });
 
-function successfulMulticallResults() {
+// Matches decodeCandidateReadAt's own (deliberately loose) parameter type
+// in validate.ts - a mocked multicall response only ever needs `status`
+// and `result`, never viem's full per-item error/gas-used shape.
+type MockMulticallResult = { status: "success" | "failure"; result?: unknown };
+
+function successfulMulticallResults(): MockMulticallResult[] {
   return [
-    { status: "success" as const, result: CANDIDATE.token0 },
-    { status: "success" as const, result: CANDIDATE.token1 },
-    { status: "success" as const, result: DEPLOYMENT.factoryAddress },
-    { status: "success" as const, result: [BigInt(1), BigInt(1), 0] },
-    { status: "success" as const, result: 18 },
-    { status: "success" as const, result: 18 },
-    { status: "success" as const, result: "TOK0" },
-    { status: "success" as const, result: "WBNB" },
+    { status: "success", result: CANDIDATE.token0 },
+    { status: "success", result: CANDIDATE.token1 },
+    { status: "success", result: DEPLOYMENT.factoryAddress },
+    { status: "success", result: [BigInt(1), BigInt(1), 0] },
+    { status: "success", result: 18 },
+    { status: "success", result: 18 },
+    { status: "success", result: "TOK0" },
+    { status: "success", result: "WBNB" },
   ];
 }
 
@@ -344,5 +349,107 @@ describe("validateDiscoveredPoolsBatch - Phase 5.10: one multicall for a whole p
     const [batched] = await validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash);
 
     expect(single).toEqual(batched);
+  });
+});
+
+describe("validateDiscoveredPoolsBatch - Phase 5.11: bounded retry for a per-sub-call multicall failure", () => {
+  function candidateAt(index: number): DecodedPairCreated {
+    return { ...CANDIDATE, poolAddress: `0x${index.toString().padStart(40, "0")}`, logIndex: CANDIDATE.logIndex + index };
+  }
+
+  // A multicall response with the factory() sub-call (index 2) reporting
+  // "failure" within an otherwise-successful multicall - the exact shape
+  // live-observed against a real, freshly-discovered PancakeSwap V2 pool
+  // whose factory() call succeeded moments later when queried directly
+  // (both through the same RPC endpoint and cross-checked through a
+  // completely different, independent provider) - see this fix's own
+  // module comment in validate.ts.
+  function incompleteMulticallResults(): MockMulticallResult[] {
+    const results = successfulMulticallResults();
+    results[2] = { status: "failure" };
+    return results;
+  }
+
+  it("REGRESSION: a candidate whose factory() read fails on the first multicall but succeeds on retry is accepted, never falsely rejected", async () => {
+    mockMulticall.mockResolvedValueOnce(incompleteMulticallResults()).mockResolvedValueOnce(successfulMulticallResults());
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    vi.useFakeTimers();
+    const outcomePromise = validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash, new Map());
+    await vi.runAllTimersAsync();
+    const [outcome] = await outcomePromise;
+    vi.useRealTimers();
+
+    expect(mockMulticall).toHaveBeenCalledTimes(2);
+    expect(outcome.status).toBe("accepted");
+  });
+
+  it("still rejects a candidate whose required-field reads fail consistently across the whole retry budget - a genuinely malformed contract is not retried forever", async () => {
+    mockMulticall.mockResolvedValue(incompleteMulticallResults());
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    vi.useFakeTimers();
+    const outcomePromise = validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash, new Map());
+    await vi.runAllTimersAsync();
+    const [outcome] = await outcomePromise;
+    vi.useRealTimers();
+
+    // 1 initial attempt + MAX_DECODE_RETRY_ATTEMPTS (3) retries = 4 total.
+    expect(mockMulticall).toHaveBeenCalledTimes(4);
+    expect(outcome.status).toBe("rejected");
+    expect((outcome as { reason: string }).reason).toContain("factory()");
+  });
+
+  it("only re-queries the SPECIFIC candidates with an incomplete decode on retry, not the whole page", async () => {
+    const candidates = [candidateAt(0), candidateAt(1), candidateAt(2)];
+    // Only candidate 1 (the middle one) has an incomplete first decode.
+    const firstAttempt = [...successfulMulticallResults(), ...incompleteMulticallResults(), ...successfulMulticallResults()];
+    mockMulticall.mockResolvedValueOnce(firstAttempt).mockResolvedValueOnce(successfulMulticallResults());
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    vi.useFakeTimers();
+    const outcomesPromise = validateDiscoveredPoolsBatch(DEPLOYMENT, candidates, readBlockHash, new Map());
+    await vi.runAllTimersAsync();
+    const outcomes = await outcomesPromise;
+    vi.useRealTimers();
+
+    expect(mockMulticall).toHaveBeenCalledTimes(2);
+    // The retry's own multicall covers exactly ONE candidate's worth of
+    // calls, not all three - proof the other two, already-complete
+    // candidates were never re-queried.
+    const retryCallArgs = mockMulticall.mock.calls[1][0] as { contracts: unknown[] };
+    expect(retryCallArgs.contracts).toHaveLength(CALLS_PER_CANDIDATE);
+    expect(outcomes.every((o) => o.status === "accepted")).toBe(true);
+  });
+
+  it("a retry-multicall transport failure stops the retry loop - the candidate keeps its original (incomplete) decode and is still correctly rejected, never stuck retrying", async () => {
+    mockMulticall.mockResolvedValueOnce(incompleteMulticallResults()).mockRejectedValueOnce(new Error("provider unavailable"));
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    vi.useFakeTimers();
+    const outcomePromise = validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash, new Map());
+    await vi.runAllTimersAsync();
+    const [outcome] = await outcomePromise;
+    vi.useRealTimers();
+
+    expect(mockMulticall).toHaveBeenCalledTimes(2); // initial + the one failed retry attempt, then it gave up
+    expect(outcome.status).toBe("rejected");
+  });
+
+  it("never retries a candidate whose ONLY incomplete field is the best-effort symbol() reads - symbols are never validated or retried on", async () => {
+    const results = successfulMulticallResults();
+    results[6] = { status: "failure" }; // token0Symbol
+    results[7] = { status: "failure" }; // token1Symbol
+    mockMulticall.mockResolvedValue(results);
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    const [outcome] = await validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash, new Map());
+
+    expect(mockMulticall).toHaveBeenCalledTimes(1); // no retry attempted at all
+    expect(outcome.status).toBe("accepted");
+    if (outcome.status === "accepted") {
+      expect(outcome.token0Symbol).toBeNull();
+      expect(outcome.token1Symbol).toBeNull();
+    }
   });
 });

@@ -8,10 +8,11 @@ import { logger } from "@/lib/observability/logger";
 import type { ReorgCheckResult } from "@/lib/onchain/reorg";
 import { effectiveStartBlock } from "@/lib/onchain/volume/engine";
 import { FACTORY_DEPLOYMENTS, type FactoryDeployment } from "./config";
-import { getPendingDiscoveredPools, markDiscoveredPoolActive, markDiscoveredPoolRejected, recordDiscoveredPools } from "./queries";
+import { getPendingDiscoveredPools, markDiscoveredPoolActive, markDiscoveredPoolRejected, recordDiscoveredPools, type RecordableDiscoveredCandidate } from "./queries";
 import { registerDiscoveredPoolAsPool } from "./register";
-import { decodePairCreatedLog, PAIR_CREATED_EVENT_SIGNATURE } from "./scan";
+import { decodePairCreatedLog, decodePoolCreatedLog, PAIR_CREATED_EVENT_SIGNATURE, POOL_CREATED_EVENT_SIGNATURE } from "./scan";
 import { validateDiscoveredPoolsBatch } from "./validate";
+import { validateV3DiscoveredPoolsBatch } from "./validate-v3";
 
 // Section 5's bounded discovery primitive: reuses scanFromCursor
 // (lib/indexing/events.ts) exactly as engine.ts (volume) does - the same
@@ -88,20 +89,28 @@ async function scanForNewPools(deployment: FactoryDeployment, chainId: string): 
     });
   }
 
+  // Phase 5.11: V2 (PairCreated) vs V3 (PoolCreated) dispatch - the only
+  // place scanForNewPools needs to know which protocol it's scanning.
+  // Both decoders produce a RecordableDiscoveredCandidate-compatible shape
+  // (V3's simply carries an extra feeTier field), so recordDiscoveredPools
+  // itself needs no dexKind awareness at all.
+  const isV3 = deployment.dexKind === "uniswap-v3";
+  const eventSignature = isV3 ? POOL_CREATED_EVENT_SIGNATURE : PAIR_CREATED_EVENT_SIGNATURE;
+
   const scanResult = await scanFromCursor({
     chainSlug: deployment.chainSlug,
     component,
     address: deployment.factoryAddress as `0x${string}`,
-    eventSignature: PAIR_CREATED_EVENT_SIGNATURE,
+    eventSignature,
     currentBlock,
     startBlock: effectiveStart,
     chunkSize: DISCOVERY_CHUNK_SIZE,
     confirmations: confirmationsFor(deployment.chainSlug),
     onLogs: async (logs) => {
-      const decoded = [];
+      const decoded: RecordableDiscoveredCandidate[] = [];
       let malformedCount = 0;
       for (const log of logs) {
-        const candidate = decodePairCreatedLog(log);
+        const candidate = isV3 ? decodePoolCreatedLog(log) : decodePairCreatedLog(log);
         if (!candidate) {
           malformedCount++;
           continue;
@@ -109,7 +118,7 @@ async function scanForNewPools(deployment: FactoryDeployment, chainId: string): 
         decoded.push(candidate);
       }
       if (malformedCount > 0) {
-        logger.warn("pool discovery: skipped malformed PairCreated log(s)", { component: "onchain-discovery", deployment: deployment.key, malformedCount });
+        logger.warn(`pool discovery: skipped malformed ${isV3 ? "PoolCreated" : "PairCreated"} log(s)`, { component: "onchain-discovery", deployment: deployment.key, malformedCount });
       }
 
       const inserted = await recordDiscoveredPools(chainId, deployment, decoded);
@@ -121,10 +130,10 @@ async function scanForNewPools(deployment: FactoryDeployment, chainId: string): 
 }
 
 async function validatePendingPools(deployment: FactoryDeployment, chainId: string, protocolId: string | null): Promise<{ validated: number; activated: number; rejected: number }> {
-  const pending = await getPendingDiscoveredPools(deployment.key, VALIDATION_BATCH_SIZE);
+  const allPending = await getPendingDiscoveredPools(deployment.key, VALIDATION_BATCH_SIZE);
   let activated = 0;
   let rejected = 0;
-  if (pending.length === 0) return { validated: 0, activated: 0, rejected: 0 };
+  if (allPending.length === 0) return { validated: 0, activated: 0, rejected: 0 };
 
   // Shared across every candidate in THIS page, never across separate
   // validatePendingPools calls (deliberately created fresh here, per run -
@@ -132,6 +141,26 @@ async function validatePendingPools(deployment: FactoryDeployment, chainId: stri
   // reused) - see validateDiscoveredPoolsBatch's own comment for exactly
   // what this dedupes and why.
   const canonicalCheckCache: Map<string, Promise<ReorgCheckResult>> = new Map();
+
+  // Phase 5.11: V2 (getReserves-based) vs V3 (fee()-cross-checked)
+  // validation dispatch - the only place validatePendingPools needs to
+  // know which protocol it's validating. A V3 deployment's own pending
+  // rows should always carry a real feeTier (recordDiscoveredPools always
+  // persists it for a V3 candidate) - a row that somehow lacks one is
+  // rejected immediately, as a genuine data-integrity fact, rather than
+  // silently coerced or sent into a validation path with no fee to
+  // cross-check against.
+  let pending = allPending;
+  if (deployment.dexKind === "uniswap-v3") {
+    const missingFeeTier = allPending.filter((row) => row.feeTier == null);
+    for (const row of missingFeeTier) {
+      await markDiscoveredPoolRejected(row.id, "discovered_pools row has no feeTier recorded for a V3 deployment - data integrity issue, not a transient failure");
+      rejected++;
+      logger.warn("pool discovery: V3 candidate missing its own feeTier - rejected, not validated", { component: "onchain-discovery", deployment: deployment.key, pool: row.poolAddress });
+    }
+    pending = allPending.filter((row) => row.feeTier != null);
+    if (pending.length === 0) return { validated: activated + rejected, activated, rejected };
+  }
 
   // ONE multicall covering the WHOLE page, not one per candidate - see
   // validateDiscoveredPoolsBatch's own module comment for exactly why this
@@ -143,20 +172,37 @@ async function validatePendingPools(deployment: FactoryDeployment, chainId: stri
   // reject under normal operation; letting a genuinely unexpected throw
   // propagate to discoverPoolsForDeployment's own catch is intentional,
   // not an oversight.
-  const outcomes = await validateDiscoveredPoolsBatch(
-    deployment,
-    pending.map((row) => ({
-      token0: row.token0Address,
-      token1: row.token1Address,
-      poolAddress: row.poolAddress,
-      blockNumber: BigInt(row.creationBlockNumber),
-      blockHash: row.creationBlockHash,
-      transactionHash: row.creationTransactionHash,
-      logIndex: row.creationLogIndex,
-    })),
-    undefined,
-    canonicalCheckCache,
-  );
+  const outcomes =
+    deployment.dexKind === "uniswap-v3"
+      ? await validateV3DiscoveredPoolsBatch(
+          deployment,
+          pending.map((row) => ({
+            token0: row.token0Address,
+            token1: row.token1Address,
+            poolAddress: row.poolAddress,
+            feeTier: row.feeTier!, // filtered to non-null above
+            blockNumber: BigInt(row.creationBlockNumber),
+            blockHash: row.creationBlockHash,
+            transactionHash: row.creationTransactionHash,
+            logIndex: row.creationLogIndex,
+          })),
+          undefined,
+          canonicalCheckCache,
+        )
+      : await validateDiscoveredPoolsBatch(
+          deployment,
+          pending.map((row) => ({
+            token0: row.token0Address,
+            token1: row.token1Address,
+            poolAddress: row.poolAddress,
+            blockNumber: BigInt(row.creationBlockNumber),
+            blockHash: row.creationBlockHash,
+            transactionHash: row.creationTransactionHash,
+            logIndex: row.creationLogIndex,
+          })),
+          undefined,
+          canonicalCheckCache,
+        );
 
   for (let i = 0; i < pending.length; i++) {
     const row = pending[i];

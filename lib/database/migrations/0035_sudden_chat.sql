@@ -1,0 +1,1 @@
+ALTER TABLE "discovered_pools" ADD COLUMN "fee_tier" integer;

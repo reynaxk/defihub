@@ -246,6 +246,13 @@
       "when": 1788030482239,
       "tag": "0034_discovered_pools",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1788300190175,
+      "tag": "0035_sudden_chat",
+      "breakpoints": true
     }
   ]
 }

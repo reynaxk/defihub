@@ -32,6 +32,20 @@ import { VOLUME_SOURCE_POOLS, type VolumeSourcePool } from "../volume/config";
 // native pricing coverage for a newly-discovered token, not a bug (see
 // docs/native-data.md's Phase 5.9 section).
 function toVolumeSourcePool(deployment: (typeof FACTORY_DEPLOYMENTS)[number], row: Awaited<ReturnType<typeof getActiveDiscoveredPools>>[number]): VolumeSourcePool {
+  // Phase 5.11: V2's fee is a trusted deployment-level constant
+  // (deployment.feeBps); V3's is a fact about the discovered POOL itself,
+  // read from row.feeTier (raw on-chain units, e.g. 500) and converted via
+  // the same /100 rule VolumeSourcePool.v3FeeTierRaw's own comment already
+  // establishes for the hand-curated V3 config entry. An "active" row for
+  // a V3 deployment is guaranteed to carry a real feeTier - validate-v3.ts's
+  // own resolveV3ValidationOutcome rejects (never accepts) a candidate
+  // whose fee() read failed or whose feeTier is unset before
+  // markDiscoveredPoolActive is ever called - so a null value reaching
+  // here is a genuine data-integrity bug, thrown loudly rather than
+  // silently defaulted to some plausible-looking fee (Section 22's "never
+  // fabricate").
+  const feeBps = deployment.dexKind === "uniswap-v3" ? v3FeeTierToBps(deployment, row) : deployment.feeBps;
+
   return {
     key: discoveredPoolConfigKey(deployment.chainSlug, row.poolAddress),
     chainSlug: deployment.chainSlug,
@@ -40,8 +54,12 @@ function toVolumeSourcePool(deployment: (typeof FACTORY_DEPLOYMENTS)[number], ro
     token0: { address: row.token0Address, symbol: row.token0Symbol ?? "UNKNOWN", decimals: row.token0Decimals, coingeckoId: "" },
     token1: { address: row.token1Address, symbol: row.token1Symbol ?? "UNKNOWN", decimals: row.token1Decimals, coingeckoId: "" },
     factoryAddress: deployment.factoryAddress,
-    feeBps: deployment.feeBps,
-    feeVerification: `deployment "${deployment.key}" feeBps (${deployment.feeBps}) - genuine factory lineage confirmed at discovery-validation time (pool.factory() == ${deployment.factoryAddress})`,
+    feeBps,
+    ...(deployment.dexKind === "uniswap-v3" && row.feeTier != null ? { v3FeeTierRaw: row.feeTier } : {}),
+    feeVerification:
+      deployment.dexKind === "uniswap-v3"
+        ? `deployment "${deployment.key}" - feeBps (${feeBps}) derived from this pool's own live fee() read (raw ${row.feeTier}), cross-checked against the PoolCreated event at discovery-validation time - genuine factory lineage confirmed (pool.factory() == ${deployment.factoryAddress})`
+        : `deployment "${deployment.key}" feeBps (${feeBps}) - genuine factory lineage confirmed at discovery-validation time (pool.factory() == ${deployment.factoryAddress})`,
     // The pool's own REAL creation block - a genuinely correct value, not
     // a guessed recent floor the way hand-curated config entries need
     // (this app was never running when those pools were created; it WAS
@@ -51,6 +69,20 @@ function toVolumeSourcePool(deployment: (typeof FACTORY_DEPLOYMENTS)[number], ro
     // if real time has since moved the safe window past it.
     startBlock: BigInt(row.creationBlockNumber),
   };
+}
+
+function v3FeeTierToBps(deployment: (typeof FACTORY_DEPLOYMENTS)[number], row: Awaited<ReturnType<typeof getActiveDiscoveredPools>>[number]): number {
+  if (row.feeTier == null) {
+    throw new Error(
+      `toVolumeSourcePool: active discovered pool "${row.poolAddress}" (deployment "${deployment.key}") has no feeTier recorded - validation should never have accepted a V3 candidate without one`,
+    );
+  }
+  // V3's native unit is hundredths-of-a-bip, denominator 1,000,000, vs this
+  // app's shared fee unit's denominator of 10,000 - exact for every
+  // standard V3 tier (100->1, 500->5, 3000->30, 10000->100), the identical
+  // conversion lib/onchain/volume/config.ts's own hand-curated
+  // "uniswap-v3-eth-usdc-weth-005" entry already documents.
+  return row.feeTier / 100;
 }
 
 // Every config-curated pool PLUS every active discovered pool, in the

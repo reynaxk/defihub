@@ -409,6 +409,17 @@ export const discoveredPools = pgTable(
     poolAddress: varchar("pool_address", { length: 128 }).notNull(),
     token0Address: varchar("token0_address", { length: 128 }).notNull(),
     token1Address: varchar("token1_address", { length: 128 }).notNull(),
+    // Phase 5.11: V3-only, null for every V2 row. Unlike V2 (one fixed,
+    // deployment-level fee for every pool a factory ever creates - see
+    // FactoryDeployment.feeBps), a V3 factory can deploy the SAME token
+    // pair at multiple independent fee tiers, each its own distinct pool -
+    // the fee is a fact about the DISCOVERED pool itself (the PoolCreated
+    // event's own indexed `fee` parameter), never config. Raw on-chain
+    // units (hundredths-of-a-bip, e.g. 500) - the same "store the untouched
+    // raw value" precedent VolumeSourcePool.v3FeeTierRaw already
+    // established, converted to the shared bps-out-of-10,000 unit only at
+    // the point of use (volume-source.ts), never at rest here.
+    feeTier: integer("fee_tier"),
     // Null until validation actually resolves them - never defaulted (same
     // "unconfirmed stays null, never guessed" discipline as
     // poolTokens.decimals above). A row can be rejected specifically

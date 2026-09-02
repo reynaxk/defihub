@@ -1707,6 +1707,218 @@ confirmation that the actual constraint this phase ran into is this
 app's single, free-tier, no-fallback RPC provider, not its own
 architecture.
 
+## Native coverage expansion II (Phase 5.11)
+
+Phase 5.10 proved the pipeline scales mechanically. This phase asks whether
+it can produce materially *more real coverage* - not by inventing a bigger
+number, but by removing the actual constraints Phase 5.10 already
+diagnosed and by adding one genuinely new, reusable protocol family. Net
+result: **100 → 146 total pools** (+46% overall; discovered-owned pools
+specifically went 94 → 140, +49%, since the 6 hand-curated config pools
+don't grow), plus Uniswap V3 discovery as an entirely new capability -
+achieved without any architecture rewrite - every fix and addition reuses
+Phase 5.9/5.10's
+own primitives (`scanFromCursor`, the batched-multicall validation
+pattern, `registerDiscoveredPoolAsPool`, the retry/backoff shared with
+`lib/chains/backoff.ts`).
+
+### Coverage matrix (measured, end of phase)
+
+Discovered/validated/registered are NOT the same claim as indexed/priced -
+see Section 12's own discipline, restated here as measured fact rather
+than policy: registration this phase (new RPC headroom + the retry fix)
+ran far ahead of indexing, which is bounded by the SAME fairness-rotation
+cadence Phase 5.10 already established and reuses unchanged (`rotation.ts`)
+- a newly-registered pool enters that rotation and is indexed on its own
+schedule, not instantly. Queried directly from the dev database at the end
+of this phase - not estimated:
+
+| Deployment | Chain | Discovered | Validated | Rejected | Registered | Indexed (pools w/ ≥1 swap) | Swap events |
+|---|---|---|---|---|---|---|---|
+| uniswap-v2-ethereum | ethereum | 3 | 3 | 0 | 3 | 0 | 0 |
+| pancakeswap-v2-bnb-chain | bnb-chain | 136 | 136 | 0 | 136 | 5 | 61 |
+| uniswap-v3-ethereum (new) | ethereum | 1 | 1 | 0 | 1 | 0 | 0 |
+| **Total (discovered-owned)** | | **140** | **140** | **0** | **140** | **5** | **61** |
+| Hand-curated (`pools`, non-discovered) | — | — | — | — | 6 | 6 (pre-existing) | pre-existing |
+| **Grand total pools** | | | | | **146** | | |
+
+- **Native pricing / native volume / native fees**: derived directly from
+  a pool's own indexed swap events (no CoinGecko/DeFiLlama substitution -
+  see the external-dependency note below) - so these numbers track
+  "indexed" exactly: **5 pools** (all on `pancakeswap-v2-bnb-chain`) have
+  genuine native volume/fee data at the end of this phase, not 140.
+  Reporting "146 pools with native pricing" would be exactly the
+  fabrication Section 12 forbids.
+- **Native revenue**: UNAVAILABLE for every pool this phase, by design, not
+  omission - `lib/onchain/volume/protocol-fee.ts`'s own V2 protocol-fee
+  model only resolves to a real number when a pool's `factory.feeTo()` is
+  the zero address (verifiably zero revenue); every other case (`feeTo()`
+  active, or V3 pools, which have no equivalent mechanism implemented at
+  all) is reported UNAVAILABLE rather than estimated from volume × a
+  guessed percentage. Applies identically to newly-discovered pools; this
+  phase did not change that module.
+- **The 131 registered-but-not-yet-indexed PancakeSwap V2 pools** are the
+  single largest true bottleneck exposed this phase - see Known
+  limitations below.
+
+### The real bottleneck (Section 3), confirmed then removed
+
+Phase 5.10 diagnosed but did not fix `publicnode.com` (this app's
+hardcoded default RPC for `ethereum`/`bnb-chain`) requiring a paid
+personal archive token for every `eth_getLogs` call - live-reconfirmed at
+the start of this phase, identical failure, unrelated to any code change.
+Rather than accept this as a permanent ceiling, several free, no-signup
+alternative public RPC endpoints were live-tested directly (`eth.drpc.org`,
+`bsc.drpc.org`, `rpc.ankr.com`, `cloudflare-eth.com`,
+`eth-mainnet.public.blastapi.io`, and others) against real historical
+`eth_getLogs` ranges on both configured chains. `drpc.org` genuinely
+works: confirmed live serving `eth_getLogs` up to **10,000-block ranges**
+(vs. publicnode's prior ~50-94-block window, now fully blocked) with no
+archive restriction, plus `eth_call`/`multicall`/`eth_getBlockByNumber` -
+every RPC method this app's indexer/discovery/pricing code actually uses.
+Configured via `lib/chains/rpc-client.ts`'s own pre-existing
+`ETHEREUM_RPC_URL`/`BNB_CHAIN_RPC_URL` (primary) and
+`ETHEREUM_RPC_URL_FALLBACK`/`BNB_CHAIN_RPC_URL_FALLBACK` (publicnode kept
+as a secondary provider) environment variables in `.env.local` - **zero
+code changes**, since `withResilientClient`'s failover mechanism already
+existed and simply had no working secondary configured. This single
+change is what turned discovery from "permanently blocked" back into "a
+real, working pipeline" - every other fix and addition this phase made
+was only discoverable once discovery itself worked again.
+
+### Bug found and fixed: live-confirmed false rejections under RPC load
+
+With scanning working again, validation immediately began rejecting real,
+valid pools. Ground-truth-verified directly (calling `factory()` on a
+rejected pool's own address, both through the same RPC endpoint and
+cross-checked through a completely independent second provider): the
+pools were genuine, correctly-deployed PancakeSwap V2 pairs whose
+`factory()` call returned the exact real, canonical factory address. The
+cause, narrowed across two separate live reproductions: a per-sub-call
+failure *within* an otherwise-successful multicall (multicall3's own
+`allowFailure: true` design) from either a brief read-after-write gap for
+a contract created moments earlier in the same run, or - a second,
+more severe reproduction, 13/13 candidates in one page all rejected the
+same way - the same provider returning an explicit "Public endpoint rate
+limit" error on direct follow-up calls. Fixed with a bounded retry
+(`lib/onchain/discovery/validate.ts`'s `retryIncompleteDecodes`, mirrored
+for V3 in `validate-v3.ts`): up to 3 extra multicall attempts, re-querying
+*only* the specific candidates with an incomplete decode (never the whole
+page again), with a backoff window (500ms-5s) sized for a rate-limit reset
+rather than a typical dropped-request retry. A genuinely malformed
+contract still fails identically every attempt and is still correctly
+rejected once the bounded budget is exhausted - this is not a "never
+reject" change, it fixes false rejections specifically.
+
+**The fix alone does not retroactively correct already-corrupted data.**
+All 15 rows this exact bug had produced in the dev database (100% of
+rejections that existed at the time) were confirmed, by timestamp, to
+predate the fix's deployment - not a coincidence; they were the very batch
+used to diagnose the bug. A small, narrowly-scoped, idempotent one-time
+operator script
+(`workers/onchain/reset-false-rejections.ts`, matching
+`discover-pools-recover.ts`'s own never-cron-wired convention) reset
+exactly those rows - matched by exact rejection-reason text AND a
+hardcoded cutoff timestamp, never a broad "reset everything rejected"
+sweep, which would also have reset genuinely, correctly rejected malformed
+contracts - back to "discovered" for a fair re-validation. Live-run: all
+15 were rescued (logged individually, each needing the full 3-attempt
+budget under sustained rate-limiting), alongside 7 newly-discovered
+candidates in the same run - 23/23 succeeded, 0 rejected.
+
+### New capability: Uniswap V3 discovery (Section 4)
+
+Phase 5.9's own documentation named V3 discovery as deliberately out of
+scope, needing "a second, parallel `FactoryDeployment`-like config and a
+`PoolCreated` decoder, not a generalization of this one." This phase
+builds exactly that, as a genuine sibling to the V2 path (mirroring the
+already-established V2/V3 split at the volume-indexing layer -
+`lib/onchain/volume/uniswap-v2.ts` vs `uniswap-v3.ts`, dispatched by a
+small `sourceKind` switch, not one mega-function), reusing every
+generic primitive unchanged:
+
+- `lib/onchain/discovery/config.ts`'s `FactoryDeployment` is now a
+  discriminated union (`UniswapV2FactoryDeployment` keeps `feeBps`;
+  `UniswapV3FactoryDeployment` has none - V3's fee is a fact about the
+  *discovered pool*, not the deployment, since a factory can deploy the
+  same token pair at multiple independent fee tiers). One real entry
+  added: `uniswap-v3-ethereum`, the exact factory address
+  (`0x1F98431c8aD98523631AE4a59f267346ea31F984`) already independently
+  verified elsewhere in this app (`VERIFIED_POOLS`'
+  `uniswap-v3-eth-usdc-weth-005`).
+- `lib/onchain/discovery/scan.ts` gained `decodePoolCreatedLog`/
+  `POOL_CREATED_EVENT_SIGNATURE` - live-verified against the real factory
+  (fetched real `PoolCreated` logs, confirmed topic0
+  `0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118`
+  and the exact 3-indexed/2-data-field shape), the same
+  "every parameter named" discipline `PAIR_CREATED_EVENT_SIGNATURE`
+  already established (an unnamed parameter anywhere makes viem return
+  positional args for the WHOLE event).
+- `lib/onchain/discovery/validate-v3.ts` (new file, not a modification of
+  the V2 file) - V3 has no `getReserves()`; `liquidity()` stands in as
+  the well-formedness check, and `fee()` is cross-checked against the
+  event's own claimed fee tier (never trusted from the event alone, the
+  same discipline already applied to token0/token1 and V2's factory
+  lineage). Same accepted/rejected/retry three-way contract, same bounded
+  decode-retry fix as V2.
+- **Schema**: one additive migration
+  (`0035_sudden_chat.sql`, `ALTER TABLE discovered_pools ADD COLUMN
+  fee_tier integer`) - nullable, null for every V2 row, genuinely required
+  (V3's fee cannot live in config the way V2's does).
+  `lib/onchain/discovery/volume-source.ts`'s `toVolumeSourcePool` derives
+  `feeBps` from `deployment.feeBps` (V2) or `row.feeTier / 100` (V3, the
+  same conversion `VolumeSourcePool.v3FeeTierRaw`'s own comment already
+  documents for the hand-curated V3 pool) - throws loudly rather than
+  guessing if an active V3 row somehow lacks a feeTier, which validation
+  should never allow to happen.
+- `registerDiscoveredPoolAsPool` needed **zero changes** - it never reads
+  `feeBps` at all, confirming the V2/V3 split was scoped correctly to
+  exactly the places that actually differ.
+
+**Live-verified end-to-end**: a real, brand-new V3 pool (WLFI/WETH, 0.3%
+fee tier, created at the live chain head during this phase's own
+development) was discovered, validated (factory lineage, token
+cross-check, fee cross-check, `liquidity()`, decimals), and registered
+correctly - confirmed by direct database inspection: correct `configKey`,
+correct label, correct token symbols/decimals, `feeTier: 3000` persisted
+exactly as read on-chain.
+
+### Investigated and deliberately not pursued this phase
+
+- **More chains** (Section 5) - explicitly not added. Getting the
+  existing 2 chains reliable took a full RPC-provider investigation and a
+  real, live-discovered rate-limit characteristic; adding a 3rd/4th chain
+  before that lesson is absorbed would mean repeating this same
+  discovery-and-failure cycle blind, with no evidence any candidate
+  chain's own free-tier RPC options are any better. Section 22's own "a
+  chain only counts as meaningfully supported when its pipeline actually
+  works" was taken literally: no chain was added without the same
+  live-verification rigor `drpc.org` itself received.
+- **More deployments on already-configured chains** (e.g. SushiSwap on
+  Ethereum) - deferred for the same reason: `bnb-chain`'s own
+  `drpc.org` endpoint already showed rate-limiting under this phase's own
+  sustained testing load; adding a third deployment onto an
+  already-strained chain's RPC budget was judged not worth the risk this
+  round, in favor of proving one genuinely new protocol FAMILY (V3) works
+  cleanly first.
+- **Token metadata caching across candidates** (Section 9) - audited, not
+  implemented. A shared token (e.g. `WBNB` appearing as `token1` in many
+  PancakeSwap pairs within one validation page) genuinely does get
+  redundant `decimals()`/`symbol()` sub-calls within the SAME multicall,
+  but this does not add RPC round-trips or measurably worsen the
+  rate-limit exposure that's the actual, measured constraint this phase
+  found - it's free-tier `eth_call` calldata, not additional requests.
+  Section 3's "do not optimize based on theoretical fear" applied
+  directly: no fix was made for a cost that doesn't show up in any real
+  measurement.
+- **Database hygiene**: one pre-existing, fully orphaned test-chain row
+  (zero pools/discovered_pools referencing it, predating this phase)
+  found during a `chains`-table sweep and removed; a full duplicate/
+  dangling-FK/cross-chain-collision audit otherwise found the database
+  clean (0 duplicate `configKey`s, 0 duplicate `(chainId, poolAddress)`
+  pairs, 0 dangling `swap_events.pool_id` references, 0 unexpected
+  V2-with-feeTier or active-V3-without-feeTier rows).
+
 ## Known limitations
 
 - Six verified pools across five chains, plus two verified ERC-4626 vaults
@@ -1793,7 +2005,12 @@ architecture.
   answer, not an automated one - this app has never configured a fallback
   RPC provider for Ethereum, so there is genuinely no alternate provider
   for `withResilientClient` to fail over to when the primary's free-tier
-  window is the actual constraint.
+  window is the actual constraint. **Superseded by Phase 5.11**: a real
+  primary+fallback pair is now configured for both `ethereum` and
+  `bnb-chain` (see the Phase 5.11 section above) - `manuallyAdvanceCursor`
+  remains the answer for a cursor stuck behind BOTH providers' windows,
+  but "no alternate provider at all" is no longer accurate for these two
+  chains.
 - **No backfill mode with an explicit, bounded end block** - Phase 5.5's
   own Section 34 explicitly permits skipping this ("if unnecessary, do not
   add it"); the existing catch-up mechanism already handles "resume from
@@ -1835,3 +2052,24 @@ architecture.
   `outcome: "success"`. Still only two chains, both EVM; Aerodrome (Base)
   remains audited-but-unsupported (see
   [Native protocol coverage expansion (Phase 5.7)](#native-protocol-coverage-expansion-phase-57)).
+- **Registration this phase (140 discovered-owned pools) ran far ahead of
+  indexing (5 pools with any swap events)** - see the Phase 5.11 coverage
+  matrix above. This is the honest, expected shape of a fairness-rotation
+  indexer that just received 46 newly-registered PancakeSwap V2 pools in
+  one run, not a bug: `rotation.ts`'s round-robin selection means every
+  registered pool eventually gets its turn, but "registered" was never
+  meant to imply "already indexed." A future run's own `npm run
+  index:volume` invocations will continue closing this gap; no code change
+  is needed for that to happen, only more scheduled runs.
+- **V3 discovery/validation is proven correct on exactly ONE live pool**
+  (the WLFI/WETH 0.3% pool this phase discovered) - the code path itself
+  (fee cross-check, `liquidity()` well-formedness, decimal/symbol reads)
+  is the same batched-multicall shape already exercised at scale for V2's
+  136 PancakeSwap pools, but V3 specifically has not yet been observed
+  processing a large page of candidates in one run. Chain reality (V3
+  Ethereum PoolCreated volume is lower than PancakeSwap V2 BNB Chain's)
+  means a larger live sample will take more real wall-clock time to
+  accumulate, not a code limitation.
+- **No new chains or deployments added this phase** - a deliberate choice
+  (see "Investigated and deliberately not pursued this phase" above), not
+  an oversight or a capability gap discovered and left unfixed.

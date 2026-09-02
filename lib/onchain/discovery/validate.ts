@@ -1,5 +1,7 @@
 import { erc20Abi, parseAbi, type Address } from "viem";
+import { backoffDelay, sleep, type BackoffOptions } from "@/lib/chains/backoff";
 import { withResilientClient } from "@/lib/chains/rpc-resilient-client";
+import { logger } from "@/lib/observability/logger";
 import { checkBlockHashStillCanonical, readBlockHashOnChain, type ReorgCheckResult } from "@/lib/onchain/reorg";
 import { CALCULATION_SCALE } from "@/lib/onchain/volume/math";
 import type { FactoryDeployment } from "./config";
@@ -188,6 +190,145 @@ function decodeCandidateReadAt(results: { status: "success" | "failure"; result?
   };
 }
 
+// Phase 5.11 fix: a live-confirmed false rejection. A per-sub-call failure
+// WITHIN an otherwise-successful multicall (the shape multicall3's own
+// `allowFailure: true` design surfaces, not a thrown/transport error) was
+// always treated as a deterministic, terminal fact by resolveValidationOutcome
+// - "factory() read failed" -> rejected, no different from a contract that
+// genuinely doesn't implement the interface. Live-reproduced during this
+// phase's own development against a real, freshly-discovered PancakeSwap V2
+// pool: the multicall's own factory() sub-call came back "failure", so the
+// pool was rejected - but calling factory() directly immediately afterward
+// (both through the SAME RPC endpoint and cross-checked through a
+// completely different, independent provider) returned the exact real,
+// canonical PancakeSwap V2 Factory address. The contract was never
+// malformed. Root cause, narrowed down across two separate live
+// reproductions this same phase: the first showed a brief read-after-write
+// gap for a contract created moments earlier in the very same run
+// (discovery and validation can run back-to-back for a freshly-discovered
+// candidate); a second, more severe reproduction (13/13 candidates in one
+// page all rejected the same way) coincided with the SAME provider
+// returning an explicit "Public endpoint rate limit" error on direct
+// follow-up calls - a decentralized RPC aggregator's free tier under
+// sustained load, not a per-contract timing fluke. Multicall3's own
+// aggregate3 pattern gives no way to distinguish these two causes from
+// inside one decoded sub-call result (a reverted call and a rate-limited
+// call both just come back `status: "failure"`, with no reason payload
+// surfaced) - this retry treats both the same way, on the theory that
+// EITHER cause is plausibly resolved by waiting and asking again, while a
+// genuinely malformed contract is not, and still ends up correctly
+// rejected once the bounded budget below is exhausted. Not a scenario the
+// pre-existing canonical-block-only retry logic (Phase 5.10's own
+// accepted/rejected/retry redesign) covered, since that only guards the
+// CREATION EVENT'S canonicality, not the pool's own required-field reads.
+//
+// `token0Symbol`/`token1Symbol` are deliberately excluded - best-effort
+// only (see buildValidationMulticallCalls' own comment), never validated or
+// retried on.
+function hasIncompleteRequiredFields(decoded: DecodedCandidateRead): boolean {
+  return decoded.onchainFactory == null || decoded.onchainToken0 == null || decoded.onchainToken1 == null || !decoded.reservesCallSucceeded;
+}
+
+// CodeRabbit/PR #19 review round: retryIncompleteDecodes previously
+// replaced a candidate's WHOLE decoded record with whatever the latest
+// retry attempt produced, even though that retry only re-queries the
+// fields still missing at the time it was issued (never a field that had
+// already succeeded - buildValidationMulticallCalls has no way to ask for
+// "only factory()"). Since every retry re-reads all CALLS_PER_CANDIDATE
+// sub-calls for a candidate, a field that already succeeded on an earlier
+// attempt could come back "failure" on a LATER retry (the same
+// per-sub-call flakiness this whole retry mechanism exists to route
+// around) and silently overwrite the earlier success with a fresh
+// incomplete read - erasing genuine progress and risking an incorrect
+// terminal rejection for a field that was, in fact, already confirmed.
+// This merge is per-field monotonic: a field's most recent SUCCESSFUL
+// read wins, and a field that has never succeeded stays unresolved -
+// never the other way around. `resolveValidationOutcome` is always given
+// this merged, best-known-so-far record, never a single attempt's raw
+// decode in isolation.
+export function mergeCandidateReads(previous: DecodedCandidateRead, next: DecodedCandidateRead): DecodedCandidateRead {
+  return {
+    onchainToken0: next.onchainToken0 ?? previous.onchainToken0,
+    onchainToken1: next.onchainToken1 ?? previous.onchainToken1,
+    onchainFactory: next.onchainFactory ?? previous.onchainFactory,
+    // Monotonic OR, not overwrite - once a real getReserves() success has
+    // been observed, no later attempt's failure can un-observe it.
+    reservesCallSucceeded: previous.reservesCallSucceeded || next.reservesCallSucceeded,
+    // decodeCandidateReadAt sets these to `undefined` (never `null`) on a
+    // failed sub-call, and a genuinely successful decimals() read is never
+    // itself `undefined` - so "!== undefined" is an exact, safe test for
+    // "this attempt actually read it."
+    token0Decimals: next.token0Decimals !== undefined ? next.token0Decimals : previous.token0Decimals,
+    token1Decimals: next.token1Decimals !== undefined ? next.token1Decimals : previous.token1Decimals,
+    token0Symbol: next.token0Symbol ?? previous.token0Symbol,
+    token1Symbol: next.token1Symbol ?? previous.token1Symbol,
+  };
+}
+
+// Bounded: up to this many EXTRA multicall attempts (beyond the first) for
+// candidates whose required-field reads came back incomplete - a genuinely
+// malformed contract fails identically every attempt and is still
+// correctly rejected once this budget is exhausted. The backoff window is
+// sized for the RATE-LIMIT cause specifically (see this function's own
+// comment above) - a request-volume-based throttle needs real wall-clock
+// time to reset, not just a quick retry, so this is deliberately more
+// generous than a typical transient-network retry (contrast
+// SHRINK_BACKOFF-style windows elsewhere in this app, sized for a single
+// dropped request). Still bounded (Section 21's "no infinite retry
+// loops") - candidates still incomplete after this budget flow through to
+// resolveValidationOutcome exactly as before, using whatever the LAST
+// attempt decoded. Only ever adds latency for the (typically small)
+// subset of a page with an incomplete first decode - a page where every
+// candidate decoded cleanly never touches this budget at all.
+const MAX_DECODE_RETRY_ATTEMPTS = 3;
+const DECODE_RETRY_BACKOFF: BackoffOptions = { baseDelayMs: 500, maxDelayMs: 5000 };
+
+// Re-multicalls ONLY the candidates whose decode is still incomplete (never
+// the whole page again - most candidates in a real batch succeed on the
+// first attempt, and re-querying them too would be pure waste), merging
+// each retry's own decode back into `decodedResults` by reference. A
+// retry-multicall THROW (a genuine transport/provider failure, distinct
+// from a per-sub-call "failure" status) stops the retry loop early rather
+// than treating it as "no improvement, try again" - the already-decoded
+// (incomplete) result for those candidates is left as-is and flows through
+// to resolveValidationOutcome unchanged, the same outcome as before this
+// fix existed.
+async function retryIncompleteDecodes(deployment: FactoryDeployment, candidates: readonly DecodedPairCreated[], decodedResults: DecodedCandidateRead[]): Promise<void> {
+  let pendingIndexes = candidates.map((_, i) => i).filter((i) => hasIncompleteRequiredFields(decodedResults[i]));
+
+  for (let attempt = 1; attempt <= MAX_DECODE_RETRY_ATTEMPTS && pendingIndexes.length > 0; attempt++) {
+    await sleep(backoffDelay(attempt, DECODE_RETRY_BACKOFF));
+
+    const retryCandidates = pendingIndexes.map((i) => candidates[i]);
+    let retryResults: { status: "success" | "failure"; result?: unknown }[];
+    try {
+      const retryCalls = buildValidationMulticallCalls(retryCandidates);
+      retryResults = await withResilientClient(deployment.chainSlug, (client) => client.multicall({ contracts: retryCalls, allowFailure: true }));
+    } catch {
+      break; // transport-level failure - stop retrying, leave the last known decode as-is
+    }
+
+    const stillPending: number[] = [];
+    for (let j = 0; j < pendingIndexes.length; j++) {
+      const originalIndex = pendingIndexes[j];
+      const retryDecoded = decodeCandidateReadAt(retryResults, j);
+      const merged = mergeCandidateReads(decodedResults[originalIndex], retryDecoded);
+      decodedResults[originalIndex] = merged;
+      if (hasIncompleteRequiredFields(merged)) {
+        stillPending.push(originalIndex);
+      } else {
+        logger.info("pool discovery: a required-field validation read that initially failed succeeded on retry - a real pool, not rejected", {
+          component: "onchain-discovery",
+          deployment: deployment.key,
+          pool: retryCandidates[j].poolAddress,
+          attempt,
+        });
+      }
+    }
+    pendingIndexes = stillPending;
+  }
+}
+
 // RPC-touching orchestration for a WHOLE PAGE of candidates: exactly ONE
 // multicall round-trip covering every candidate's own CALLS_PER_CANDIDATE
 // reads (buildValidationMulticallCalls already flattens candidates this
@@ -249,6 +390,12 @@ export async function validateDiscoveredPoolsBatch(
     const message = err instanceof Error ? err.message : String(err);
     return candidates.map(() => ({ status: "retry" as const, reason: `on-chain validation read failed: ${message}` }));
   }
+
+  // See retryIncompleteDecodes' own comment - live-confirmed false
+  // rejections from per-sub-call multicall failures that succeed on a
+  // direct retry (a decentralized RPC aggregator's own read-after-write
+  // lag for a just-created contract, not a genuinely malformed pool).
+  await retryIncompleteDecodes(deployment, candidates, decodedResults);
 
   return candidates.map((candidate, i) => resolveValidationOutcome(deployment, candidate, decodedResults[i], canonicalChecks[i].status));
 }

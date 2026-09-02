@@ -2,7 +2,6 @@ import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, discoveredPools } from "@/lib/database/schema";
 import type { FactoryDeployment } from "./config";
-import type { DecodedPairCreated } from "./scan";
 
 export interface DiscoveredPoolRow {
   id: string;
@@ -12,11 +11,34 @@ export interface DiscoveredPoolRow {
   poolAddress: string;
   token0Address: string;
   token1Address: string;
+  // Phase 5.11: V3-only, null for every V2 row - see schema.ts's own
+  // discoveredPools.feeTier comment for why this can't live in
+  // FactoryDeployment the way V2's feeBps does.
+  feeTier: number | null;
   creationBlockNumber: string;
   creationBlockHash: string;
   creationTransactionHash: string;
   creationLogIndex: number;
   status: "discovered" | "active" | "rejected";
+}
+
+// A discovered-candidate shape wide enough for BOTH decoders in scan.ts -
+// DecodedPairCreated (V2, no feeTier) and DecodedPoolCreated (V3, has
+// feeTier) both satisfy this structurally, so recordDiscoveredPools stays
+// a single function rather than needing a V2/V3-specific copy just to
+// change which fields get read. Deliberately declared here rather than
+// importing either concrete type from scan.ts - this function only cares
+// about "does this candidate carry a fee tier," not which protocol
+// produced it.
+export interface RecordableDiscoveredCandidate {
+  token0: string;
+  token1: string;
+  poolAddress: string;
+  feeTier?: number;
+  blockNumber: bigint;
+  blockHash: string;
+  transactionHash: string;
+  logIndex: number;
 }
 
 // Idempotent batch upsert, targeting discovered_pools_chain_address_unique
@@ -43,7 +65,7 @@ export interface DiscoveredPoolRow {
 // benefit (re-validating an already-correctly-rejected pool is a wasted
 // RPC round-trip at worst, never a correctness risk). An "active" or
 // already-"discovered" row is never touched by this upsert.
-export async function recordDiscoveredPools(chainId: string, deployment: FactoryDeployment, candidates: readonly DecodedPairCreated[]): Promise<number> {
+export async function recordDiscoveredPools(chainId: string, deployment: FactoryDeployment, candidates: readonly RecordableDiscoveredCandidate[]): Promise<number> {
   if (candidates.length === 0) return 0;
 
   const rows = await db
@@ -68,6 +90,14 @@ export async function recordDiscoveredPools(chainId: string, deployment: Factory
         poolAddress: c.poolAddress.toLowerCase(),
         token0Address: c.token0.toLowerCase(),
         token1Address: c.token1.toLowerCase(),
+        // undefined (V2 candidates - no feeTier field at all) must become
+        // an explicit null, never silently omitted - drizzle would
+        // otherwise fall through to the column's own default, and this
+        // column has none, so the distinction doesn't matter today, but an
+        // explicit null here is the same "never let a missing field mean
+        // something implicit" discipline this file's other nullable writes
+        // already follow.
+        feeTier: c.feeTier ?? null,
         creationBlockNumber: c.blockNumber.toString(),
         creationBlockHash: c.blockHash,
         creationTransactionHash: c.transactionHash,
@@ -81,6 +111,7 @@ export async function recordDiscoveredPools(chainId: string, deployment: Factory
         creationBlockHash: sql`excluded.creation_block_hash`,
         creationTransactionHash: sql`excluded.creation_transaction_hash`,
         creationLogIndex: sql`excluded.creation_log_index`,
+        feeTier: sql`excluded.fee_tier`,
         status: "discovered",
         rejectionReason: null,
         validatedAt: null,
@@ -120,6 +151,7 @@ export async function getPendingDiscoveredPools(deploymentKey: string, limit: nu
       poolAddress: discoveredPools.poolAddress,
       token0Address: discoveredPools.token0Address,
       token1Address: discoveredPools.token1Address,
+      feeTier: discoveredPools.feeTier,
       creationBlockNumber: discoveredPools.creationBlockNumber,
       creationBlockHash: discoveredPools.creationBlockHash,
       creationTransactionHash: discoveredPools.creationTransactionHash,
@@ -156,6 +188,7 @@ export interface ActiveDiscoveredPool {
   poolAddress: string;
   token0Address: string;
   token1Address: string;
+  feeTier: number | null;
   token0Decimals: number;
   token1Decimals: number;
   token0Symbol: string | null;
@@ -179,6 +212,7 @@ export async function getActiveDiscoveredPools(): Promise<ActiveDiscoveredPool[]
       poolAddress: discoveredPools.poolAddress,
       token0Address: discoveredPools.token0Address,
       token1Address: discoveredPools.token1Address,
+      feeTier: discoveredPools.feeTier,
       token0Decimals: discoveredPools.token0Decimals,
       token1Decimals: discoveredPools.token1Decimals,
       token0Symbol: discoveredPools.token0Symbol,

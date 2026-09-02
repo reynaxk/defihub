@@ -26,7 +26,8 @@ vi.mock("@/lib/chains/rpc-resilient-client", async (importActual) => {
   };
 });
 
-const { buildValidationMulticallCalls, CALLS_PER_CANDIDATE, isValidTokenDecimals, resolveValidationOutcome, validateDiscoveredPool, validateDiscoveredPoolsBatch } = await import("./validate");
+const { buildValidationMulticallCalls, CALLS_PER_CANDIDATE, isValidTokenDecimals, mergeCandidateReads, resolveValidationOutcome, validateDiscoveredPool, validateDiscoveredPoolsBatch } =
+  await import("./validate");
 
 // mockMulticall is shared module-wide (real production code path calls
 // withResilientClient once per multicall - this mock stands in for that
@@ -196,16 +197,21 @@ describe("resolveValidationOutcome", () => {
   });
 });
 
-function successfulMulticallResults() {
+// Matches decodeCandidateReadAt's own (deliberately loose) parameter type
+// in validate.ts - a mocked multicall response only ever needs `status`
+// and `result`, never viem's full per-item error/gas-used shape.
+type MockMulticallResult = { status: "success" | "failure"; result?: unknown };
+
+function successfulMulticallResults(): MockMulticallResult[] {
   return [
-    { status: "success" as const, result: CANDIDATE.token0 },
-    { status: "success" as const, result: CANDIDATE.token1 },
-    { status: "success" as const, result: DEPLOYMENT.factoryAddress },
-    { status: "success" as const, result: [BigInt(1), BigInt(1), 0] },
-    { status: "success" as const, result: 18 },
-    { status: "success" as const, result: 18 },
-    { status: "success" as const, result: "TOK0" },
-    { status: "success" as const, result: "WBNB" },
+    { status: "success", result: CANDIDATE.token0 },
+    { status: "success", result: CANDIDATE.token1 },
+    { status: "success", result: DEPLOYMENT.factoryAddress },
+    { status: "success", result: [BigInt(1), BigInt(1), 0] },
+    { status: "success", result: 18 },
+    { status: "success", result: 18 },
+    { status: "success", result: "TOK0" },
+    { status: "success", result: "WBNB" },
   ];
 }
 
@@ -344,5 +350,217 @@ describe("validateDiscoveredPoolsBatch - Phase 5.10: one multicall for a whole p
     const [batched] = await validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash);
 
     expect(single).toEqual(batched);
+  });
+});
+
+describe("validateDiscoveredPoolsBatch - Phase 5.11: bounded retry for a per-sub-call multicall failure", () => {
+  function candidateAt(index: number): DecodedPairCreated {
+    return { ...CANDIDATE, poolAddress: `0x${index.toString().padStart(40, "0")}`, logIndex: CANDIDATE.logIndex + index };
+  }
+
+  // A multicall response with the factory() sub-call (index 2) reporting
+  // "failure" within an otherwise-successful multicall - the exact shape
+  // live-observed against a real, freshly-discovered PancakeSwap V2 pool
+  // whose factory() call succeeded moments later when queried directly
+  // (both through the same RPC endpoint and cross-checked through a
+  // completely different, independent provider) - see this fix's own
+  // module comment in validate.ts.
+  function incompleteMulticallResults(): MockMulticallResult[] {
+    const results = successfulMulticallResults();
+    results[2] = { status: "failure" };
+    return results;
+  }
+
+  it("REGRESSION: a candidate whose factory() read fails on the first multicall but succeeds on retry is accepted, never falsely rejected", async () => {
+    mockMulticall.mockResolvedValueOnce(incompleteMulticallResults()).mockResolvedValueOnce(successfulMulticallResults());
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    vi.useFakeTimers();
+    const outcomePromise = validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash, new Map());
+    await vi.runAllTimersAsync();
+    const [outcome] = await outcomePromise;
+    vi.useRealTimers();
+
+    expect(mockMulticall).toHaveBeenCalledTimes(2);
+    expect(outcome.status).toBe("accepted");
+  });
+
+  it("still rejects a candidate whose required-field reads fail consistently across the whole retry budget - a genuinely malformed contract is not retried forever", async () => {
+    mockMulticall.mockResolvedValue(incompleteMulticallResults());
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    vi.useFakeTimers();
+    const outcomePromise = validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash, new Map());
+    await vi.runAllTimersAsync();
+    const [outcome] = await outcomePromise;
+    vi.useRealTimers();
+
+    // 1 initial attempt + MAX_DECODE_RETRY_ATTEMPTS (3) retries = 4 total.
+    expect(mockMulticall).toHaveBeenCalledTimes(4);
+    expect(outcome.status).toBe("rejected");
+    expect((outcome as { reason: string }).reason).toContain("factory()");
+  });
+
+  it("only re-queries the SPECIFIC candidates with an incomplete decode on retry, not the whole page", async () => {
+    const candidates = [candidateAt(0), candidateAt(1), candidateAt(2)];
+    // Only candidate 1 (the middle one) has an incomplete first decode.
+    const firstAttempt = [...successfulMulticallResults(), ...incompleteMulticallResults(), ...successfulMulticallResults()];
+    mockMulticall.mockResolvedValueOnce(firstAttempt).mockResolvedValueOnce(successfulMulticallResults());
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    vi.useFakeTimers();
+    const outcomesPromise = validateDiscoveredPoolsBatch(DEPLOYMENT, candidates, readBlockHash, new Map());
+    await vi.runAllTimersAsync();
+    const outcomes = await outcomesPromise;
+    vi.useRealTimers();
+
+    expect(mockMulticall).toHaveBeenCalledTimes(2);
+    // The retry's own multicall covers exactly ONE candidate's worth of
+    // calls, not all three - proof the other two, already-complete
+    // candidates were never re-queried.
+    const retryCallArgs = mockMulticall.mock.calls[1][0] as { contracts: unknown[] };
+    expect(retryCallArgs.contracts).toHaveLength(CALLS_PER_CANDIDATE);
+    expect(outcomes.every((o) => o.status === "accepted")).toBe(true);
+  });
+
+  it("a retry-multicall transport failure stops the retry loop - the candidate keeps its original (incomplete) decode and is still correctly rejected, never stuck retrying", async () => {
+    mockMulticall.mockResolvedValueOnce(incompleteMulticallResults()).mockRejectedValueOnce(new Error("provider unavailable"));
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    vi.useFakeTimers();
+    const outcomePromise = validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash, new Map());
+    await vi.runAllTimersAsync();
+    const [outcome] = await outcomePromise;
+    vi.useRealTimers();
+
+    expect(mockMulticall).toHaveBeenCalledTimes(2); // initial + the one failed retry attempt, then it gave up
+    expect(outcome.status).toBe("rejected");
+  });
+
+  it("never retries a candidate whose ONLY incomplete field is the best-effort symbol() reads - symbols are never validated or retried on", async () => {
+    const results = successfulMulticallResults();
+    results[6] = { status: "failure" }; // token0Symbol
+    results[7] = { status: "failure" }; // token1Symbol
+    mockMulticall.mockResolvedValue(results);
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    const [outcome] = await validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash, new Map());
+
+    expect(mockMulticall).toHaveBeenCalledTimes(1); // no retry attempted at all
+    expect(outcome.status).toBe("accepted");
+    if (outcome.status === "accepted") {
+      expect(outcome.token0Symbol).toBeNull();
+      expect(outcome.token1Symbol).toBeNull();
+    }
+  });
+});
+
+// PR #19 review round (CodeRabbit + manual review): retryIncompleteDecodes
+// previously replaced a candidate's WHOLE decoded record with whatever the
+// latest retry attempt produced - so a field that had already succeeded on
+// an earlier attempt could be silently erased if that SAME field happened
+// to fail on a later retry (every retry re-reads every pending field, it
+// can't ask for "only the fields still missing"). mergeCandidateReads fixes
+// this: a field's most recent SUCCESSFUL read wins, and a field is only
+// ever "still incomplete" if it has NEVER succeeded across any attempt.
+describe("mergeCandidateReads - PR #19: per-field monotonic merge across retry attempts", () => {
+  it("attempt 1 has factory/token0/token1 but reserves fails; attempt 2 has reserves but a PREVIOUSLY-SUCCESSFUL field (token0) fails again -> the merged result retains every field that ever succeeded", () => {
+    const attempt1 = decoded({ reservesCallSucceeded: false });
+    const attempt2 = decoded({ onchainToken0: null, token0Decimals: undefined, token0Symbol: null }); // token0 (and its decimals/symbol) flake on this attempt; reserves now succeeds
+
+    const merged = mergeCandidateReads(attempt1, attempt2);
+
+    expect(merged).toEqual(
+      decoded({
+        reservesCallSucceeded: true, // taken from attempt2, the attempt that actually succeeded at it
+        // token0 (address/decimals/symbol) preserved from attempt1 even
+        // though attempt2's own read of it failed - this is the exact
+        // erasure the old "replace wholesale" code was vulnerable to.
+      }),
+    );
+  });
+
+  it("attempt 1 has some successful fields; every later attempt is fully incomplete -> the attempt-1 successes remain in the final merged result", () => {
+    const attempt1 = decoded({ reservesCallSucceeded: false });
+    const allIncomplete: DecodedCandidateRead = {
+      onchainToken0: null,
+      onchainToken1: null,
+      onchainFactory: null,
+      reservesCallSucceeded: false,
+      token0Decimals: undefined,
+      token1Decimals: undefined,
+      token0Symbol: null,
+      token1Symbol: null,
+    };
+
+    let merged = attempt1;
+    for (let i = 0; i < 3; i++) {
+      merged = mergeCandidateReads(merged, allIncomplete);
+    }
+
+    // token0/token1/factory/decimals/symbols all came from attempt 1 and
+    // were never re-confirmed - none of that is lost just because every
+    // later attempt came back empty. Only reservesCallSucceeded, which
+    // never succeeded on ANY attempt, correctly stays false.
+    expect(merged).toEqual(decoded({ reservesCallSucceeded: false }));
+  });
+
+  it("a field that has never succeeded on any attempt stays unresolved (never fabricated as a fallback)", () => {
+    const attempt1 = decoded({ onchainFactory: null });
+    const attempt2 = decoded({ onchainFactory: null, onchainToken0: null });
+
+    const merged = mergeCandidateReads(attempt1, attempt2);
+
+    expect(merged.onchainFactory).toBeNull();
+    expect(merged.onchainToken1).toBe(CANDIDATE.token1); // succeeded both times, still present
+  });
+});
+
+describe("validateDiscoveredPoolsBatch - PR #19: end-to-end proof the retry loop uses the merged result, not the last attempt alone", () => {
+  it("a field that succeeded on the initial multicall but fails again on the ONLY retry attempt still resolves to 'accepted', exiting the retry loop early instead of burning the whole budget", async () => {
+    const initial = successfulMulticallResults();
+    initial[3] = { status: "failure" }; // getReserves fails; token0/token1/factory all succeed
+
+    const retry = successfulMulticallResults();
+    retry[0] = { status: "failure" }; // token0 flakes on retry; reserves now succeeds
+
+    mockMulticall.mockResolvedValueOnce(initial).mockResolvedValueOnce(retry);
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    vi.useFakeTimers();
+    const outcomePromise = validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash, new Map());
+    await vi.runAllTimersAsync();
+    const [outcome] = await outcomePromise;
+    vi.useRealTimers();
+
+    // Without the merge fix, the retry's own token0 failure would have
+    // wholesale-overwritten the initial attempt's token0 success, leaving
+    // the candidate "still incomplete" and consuming the full 4-call
+    // budget before an incorrect rejection. With the fix, the merge
+    // recognizes every required field has now succeeded at least once and
+    // stops after exactly one retry.
+    expect(mockMulticall).toHaveBeenCalledTimes(2);
+    expect(outcome.status).toBe("accepted");
+  });
+
+  it("a transport-level failure DURING a retry never erases the previous attempt's successful fields - the candidate is rejected for the field that's genuinely still missing, not for one it had already confirmed", async () => {
+    const initial = successfulMulticallResults();
+    initial[0] = { status: "failure" }; // token0 fails; factory/token1/reserves all succeed on the initial read
+
+    mockMulticall.mockResolvedValueOnce(initial).mockRejectedValueOnce(new Error("provider unavailable"));
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    vi.useFakeTimers();
+    const outcomePromise = validateDiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash, new Map());
+    await vi.runAllTimersAsync();
+    const [outcome] = await outcomePromise;
+    vi.useRealTimers();
+
+    expect(mockMulticall).toHaveBeenCalledTimes(2); // initial + the one failed retry attempt, then it gave up
+    expect(outcome.status).toBe("rejected");
+    // Rejected specifically for the still-missing token0/token1 read, NOT
+    // "factory() read failed" - proof the initial attempt's genuine
+    // factory() success was never erased by the aborted retry.
+    expect((outcome as { reason: string }).reason).toContain("token0()/token1() read failed");
   });
 });

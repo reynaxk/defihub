@@ -36,8 +36,8 @@ export default async function NativeCoveragePage() {
       <MetricHeader eyebrow="Native TVL" value={formatUsd(summary.totalNativeTvlUsd, { compact: false })} label={`across ${formatNumber(summary.nativeTvlPoolCount)} fully native pools`} className="mt-6" />
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <StatTile label="Native volume (latest)" value={formatUsd(summary.totalNativeVolumeUsd24hEquivalent, { compact: false })} />
-        <StatTile label="Native fees (latest)" value={formatUsd(summary.totalNativeFeesUsd24hEquivalent, { compact: false })} />
+        <StatTile label="Native volume (latest observation)" value={formatUsd(summary.totalNativeVolumeUsdLatest, { compact: false })} />
+        <StatTile label="Native fees (latest observation)" value={formatUsd(summary.totalNativeFeesUsdLatest, { compact: false })} />
         <StatTile label="Indexed pools (native volume)" value={formatNumber(summary.indexedPoolCount)} />
         <StatTile label="Fully native TVL pools" value={formatNumber(summary.nativeTvlPoolCount)} />
       </div>

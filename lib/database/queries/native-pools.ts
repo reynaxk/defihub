@@ -256,8 +256,16 @@ export interface NativeCoverageSummary {
   nativeTvlPoolCount: number;
   hybridTvlPoolCount: number;
   externalTvlPoolCount: number;
-  totalNativeVolumeUsd24hEquivalent: number; // sum of each pool's OWN latest volume_usd observation - always fully native, see this function's own comment
-  totalNativeFeesUsd24hEquivalent: number;
+  // Named for what this actually is - the sum of each pool's OWN single
+  // latest volume_usd/fees_usd observation, never a rolling 24h window
+  // (this app doesn't bucket by trailing 24h anywhere in the native
+  // pipeline - see getDailyVolumeHistory's own UTC calendar-day buckets
+  // for the closest such concept, which this is NOT). An earlier version
+  // named these fields "...24hEquivalent," implying a time window this
+  // number was never actually computed over - always fully native, see
+  // this function's own comment.
+  totalNativeVolumeUsdLatest: number;
+  totalNativeFeesUsdLatest: number;
   indexedPoolCount: number; // pools with >=1 volume_usd/fees_usd observation
   pools: NativelyTrackedPoolSummary[];
 }
@@ -357,8 +365,8 @@ export async function getNativeCoverageSummary(): Promise<NativeCoverageSummary>
     nativeTvlPoolCount: nativeTvlPools.length,
     hybridTvlPoolCount: hybridTvlPools.length,
     externalTvlPoolCount: externalTvlPools.length,
-    totalNativeVolumeUsd24hEquivalent: indexedPools.reduce((sum, p) => sum + (p.latestVolumeUsd ?? 0), 0),
-    totalNativeFeesUsd24hEquivalent: indexedPools.reduce((sum, p) => sum + (p.latestFeesUsd ?? 0), 0),
+    totalNativeVolumeUsdLatest: indexedPools.reduce((sum, p) => sum + (p.latestVolumeUsd ?? 0), 0),
+    totalNativeFeesUsdLatest: indexedPools.reduce((sum, p) => sum + (p.latestFeesUsd ?? 0), 0),
     indexedPoolCount: indexedPools.length,
     pools: perPool,
   };

@@ -366,7 +366,7 @@ describe("native-pools query layer", () => {
   });
 
   describe("getNativeCoverageSummary - Part 5 aggregation", () => {
-    it("sums totalNativeTvlUsd/totalNativeVolumeUsd24hEquivalent only across pools with real observations - never counts a pool with no data as $0", async () => {
+    it("sums totalNativeTvlUsd/totalNativeVolumeUsdLatest only across pools with real observations - never counts a pool with no data as $0", async () => {
       const a = await makeChainAndPool({ protocolName: `Protocol A ${randomUUID()}` });
       const b = await makeChainAndPool({ protocolName: `Protocol B ${randomUUID()}` });
       // A third pool with genuinely no native data at all - proves it's

@@ -104,8 +104,8 @@ export default async function PoolDetailPage({ params }: { params: Promise<{ cha
       />
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <MetricTile label="24h-equivalent volume" metric={volume} formatValue={(v) => formatUsd(v, { compact: false })} />
-        <MetricTile label="24h-equivalent fees" metric={fees} formatValue={(v) => formatUsd(v, { compact: false })} />
+        <MetricTile label="Native volume (latest observation)" metric={volume} formatValue={(v) => formatUsd(v, { compact: false })} />
+        <MetricTile label="Native fees (latest observation)" metric={fees} formatValue={(v) => formatUsd(v, { compact: false })} />
         <StatTile label="Swaps indexed" value={formatNumber(swapCount)} />
         <StatTile label="TVL observations" value={observationCount > 0 ? `${formatNumber(observationCount)} since ${earliestObservedAt ? formatDistanceToNow(earliestObservedAt, { addSuffix: true }) : "—"}` : "0"} />
       </div>

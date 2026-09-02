@@ -229,6 +229,42 @@ function hasIncompleteRequiredFields(decoded: DecodedCandidateRead): boolean {
   return decoded.onchainFactory == null || decoded.onchainToken0 == null || decoded.onchainToken1 == null || !decoded.reservesCallSucceeded;
 }
 
+// CodeRabbit/PR #19 review round: retryIncompleteDecodes previously
+// replaced a candidate's WHOLE decoded record with whatever the latest
+// retry attempt produced, even though that retry only re-queries the
+// fields still missing at the time it was issued (never a field that had
+// already succeeded - buildValidationMulticallCalls has no way to ask for
+// "only factory()"). Since every retry re-reads all CALLS_PER_CANDIDATE
+// sub-calls for a candidate, a field that already succeeded on an earlier
+// attempt could come back "failure" on a LATER retry (the same
+// per-sub-call flakiness this whole retry mechanism exists to route
+// around) and silently overwrite the earlier success with a fresh
+// incomplete read - erasing genuine progress and risking an incorrect
+// terminal rejection for a field that was, in fact, already confirmed.
+// This merge is per-field monotonic: a field's most recent SUCCESSFUL
+// read wins, and a field that has never succeeded stays unresolved -
+// never the other way around. `resolveValidationOutcome` is always given
+// this merged, best-known-so-far record, never a single attempt's raw
+// decode in isolation.
+export function mergeCandidateReads(previous: DecodedCandidateRead, next: DecodedCandidateRead): DecodedCandidateRead {
+  return {
+    onchainToken0: next.onchainToken0 ?? previous.onchainToken0,
+    onchainToken1: next.onchainToken1 ?? previous.onchainToken1,
+    onchainFactory: next.onchainFactory ?? previous.onchainFactory,
+    // Monotonic OR, not overwrite - once a real getReserves() success has
+    // been observed, no later attempt's failure can un-observe it.
+    reservesCallSucceeded: previous.reservesCallSucceeded || next.reservesCallSucceeded,
+    // decodeCandidateReadAt sets these to `undefined` (never `null`) on a
+    // failed sub-call, and a genuinely successful decimals() read is never
+    // itself `undefined` - so "!== undefined" is an exact, safe test for
+    // "this attempt actually read it."
+    token0Decimals: next.token0Decimals !== undefined ? next.token0Decimals : previous.token0Decimals,
+    token1Decimals: next.token1Decimals !== undefined ? next.token1Decimals : previous.token1Decimals,
+    token0Symbol: next.token0Symbol ?? previous.token0Symbol,
+    token1Symbol: next.token1Symbol ?? previous.token1Symbol,
+  };
+}
+
 // Bounded: up to this many EXTRA multicall attempts (beyond the first) for
 // candidates whose required-field reads came back incomplete - a genuinely
 // malformed contract fails identically every attempt and is still
@@ -276,8 +312,9 @@ async function retryIncompleteDecodes(deployment: FactoryDeployment, candidates:
     for (let j = 0; j < pendingIndexes.length; j++) {
       const originalIndex = pendingIndexes[j];
       const retryDecoded = decodeCandidateReadAt(retryResults, j);
-      decodedResults[originalIndex] = retryDecoded;
-      if (hasIncompleteRequiredFields(retryDecoded)) {
+      const merged = mergeCandidateReads(decodedResults[originalIndex], retryDecoded);
+      decodedResults[originalIndex] = merged;
+      if (hasIncompleteRequiredFields(merged)) {
         stillPending.push(originalIndex);
       } else {
         logger.info("pool discovery: a required-field validation read that initially failed succeeded on retry - a real pool, not rejected", {

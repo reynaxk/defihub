@@ -23,7 +23,7 @@ vi.mock("@/lib/chains/rpc-resilient-client", async (importActual) => {
   };
 });
 
-const { buildV3ValidationMulticallCalls, CALLS_PER_V3_CANDIDATE, resolveV3ValidationOutcome, validateV3DiscoveredPoolsBatch } = await import("./validate-v3");
+const { buildV3ValidationMulticallCalls, CALLS_PER_V3_CANDIDATE, mergeV3CandidateReads, resolveV3ValidationOutcome, validateV3DiscoveredPoolsBatch } = await import("./validate-v3");
 
 beforeEach(() => {
   mockMulticall.mockReset();
@@ -220,5 +220,84 @@ describe("validateV3DiscoveredPoolsBatch - one multicall for a whole page", () =
     await validateV3DiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE, candidateB], readBlockHash, cache);
 
     expect(readBlockHash).toHaveBeenCalledTimes(1);
+  });
+});
+
+// PR #19 review round - the V3 twin of the same fix/tests in validate.test.ts.
+// mergeV3CandidateReads must never let a field that already succeeded on an
+// earlier attempt be erased by a later retry's failure of that SAME field.
+describe("mergeV3CandidateReads - PR #19: per-field monotonic merge across retry attempts", () => {
+  it("attempt 1 has factory/token0/token1 but liquidity() fails; attempt 2 has liquidity() but a PREVIOUSLY-SUCCESSFUL field (fee) fails again -> the merged result retains every field that ever succeeded", () => {
+    const attempt1 = decoded({ liquidityCallSucceeded: false });
+    const attempt2 = decoded({ onchainFeeTier: null, liquidityCallSucceeded: true }); // fee() flakes this time; liquidity() now succeeds
+
+    const merged = mergeV3CandidateReads(attempt1, attempt2);
+
+    expect(merged).toEqual(decoded({ liquidityCallSucceeded: true })); // fee preserved from attempt1, liquidity taken from attempt2
+  });
+
+  it("attempt 1 has some successful fields; every later attempt is fully incomplete -> the attempt-1 successes remain in the final merged result", () => {
+    const attempt1 = decoded({ liquidityCallSucceeded: false });
+    const allIncomplete: DecodedV3CandidateRead = {
+      onchainToken0: null,
+      onchainToken1: null,
+      onchainFactory: null,
+      onchainFeeTier: null,
+      liquidityCallSucceeded: false,
+      token0Decimals: undefined,
+      token1Decimals: undefined,
+      token0Symbol: null,
+      token1Symbol: null,
+    };
+
+    let merged = attempt1;
+    for (let i = 0; i < 3; i++) {
+      merged = mergeV3CandidateReads(merged, allIncomplete);
+    }
+
+    expect(merged).toEqual(decoded({ liquidityCallSucceeded: false }));
+  });
+});
+
+describe("validateV3DiscoveredPoolsBatch - PR #19: end-to-end proof the retry loop uses the merged result, not the last attempt alone", () => {
+  it("a field that succeeded on the initial multicall but fails again on the ONLY retry attempt still resolves to 'accepted', exiting the retry loop early instead of burning the whole budget", async () => {
+    const initial = successfulMulticallResults();
+    initial[4] = { status: "failure" }; // liquidity() fails; token0/token1/factory/fee all succeed
+
+    const retry = successfulMulticallResults();
+    retry[3] = { status: "failure" }; // fee() flakes on retry; liquidity() now succeeds
+
+    mockMulticall.mockResolvedValueOnce(initial).mockResolvedValueOnce(retry);
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    vi.useFakeTimers();
+    const outcomePromise = validateV3DiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash, new Map());
+    await vi.runAllTimersAsync();
+    const [outcome] = await outcomePromise;
+    vi.useRealTimers();
+
+    expect(mockMulticall).toHaveBeenCalledTimes(2);
+    expect(outcome.status).toBe("accepted");
+  });
+
+  it("a transport-level failure DURING a retry never erases the previous attempt's successful fields - the candidate is rejected for the field that's genuinely still missing, not for one it had already confirmed", async () => {
+    const initial = successfulMulticallResults();
+    initial[0] = { status: "failure" }; // token0 fails; factory/token1/fee/liquidity all succeed on the initial read
+
+    mockMulticall.mockResolvedValueOnce(initial).mockRejectedValueOnce(new Error("provider unavailable"));
+    const readBlockHash = vi.fn().mockResolvedValue(CANDIDATE.blockHash);
+
+    vi.useFakeTimers();
+    const outcomePromise = validateV3DiscoveredPoolsBatch(DEPLOYMENT, [CANDIDATE], readBlockHash, new Map());
+    await vi.runAllTimersAsync();
+    const [outcome] = await outcomePromise;
+    vi.useRealTimers();
+
+    expect(mockMulticall).toHaveBeenCalledTimes(2);
+    expect(outcome.status).toBe("rejected");
+    // Rejected for the still-missing token0/token1 read, NOT
+    // "factory() read failed" - proof the initial attempt's genuine
+    // factory() success was never erased by the aborted retry.
+    expect((outcome as { reason: string }).reason).toContain("token0()/token1() read failed");
   });
 });

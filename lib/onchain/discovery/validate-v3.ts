@@ -171,6 +171,29 @@ function hasIncompleteV3RequiredFields(decoded: DecodedV3CandidateRead): boolean
   return decoded.onchainFactory == null || decoded.onchainToken0 == null || decoded.onchainToken1 == null || decoded.onchainFeeTier == null || !decoded.liquidityCallSucceeded;
 }
 
+// The V3 twin of validate.ts's own mergeCandidateReads - same PR #19
+// review-round fix, same rationale (a retry re-reads every sub-call for a
+// pending candidate, so a field that already succeeded on an earlier
+// attempt could come back "failure" on a later one and must never
+// silently erase that earlier success). Per-field monotonic: a field's
+// most recent SUCCESSFUL read wins; a field that has never succeeded
+// stays unresolved.
+export function mergeV3CandidateReads(previous: DecodedV3CandidateRead, next: DecodedV3CandidateRead): DecodedV3CandidateRead {
+  return {
+    onchainToken0: next.onchainToken0 ?? previous.onchainToken0,
+    onchainToken1: next.onchainToken1 ?? previous.onchainToken1,
+    onchainFactory: next.onchainFactory ?? previous.onchainFactory,
+    onchainFeeTier: next.onchainFeeTier ?? previous.onchainFeeTier,
+    // Monotonic OR, not overwrite - once a real liquidity() success has
+    // been observed, no later attempt's failure can un-observe it.
+    liquidityCallSucceeded: previous.liquidityCallSucceeded || next.liquidityCallSucceeded,
+    token0Decimals: next.token0Decimals !== undefined ? next.token0Decimals : previous.token0Decimals,
+    token1Decimals: next.token1Decimals !== undefined ? next.token1Decimals : previous.token1Decimals,
+    token0Symbol: next.token0Symbol ?? previous.token0Symbol,
+    token1Symbol: next.token1Symbol ?? previous.token1Symbol,
+  };
+}
+
 const MAX_DECODE_RETRY_ATTEMPTS = 3;
 const DECODE_RETRY_BACKOFF: BackoffOptions = { baseDelayMs: 500, maxDelayMs: 5000 };
 
@@ -193,8 +216,9 @@ async function retryIncompleteV3Decodes(deployment: UniswapV3FactoryDeployment, 
     for (let j = 0; j < pendingIndexes.length; j++) {
       const originalIndex = pendingIndexes[j];
       const retryDecoded = decodeV3CandidateReadAt(retryResults, j);
-      decodedResults[originalIndex] = retryDecoded;
-      if (hasIncompleteV3RequiredFields(retryDecoded)) {
+      const merged = mergeV3CandidateReads(decodedResults[originalIndex], retryDecoded);
+      decodedResults[originalIndex] = merged;
+      if (hasIncompleteV3RequiredFields(merged)) {
         stillPending.push(originalIndex);
       } else {
         logger.info("pool discovery: a required-field V3 validation read that initially failed succeeded on retry - a real pool, not rejected", {

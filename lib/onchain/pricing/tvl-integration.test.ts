@@ -7,7 +7,7 @@
 // its pure decision logic is - isNativePriceEligibleForTvl was extracted
 // specifically to be that pure decision.
 import { describe, expect, it } from "vitest";
-import { isNativePriceEligibleForTvl, priceSourceForTokens } from "./tvl-integration";
+import { isNativePriceEligibleForTvl, priceLabelForTokens, priceSourceForTokens } from "./tvl-integration";
 import { PRICING_THRESHOLDS } from "./aggregate";
 
 const NOW = new Date("2026-08-26T12:00:00.000Z");
@@ -32,6 +32,39 @@ describe("priceSourceForTokens", () => {
 
   it("falls back to the external provider name for a pool with no tokens at all (unreachable in practice, never throws)", () => {
     expect(priceSourceForTokens([], new Set(), "coingecko")).toBe("coingecko");
+  });
+});
+
+// Phase 5.12: priceLabelForTokens is the enum-typed twin of
+// priceSourceForTokens above, feeding historicalObservations.priceLabel
+// (record-verification.ts) - same three-way classification, same inputs,
+// deliberately tested with the identical scenarios so the two can never
+// silently drift into disagreeing about which pools are native/hybrid/
+// external.
+describe("priceLabelForTokens", () => {
+  it("PROVENANCE: labels a pool ONCHAIN_NATIVE when every one of its tokens was natively priced this run - native provenance is preserved, not diluted", () => {
+    const nativelyPriced = new Set(["usd-coin", "weth"]);
+    expect(priceLabelForTokens(["usd-coin", "weth"], nativelyPriced)).toBe("ONCHAIN_NATIVE");
+  });
+
+  it("PROVENANCE: labels a pool HYBRID when only some of its tokens were natively priced this run - never mislabeled as fully native", () => {
+    const nativelyPriced = new Set(["usd-coin"]);
+    expect(priceLabelForTokens(["usd-coin", "l2-standard-bridged-weth-base"], nativelyPriced)).toBe("HYBRID");
+  });
+
+  it("PROVENANCE: labels a pool EXTERNAL_FALLBACK when none of its tokens were natively priced this run - external provenance remains external", () => {
+    expect(priceLabelForTokens(["tether", "wbnb"], new Set())).toBe("EXTERNAL_FALLBACK");
+  });
+
+  it("labels a pool with no tokens at all EXTERNAL_FALLBACK (unreachable in practice, never throws)", () => {
+    expect(priceLabelForTokens([], new Set())).toBe("EXTERNAL_FALLBACK");
+  });
+
+  it("PROVENANCE: works identically for address-keyed tokens (a discovered pool's own identity scheme, no coingeckoId involved)", () => {
+    const nativelyPriced = new Set(["0xaaa", "0xbbb"]);
+    expect(priceLabelForTokens(["0xaaa", "0xbbb"], nativelyPriced)).toBe("ONCHAIN_NATIVE");
+    expect(priceLabelForTokens(["0xaaa", "0xccc"], nativelyPriced)).toBe("HYBRID");
+    expect(priceLabelForTokens(["0xccc", "0xddd"], nativelyPriced)).toBe("EXTERNAL_FALLBACK");
   });
 });
 

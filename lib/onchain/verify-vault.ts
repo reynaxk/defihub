@@ -260,6 +260,14 @@ export interface VaultVerificationRecord {
   tvlUsdForObservation: string;
   blockHash: string | null;
   priceSource: string;
+  // Vaults have no native-pricing path at all (unlike pools, no reference-
+  // asset override is ever attempted for a vault's underlying asset - see
+  // this file's own priceById construction below, which is pure CoinGecko).
+  // Always "EXTERNAL_FALLBACK" - narrower than record-verification.ts's own
+  // three-way union since a vault can never be anything else, not merely
+  // "happens to always be" - see that file's own comment on why this field
+  // is required as of Phase 5.12.
+  priceLabel: "EXTERNAL_FALLBACK";
   priceRetrievedAt: Date;
   calculationInputs: HistoricalObservationCalculationInput[] | null;
   calculationVersion: string;
@@ -292,6 +300,7 @@ export async function recordVaultVerification(record: VaultVerificationRecord): 
     tvlUsdForObservation: record.tvlUsdForObservation,
     blockHash: record.blockHash,
     priceSource: record.priceSource,
+    priceLabel: record.priceLabel,
     priceRetrievedAt: record.priceRetrievedAt,
     calculationInputs: record.calculationInputs,
     calculationVersion: record.calculationVersion,
@@ -378,6 +387,7 @@ export async function verifyAllVaults(): Promise<{ key: string; ok: boolean; err
         tvlUsdForObservation,
         blockHash: outcome.blockHash ?? null,
         priceSource: priceProvider.name,
+        priceLabel: "EXTERNAL_FALLBACK",
         priceRetrievedAt,
         calculationInputs: outcome.calculationInputs ?? null,
         calculationVersion: TVL_CALCULATION_VERSION,

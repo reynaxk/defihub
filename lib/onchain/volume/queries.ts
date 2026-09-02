@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, historicalObservations, pools, swapEvents } from "@/lib/database/schema";
 
@@ -26,21 +26,36 @@ export interface LatestVolumeObservation {
   value: string;
   timestamp: Date;
   blockNumber: string | null;
+  blockHash: string | null;
+  // recordVolumeObservation (record-volume-observation.ts) always sets
+  // this to "HIGH"|"MEDIUM"|"LOW" (classifyVolumeConfidence, aggregate.ts)
+  // for every volume_usd/fees_usd/revenue_usd row it writes - null here
+  // only for a row that predates that column or some future metric this
+  // engine doesn't produce, never a real gap in current data.
+  confidence: "HIGH" | "MEDIUM" | "LOW" | null;
 }
 
 // The latest still-canonical (reorgInvalidatedAt IS NULL) aggregate
 // observation for one pool/metric - used by engine.ts to feed
-// checkVolumeSpike (quality.ts) a real "previous run" baseline. Same
-// historical_observations_entity_idx index every other "latest observation
-// for this entity" query in this app already relies on (see
-// getNativeTokenPrice, lib/onchain/pricing/queries.ts, for the direct
-// precedent this mirrors).
+// checkVolumeSpike (quality.ts) a real "previous run" baseline, and by
+// Phase 5.12's native-pools.ts to build a NativeMetric with its own real
+// confidence/blockHash rather than the placeholder nulls an earlier version
+// of that contract shipped with. Same historical_observations_entity_idx
+// index every other "latest observation for this entity" query in this app
+// already relies on (see getNativeTokenPrice, lib/onchain/pricing/queries.ts,
+// for the direct precedent this mirrors).
 export async function getLatestVolumeObservation(
   poolId: string,
   metric: "volume_usd" | "fees_usd" | "revenue_usd",
 ): Promise<LatestVolumeObservation | null> {
   const [row] = await db
-    .select({ value: historicalObservations.value, timestamp: historicalObservations.timestamp, blockNumber: historicalObservations.blockNumber })
+    .select({
+      value: historicalObservations.value,
+      timestamp: historicalObservations.timestamp,
+      blockNumber: historicalObservations.blockNumber,
+      blockHash: historicalObservations.blockHash,
+      confidence: historicalObservations.confidence,
+    })
     .from(historicalObservations)
     .where(
       and(
@@ -53,7 +68,8 @@ export async function getLatestVolumeObservation(
     .orderBy(desc(historicalObservations.timestamp))
     .limit(1);
 
-  return row ?? null;
+  if (!row) return null;
+  return { ...row, confidence: row.confidence as "HIGH" | "MEDIUM" | "LOW" | null };
 }
 
 export interface DailyVolumePoint {
@@ -184,6 +200,19 @@ export async function getRecentSwapEvents(poolId: string, limit: number): Promis
     .limit(limit);
 
   return rows;
+}
+
+// Phase 5.12: the pool detail page's "N swaps indexed" figure - same
+// reorg-exclusion condition as getRecentSwapEvents above (a single COUNT,
+// not "fetch everything and measure the array," which would defeat the
+// entire point of this table having no row cap the way that function's own
+// comment explains).
+export async function getSwapEventCount(poolId: string): Promise<number> {
+  const [row] = await db
+    .select({ value: count() })
+    .from(swapEvents)
+    .where(and(eq(swapEvents.poolId, poolId), isNull(swapEvents.reorgInvalidatedAt)));
+  return row?.value ?? 0;
 }
 
 export interface SwapEventRecheckCandidate {

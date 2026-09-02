@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { closeDb } from "../../lib/database/client";
+import { verifyDiscoveredPoolsTvl } from "../../lib/onchain/discovery/verify-discovered-pool-tvl";
 import { verifyAllPools } from "../../lib/onchain/verify-pool";
 import { verifyAllProtocolTvls } from "../../lib/onchain/verify-protocol-tvl";
 import { verifyAllVaults } from "../../lib/onchain/verify-vault";
@@ -8,7 +9,17 @@ import { withSyncRun } from "../../lib/observability/sync-run";
 
 export async function verifyOnchain(): Promise<void> {
   await withSyncRun("onchain", async () => {
-    const results = [...(await verifyAllPools()), ...(await verifyAllProtocolTvls()), ...(await verifyAllVaults())];
+    // Phase 5.12: registered discovered pools get the exact same TVL
+    // treatment as VERIFIED_POOLS, in the same scheduled run - not a
+    // separate cron/worker (Section 22's "reuse existing... primitives"
+    // applies to scheduling too). "unavailable" (no reliable price for one
+    // or both tokens) is an expected, common outcome here - most
+    // discovered pools pair an arbitrary token against a reference asset,
+    // and the arbitrary side often isn't priceable at all yet - so this
+    // never throws or logs at warn/error level for that case, only via its
+    // own per-pool `ok: false` result, folded into the same
+    // verified/skipped tally as everything else below.
+    const results = [...(await verifyAllPools()), ...(await verifyDiscoveredPoolsTvl()), ...(await verifyAllProtocolTvls()), ...(await verifyAllVaults())];
     let ok = 0;
     for (const r of results) {
       if (r.ok) {

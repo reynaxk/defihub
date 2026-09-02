@@ -50,6 +50,17 @@ export interface VerificationWriteRecord {
   tvlUsdForObservation: string;
   blockHash: string | null;
   priceSource: string;
+  // Phase 5.12: was never written before this phase (every pre-existing
+  // pool/vault tvl_usd row has priceLabel NULL) - the column existed
+  // (schema.ts, Phase 5.3) but only the price-observation and volume-engine
+  // writers ever populated it. Required now, not optional: every caller
+  // (verify-pool.ts, verify-vault.ts, verify-discovered-pool-tvl.ts) can
+  // already derive this from the exact same native-override information it
+  // uses to build `priceSource` above - see priceLabelForTokens
+  // (verify-pool.ts), the ONCHAIN_NATIVE/EXTERNAL_FALLBACK/HYBRID twin of
+  // priceSourceForTokens (pricing/tvl-integration.ts). Vault callers, which
+  // have no native-pricing path at all, always pass "EXTERNAL_FALLBACK".
+  priceLabel: "ONCHAIN_NATIVE" | "EXTERNAL_FALLBACK" | "HYBRID";
   priceRetrievedAt: Date;
   calculationInputs: HistoricalObservationCalculationInput[] | null;
   calculationVersion: string;
@@ -115,6 +126,7 @@ export async function recordVerification(record: VerificationWriteRecord): Promi
         blockNumber: record.blockNumber,
         blockHash: record.blockHash,
         priceSource: record.priceSource,
+        priceLabel: record.priceLabel,
         priceRetrievedAt: record.priceRetrievedAt,
         calculationInputs: record.calculationInputs,
         source: "onchain-verification",

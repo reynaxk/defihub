@@ -1,6 +1,9 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
-import { chains, historicalObservations, pools, protocols } from "@/lib/database/schema";
+import { chains, historicalObservations, poolTokens, pools, protocols, type PriceSourceObservation } from "@/lib/database/schema";
+import { getExternalTokenPrice, isExternalTokenPriceFresh } from "@/lib/onchain/pricing/external-token-price";
+import { getNativeTokenPrice } from "@/lib/onchain/pricing/queries";
+import { isNativePriceEligibleForTvl } from "@/lib/onchain/pricing/tvl-integration";
 import { getDailyVolumeHistory, getLatestVolumeObservation, getSwapEventCount, type DailyVolumePoint, type LatestVolumeObservation } from "@/lib/onchain/volume/queries";
 import { getPoolObservationCount, getPoolTvlHistory, getVerifiedPools, type PoolTvlObservation } from "./pools";
 
@@ -158,6 +161,62 @@ export async function getNativePoolOverview(chainSlug: string, address: string):
   };
 }
 
+// Phase 5.13, Part 14 - the "native pricing API": for one pool's own two
+// tokens, exactly where each one's price (if any) came from. Reuses
+// getNativeTokenPrice/getExternalTokenPrice (the SAME two-tier lookup
+// verify-discovered-pool-tvl.ts's own resolveDiscoveredTokenPrice already
+// uses for TVL) rather than re-deriving anything - this is a read-only
+// view over data that already exists, never a new calculation path.
+export interface NativeTokenPriceDetail {
+  address: string;
+  symbol: string;
+  position: number;
+  price: NativeMetric<number>;
+  // "liquidity evidence... methodology/reference pool where appropriate"
+  // (Part 14) - the same PriceSourceObservation[] historicalObservations
+  // already stores as calculationInputs for a native price, exposed as-is
+  // rather than re-summarized into a lossy string. Empty for an
+  // externally-priced or unavailable token (nothing on-chain to cite).
+  sources: PriceSourceObservation[];
+}
+
+export async function getNativePoolTokenPrices(poolId: string, chainSlug: string): Promise<NativeTokenPriceDetail[]> {
+  const rows = await db
+    .select({ address: poolTokens.address, symbol: poolTokens.symbol, position: poolTokens.position })
+    .from(poolTokens)
+    .where(eq(poolTokens.poolId, poolId))
+    .orderBy(asc(poolTokens.position));
+
+  const now = new Date();
+  return Promise.all(
+    rows.map(async (row): Promise<NativeTokenPriceDetail> => {
+      const native = await getNativeTokenPrice(chainSlug, row.address);
+      if (native && isNativePriceEligibleForTvl(native.confidence, native.observedAt, now)) {
+        return {
+          address: row.address,
+          symbol: row.symbol,
+          position: row.position,
+          price: { value: Number(native.priceUsd), source: "NATIVE", confidence: native.confidence === "INVALID" ? null : native.confidence, isPartial: false, observedAt: native.observedAt, blockNumber: native.blockNumber, blockHash: native.blockHash },
+          sources: native.sources,
+        };
+      }
+
+      const external = await getExternalTokenPrice(chainSlug, row.address);
+      if (external && isExternalTokenPriceFresh(external.observedAt, now)) {
+        return {
+          address: row.address,
+          symbol: row.symbol,
+          position: row.position,
+          price: { value: Number(external.priceUsd), source: "EXTERNAL", confidence: null, isPartial: false, observedAt: external.observedAt, blockNumber: null, blockHash: null },
+          sources: [],
+        };
+      }
+
+      return { address: row.address, symbol: row.symbol, position: row.position, price: unavailableMetric(), sources: [] };
+    }),
+  );
+}
+
 // The volume/fees twin of tvlObservationToMetric above. Unlike TVL, a
 // volume_usd/fees_usd row's own `confidence`/`blockHash` are real and
 // always present (recordVolumeObservation, record-volume-observation.ts,
@@ -256,6 +315,20 @@ export interface NativeCoverageSummary {
   nativeTvlPoolCount: number;
   hybridTvlPoolCount: number;
   externalTvlPoolCount: number;
+  // Phase 5.13, Part 12: every registered pool this app tracks (curated +
+  // discovered) that ISN'T counted in any of the three buckets above - no
+  // TVL observation at all yet. Exposed explicitly, never implied by
+  // subtraction in the UI, so "how much of what we track has a real native
+  // number" is always answerable from a real count, not inferred.
+  unavailableTvlPoolCount: number;
+  totalRegisteredPoolCount: number;
+  // Rounded to 1 decimal, computed as nativeTvlPoolCount /
+  // totalRegisteredPoolCount * 100 - a real percentage of a real
+  // denominator (every registered pool), never DeFiHub's overall "DeFi
+  // coverage" (Section 22's own "never advertise DeFiHub has $X TVL when
+  // the number really means these N native-covered pools do"). 0 when
+  // totalRegisteredPoolCount is 0 (never NaN/Infinity from a 0/0 divide).
+  nativeTvlCoveragePercent: number;
   // Named for what this actually is - the sum of each pool's OWN single
   // latest volume_usd/fees_usd observation, never a rolling 24h window
   // (this app doesn't bucket by trailing 24h anywhere in the native
@@ -356,7 +429,11 @@ export async function getNativeCoverageSummary(): Promise<NativeCoverageSummary>
   const nativeTvlPools = perPool.filter((p) => p.tvlUsd != null && p.tvlSource === "NATIVE");
   const hybridTvlPools = perPool.filter((p) => p.tvlUsd != null && p.tvlSource === "HYBRID");
   const externalTvlPools = perPool.filter((p) => p.tvlUsd != null && p.tvlSource === "EXTERNAL");
+  const unavailableTvlPools = perPool.filter((p) => p.tvlUsd == null);
   const indexedPools = perPool.filter((p) => p.latestVolumeUsd != null);
+
+  const totalRegisteredPoolCount = perPool.length;
+  const nativeTvlCoveragePercent = totalRegisteredPoolCount === 0 ? 0 : Math.round((nativeTvlPools.length / totalRegisteredPoolCount) * 1000) / 10;
 
   return {
     totalNativeTvlUsd: nativeTvlPools.reduce((sum, p) => sum + (p.tvlUsd ?? 0), 0),
@@ -365,6 +442,9 @@ export async function getNativeCoverageSummary(): Promise<NativeCoverageSummary>
     nativeTvlPoolCount: nativeTvlPools.length,
     hybridTvlPoolCount: hybridTvlPools.length,
     externalTvlPoolCount: externalTvlPools.length,
+    unavailableTvlPoolCount: unavailableTvlPools.length,
+    totalRegisteredPoolCount,
+    nativeTvlCoveragePercent,
     totalNativeVolumeUsdLatest: indexedPools.reduce((sum, p) => sum + (p.latestVolumeUsd ?? 0), 0),
     totalNativeFeesUsdLatest: indexedPools.reduce((sum, p) => sum + (p.latestFeesUsd ?? 0), 0),
     indexedPoolCount: indexedPools.length,

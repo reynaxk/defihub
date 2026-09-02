@@ -60,6 +60,16 @@ export function resolveReferenceAssetOutcome(
   now: Date,
   blockNumber: bigint,
   blockHash: string,
+  // Phase 5.13: defaults to the exact same threshold every pre-existing
+  // caller already relied on (REFERENCE_ASSETS' own 7 hand-curated,
+  // individually-human-verified source pools) - passing this explicitly is
+  // new, additive behavior only for a caller that needs a DIFFERENT floor
+  // (lib/onchain/pricing/dynamic-engine.ts's stricter
+  // MIN_LIQUIDITY_USD_DYNAMIC, for a pool that was never individually
+  // reviewed by a human the way every REFERENCE_ASSETS entry was - see that
+  // constant's own comment in aggregate.ts). Never changes this function's
+  // existing behavior for any caller that omits it.
+  minLiquidityUsd: string = PRICING_THRESHOLDS.MIN_LIQUIDITY_USD,
 ): ReferenceAssetOutcome {
   if (asset.kind === "anchor") {
     return {
@@ -189,7 +199,7 @@ export function resolveReferenceAssetOutcome(
       pairedReserve,
       pairedDecimals: pairedAsset.decimals,
       pairedPriceUsd,
-      minLiquidityUsd: PRICING_THRESHOLDS.MIN_LIQUIDITY_USD,
+      minLiquidityUsd,
     });
 
     if (!derived.ok) {

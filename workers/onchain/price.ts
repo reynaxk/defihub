@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { closeDb } from "../../lib/database/client";
+import { priceDynamicAssets } from "../../lib/onchain/pricing/price-dynamic-assets";
 import { priceAllReferenceAssets, type ReferenceAssetPriceResult } from "../../lib/onchain/pricing/price-reference-assets";
 import { logger } from "../../lib/observability/logger";
 import { withSyncRun } from "../../lib/observability/sync-run";
@@ -67,14 +68,58 @@ export async function priceOnchain(): Promise<void> {
     }
 
     const summary = summarizePriceResults(results);
+
+    // Phase 5.13: runs AFTER the 7 hardcoded reference assets above, in the
+    // SAME sync_runs record - not a separate cron. The dynamic engine's own
+    // trusted-set seed (dynamic-engine.ts's seedTrustedPrices) reads
+    // whatever reference-asset prices are CURRENTLY persisted, so running
+    // it right after this run's own reference-asset write means it always
+    // sees this run's fresh prices, not yesterday's. Folded into the same
+    // sync_runs "onchain-price" record (mirrors Phase 5.12's own
+    // verifyDiscoveredPoolsTvl-inside-verifyOnchain precedent,
+    // workers/onchain/verify.ts) rather than a second worker/cron entry -
+    // one failure surface, one health-check signal, for what is really one
+    // job (native pricing) at two tiers of trust.
+    const dynamicResults = await priceDynamicAssets();
+    let dynamicWritten = 0;
+    let dynamicSkipped = 0;
+    let dynamicFailed = 0;
+    for (const r of dynamicResults) {
+      if (r.outcome === "written") dynamicWritten++;
+      else if (r.outcome === "failed") dynamicFailed++;
+      else dynamicSkipped++;
+    }
+    logger.info("dynamic native pricing run complete", {
+      component: "onchain-pricing-dynamic",
+      considered: dynamicResults.length,
+      written: dynamicWritten,
+      skipped: dynamicSkipped,
+      failed: dynamicFailed,
+    });
+
     return {
       result: undefined,
       stats: {
-        recordsProcessed: results.length,
-        errorCount: results.length - summary.priced,
-        metadata: { priced: summary.priced, skipped: summary.skipped, failed: summary.failed },
+        recordsProcessed: results.length + dynamicResults.length,
+        errorCount: results.length - summary.priced + dynamicFailed,
+        metadata: {
+          priced: summary.priced,
+          skipped: summary.skipped,
+          failed: summary.failed,
+          dynamicPriced: dynamicWritten,
+          dynamicSkipped,
+          dynamicFailed,
+        },
       },
-      outcome: summary.outcome,
+      // The 7 hardcoded reference assets' own success/partial classification
+      // is unaffected by how many dynamic candidates happened to price this
+      // run (Section 22's own "do not chase artificial numbers" - a quiet
+      // run with few new dynamic candidates is not a degraded outcome for
+      // THIS job) - a dynamic-tier failure only downgrades the overall run
+      // to "partial" if it's a hard failure, never merely "fewer written
+      // than skipped" (an expected, common shape - most candidates
+      // genuinely have no eligible price yet).
+      outcome: summary.outcome === "partial" || dynamicFailed > 0 ? "partial" : "success",
     };
   });
 }

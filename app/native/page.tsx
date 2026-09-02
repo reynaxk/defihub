@@ -33,7 +33,12 @@ export default async function NativeCoveragePage() {
         for the full, DefiLlama-sourced picture.
       </p>
 
-      <MetricHeader eyebrow="Native TVL" value={formatUsd(summary.totalNativeTvlUsd, { compact: false })} label={`across ${formatNumber(summary.nativeTvlPoolCount)} fully native pools`} className="mt-6" />
+      <MetricHeader
+        eyebrow="Native TVL"
+        value={formatUsd(summary.totalNativeTvlUsd, { compact: false })}
+        label={`${formatNumber(summary.nativeTvlPoolCount)} of ${formatNumber(summary.totalRegisteredPoolCount)} registered pools (${summary.nativeTvlCoveragePercent}%) — not DeFiHub's total tracked TVL`}
+        className="mt-6"
+      />
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatTile label="Native volume (latest observation)" value={formatUsd(summary.totalNativeVolumeUsdLatest, { compact: false })} />
@@ -42,16 +47,23 @@ export default async function NativeCoveragePage() {
         <StatTile label="Fully native TVL pools" value={formatNumber(summary.nativeTvlPoolCount)} />
       </div>
 
-      {hasHybridOrExternalTvl && (
-        <div className="mt-3 grid grid-cols-2 gap-3">
-          <StatTile
-            label="Hybrid TVL (native balance, partly external price)"
-            value={`${formatUsd(summary.totalHybridTvlUsd, { compact: false })} · ${formatNumber(summary.hybridTvlPoolCount)} pools`}
-          />
-          <StatTile
-            label="External-priced TVL (native balance, external price)"
-            value={`${formatUsd(summary.totalExternalTvlUsd, { compact: false })} · ${formatNumber(summary.externalTvlPoolCount)} pools`}
-          />
+      {(hasHybridOrExternalTvl || summary.unavailableTvlPoolCount > 0) && (
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          {summary.hybridTvlPoolCount > 0 && (
+            <StatTile
+              label="Hybrid TVL (native balance, partly external price)"
+              value={`${formatUsd(summary.totalHybridTvlUsd, { compact: false })} · ${formatNumber(summary.hybridTvlPoolCount)} pools`}
+            />
+          )}
+          {summary.externalTvlPoolCount > 0 && (
+            <StatTile
+              label="External-priced TVL (native balance, external price)"
+              value={`${formatUsd(summary.totalExternalTvlUsd, { compact: false })} · ${formatNumber(summary.externalTvlPoolCount)} pools`}
+            />
+          )}
+          {summary.unavailableTvlPoolCount > 0 && (
+            <StatTile label="TVL unavailable" value={`${formatNumber(summary.unavailableTvlPoolCount)} pools — no verified balance or price yet`} />
+          )}
         </div>
       )}
 

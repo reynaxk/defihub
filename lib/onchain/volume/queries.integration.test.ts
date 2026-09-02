@@ -116,6 +116,17 @@ describe("volume queries", () => {
     expect(await getLatestVolumeObservation(poolId, "revenue_usd")).toBeNull();
   });
 
+  it("REGRESSION: getLatestVolumeObservation returns the real confidence and blockHash from the row - an earlier version of the NativeMetric contract built on top of this silently discarded both", async () => {
+    const { chainId, poolId } = await makeChainAndPool();
+    const realBlockHash = "0x" + "99".repeat(32);
+    await insertObservation(poolId, chainId, "fees_usd", "42", "500", new Date("2026-08-22T00:00:00.000Z"), realBlockHash, { confidence: "MEDIUM" });
+
+    const latest = await getLatestVolumeObservation(poolId, "fees_usd");
+    expect(latest?.confidence).toBe("MEDIUM");
+    expect(latest?.blockHash).toBe(realBlockHash);
+    expect(latest?.blockNumber).toBe("500");
+  });
+
   it("getDailyVolumeHistory sums same-day observations into one bucket", async () => {
     const { chainId, poolId } = await makeChainAndPool();
     await insertObservation(poolId, chainId, "volume_usd", "100", "1", new Date("2026-08-20T01:00:00.000Z"), "0x" + "aa".repeat(32));

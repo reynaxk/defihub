@@ -185,6 +185,93 @@ describe("native-pools query layer", () => {
     });
   });
 
+  describe("getNativePoolOverview - volume/fees provenance propagation (regression)", () => {
+    it("REGRESSION: propagates the real confidence and blockHash from the underlying observation - an earlier version hardcoded both to null even though the row had them", async () => {
+      const { chainSlug, chainId, poolId, address } = await makeChainAndPool();
+      const realBlockHash = "0x" + "77".repeat(32);
+      await db.insert(historicalObservations).values({
+        chainId,
+        entityType: "pool",
+        entityId: poolId,
+        metric: "volume_usd",
+        value: "500.00000000",
+        timestamp: new Date("2026-08-01T12:00:00.000Z"),
+        source: "onchain-volume-engine",
+        confidence: "HIGH",
+        priceLabel: "ONCHAIN_NATIVE",
+        calculationInputs: volumeCalcInputs(3),
+        blockNumber: "12345",
+        blockHash: realBlockHash,
+      });
+
+      const overview = await getNativePoolOverview(chainSlug, address);
+      expect(overview?.volume.confidence).toBe("HIGH");
+      expect(overview?.volume.blockHash).toBe(realBlockHash);
+      expect(overview?.volume.blockNumber).toBe(12345);
+    });
+
+    it("marks a MEDIUM/LOW-confidence latest observation isPartial - the single-observation twin of the daily-history isPartial semantics", async () => {
+      const { chainSlug, chainId, poolId, address } = await makeChainAndPool();
+      await db.insert(historicalObservations).values({
+        chainId,
+        entityType: "pool",
+        entityId: poolId,
+        metric: "fees_usd",
+        value: "12.50000000",
+        timestamp: new Date(),
+        source: "onchain-volume-engine",
+        confidence: "MEDIUM",
+        priceLabel: "ONCHAIN_NATIVE",
+        calculationInputs: volumeCalcInputs(2),
+        ...nextBlock(),
+      });
+
+      const overview = await getNativePoolOverview(chainSlug, address);
+      expect(overview?.fees.confidence).toBe("MEDIUM");
+      expect(overview?.fees.isPartial).toBe(true);
+    });
+
+    it("a HIGH-confidence latest observation is never marked partial", async () => {
+      const { chainSlug, chainId, poolId, address } = await makeChainAndPool();
+      await db.insert(historicalObservations).values({
+        chainId,
+        entityType: "pool",
+        entityId: poolId,
+        metric: "volume_usd",
+        value: "500.00000000",
+        timestamp: new Date(),
+        source: "onchain-volume-engine",
+        confidence: "HIGH",
+        priceLabel: "ONCHAIN_NATIVE",
+        calculationInputs: volumeCalcInputs(3),
+        ...nextBlock(),
+      });
+
+      const overview = await getNativePoolOverview(chainSlug, address);
+      expect(overview?.volume.isPartial).toBe(false);
+    });
+
+    it("volume/fees source is always NATIVE when present - the volume engine never falls back to an external price mid-calculation", async () => {
+      const { chainSlug, chainId, poolId, address } = await makeChainAndPool();
+      await db.insert(historicalObservations).values({
+        chainId,
+        entityType: "pool",
+        entityId: poolId,
+        metric: "volume_usd",
+        value: "500.00000000",
+        timestamp: new Date(),
+        source: "onchain-volume-engine",
+        confidence: "HIGH",
+        priceLabel: "ONCHAIN_NATIVE",
+        calculationInputs: volumeCalcInputs(3),
+        ...nextBlock(),
+      });
+
+      const overview = await getNativePoolOverview(chainSlug, address);
+      expect(overview?.volume.source).toBe("NATIVE");
+    });
+  });
+
   describe("getNativePoolVolumeHistory / getNativePoolFeesHistory - LOW-exclusion and partial semantics preserved", () => {
     it("LOW-confidence observations are excluded from the authoritative value and isPartial is set - never a fake zero-trading day", async () => {
       const { chainId, poolId } = await makeChainAndPool();
@@ -303,11 +390,52 @@ describe("native-pools query layer", () => {
       expect(poolB.tvlSource).toBe("HYBRID");
       expect(poolB.latestVolumeUsd).toBeNull();
 
-      // The exact two TVL'd pools contribute; the untouched third pool
-      // contributes nothing (not $0) to either the count or the total.
-      expect(summary.totalNativeTvlUsd).toBeGreaterThanOrEqual(3500);
-      expect(summary.nativeCoveredPoolCount).toBeGreaterThanOrEqual(2);
+      // The exact one NATIVE-priced pool contributes; the untouched third
+      // pool contributes nothing (not $0) to either the count or the total.
+      expect(summary.totalNativeTvlUsd).toBeGreaterThanOrEqual(1000);
+      expect(summary.nativeTvlPoolCount).toBeGreaterThanOrEqual(1);
       expect(summary.indexedPoolCount).toBeGreaterThanOrEqual(1);
+    });
+
+    it("PROVENANCE (regression): a HYBRID-priced pool's TVL is bucketed into totalHybridTvlUsd, never into totalNativeTvlUsd - the aggregate headline can never be inflated by a partly-external price", async () => {
+      // getNativeCoverageSummary/getVerifiedPools query the WHOLE `pools`
+      // table, not a scoped subset - this real, shared dev database already
+      // has other native/hybrid pools in it (e.g. the curated VERIFIED_POOLS
+      // entries), so this test asserts on BEFORE/AFTER deltas and per-pool
+      // classification, never a raw absolute total (which would be flaky
+      // against whatever else is in the database at test time - the same
+      // "don't assert on unscoped global state" lesson this codebase's own
+      // pools.test.ts idempotency test already learned the hard way).
+      const before = await getNativeCoverageSummary();
+
+      const native = await makeChainAndPool();
+      const hybrid = await makeChainAndPool();
+      const external = await makeChainAndPool();
+
+      await db.insert(historicalObservations).values([
+        { chainId: native.chainId, entityType: "pool", entityId: native.poolId, metric: "tvl_usd", value: "1000.00000000", timestamp: new Date(), source: "onchain-verification", priceLabel: "ONCHAIN_NATIVE", ...nextBlock() },
+        { chainId: hybrid.chainId, entityType: "pool", entityId: hybrid.poolId, metric: "tvl_usd", value: "2500.00000000", timestamp: new Date(), source: "onchain-verification", priceLabel: "HYBRID", ...nextBlock() },
+        { chainId: external.chainId, entityType: "pool", entityId: external.poolId, metric: "tvl_usd", value: "9000.00000000", timestamp: new Date(), source: "onchain-verification", priceLabel: "EXTERNAL_FALLBACK", ...nextBlock() },
+      ]);
+
+      const after = await getNativeCoverageSummary();
+
+      // Each pool's own row is bucketed by its own real tvlSource.
+      expect(after.pools.find((p) => p.poolId === native.poolId)).toMatchObject({ tvlUsd: 1000, tvlSource: "NATIVE" });
+      expect(after.pools.find((p) => p.poolId === hybrid.poolId)).toMatchObject({ tvlUsd: 2500, tvlSource: "HYBRID" });
+      expect(after.pools.find((p) => p.poolId === external.poolId)).toMatchObject({ tvlUsd: 9000, tvlSource: "EXTERNAL" });
+
+      // The specific regression this test guards: only the NATIVE pool's
+      // $1000 moves totalNativeTvlUsd - the hybrid $2500 and external $9000
+      // must land in their own separate totals, never inflating this one,
+      // even though an earlier version of this function summed every
+      // priced pool together regardless of tvlSource.
+      expect(after.totalNativeTvlUsd - before.totalNativeTvlUsd).toBe(1000);
+      expect(after.totalHybridTvlUsd - before.totalHybridTvlUsd).toBe(2500);
+      expect(after.totalExternalTvlUsd - before.totalExternalTvlUsd).toBe(9000);
+      expect(after.nativeTvlPoolCount - before.nativeTvlPoolCount).toBe(1);
+      expect(after.hybridTvlPoolCount - before.hybridTvlPoolCount).toBe(1);
+      expect(after.externalTvlPoolCount - before.externalTvlPoolCount).toBe(1);
     });
 
     it("REORG: the aggregation's own latest-metric lookup never lets a reorg-invalidated row win the 'latest' slot", async () => {

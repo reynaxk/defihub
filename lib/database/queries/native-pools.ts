@@ -1,7 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, historicalObservations, pools, protocols } from "@/lib/database/schema";
-import { getDailyVolumeHistory, getLatestVolumeObservation, getSwapEventCount, type DailyVolumePoint } from "@/lib/onchain/volume/queries";
+import { getDailyVolumeHistory, getLatestVolumeObservation, getSwapEventCount, type DailyVolumePoint, type LatestVolumeObservation } from "@/lib/onchain/volume/queries";
 import { getPoolObservationCount, getPoolTvlHistory, getVerifiedPools, type PoolTvlObservation } from "./pools";
 
 // Phase 5.12, Part 7 - the "clean reusable internal contract" the phase
@@ -150,11 +150,38 @@ export async function getNativePoolOverview(chainSlug: string, address: string):
   return {
     identity,
     tvl: tvlObservationToMetric(tvlHistory[tvlHistory.length - 1]),
-    volume: latestVolume ? { value: Number(latestVolume.value), source: "NATIVE", confidence: null, isPartial: false, observedAt: latestVolume.timestamp, blockNumber: latestVolume.blockNumber != null ? Number(latestVolume.blockNumber) : null, blockHash: null } : unavailableMetric(),
-    fees: latestFees ? { value: Number(latestFees.value), source: "NATIVE", confidence: null, isPartial: false, observedAt: latestFees.timestamp, blockNumber: latestFees.blockNumber != null ? Number(latestFees.blockNumber) : null, blockHash: null } : unavailableMetric(),
+    volume: volumeObservationToMetric(latestVolume),
+    fees: volumeObservationToMetric(latestFees),
     swapCount,
     observationCount: observationCount.count,
     earliestObservedAt: observationCount.earliestAt,
+  };
+}
+
+// The volume/fees twin of tvlObservationToMetric above. Unlike TVL, a
+// volume_usd/fees_usd row's own `confidence`/`blockHash` are real and
+// always present (recordVolumeObservation, record-volume-observation.ts,
+// sets both on every write) - a prior version of this function discarded
+// them and hardcoded confidence/blockHash to null, silently downgrading a
+// NativeMetric that had real provenance available into one that looked
+// unprovenanced. `source` is always "NATIVE": the volume engine's own
+// toSwapTokenPrice (engine.ts) never falls back to an external price mid-
+// calculation - see that function's own comment - so a volume_usd/fees_usd
+// row is never HYBRID/EXTERNAL the way a tvl_usd row can be. `isPartial`
+// mirrors the same "not fully priced" signal getDailyVolumeHistory's own
+// isPartial already encodes at the daily-aggregate level, applied to this
+// single latest observation: MEDIUM/LOW confidence means this specific run
+// didn't get every swap priced.
+function volumeObservationToMetric(row: LatestVolumeObservation | null): NativeMetric<number> {
+  if (!row) return unavailableMetric();
+  return {
+    value: Number(row.value),
+    source: "NATIVE",
+    confidence: row.confidence,
+    isPartial: row.confidence === "LOW" || row.confidence === "MEDIUM",
+    observedAt: row.timestamp,
+    blockNumber: row.blockNumber != null ? Number(row.blockNumber) : null,
+    blockHash: row.blockHash,
   };
 }
 
@@ -207,10 +234,29 @@ export async function getNativePoolTvlHistory(poolId: string, since: Date | null
 // protocolMetrics/chainMetrics totals used elsewhere in this app.
 // ---------------------------------------------------------------------------
 
+// CodeRabbit/manual review round: an earlier version of this summary
+// summed EVERY pool's tvl_usd value into one `totalNativeTvlUsd`
+// regardless of that pool's own tvlSource - so a HYBRID-priced pool (part
+// native, part CoinGecko) or even a fully EXTERNAL_FALLBACK one silently
+// inflated a total the page presented as "computed directly by DeFiHub's
+// own on-chain reads, not DefiLlama or CoinGecko." That was the exact
+// mislabeling this whole phase's provenance work exists to prevent -
+// TVL's three real price states (NATIVE/HYBRID/EXTERNAL_FALLBACK) now stay
+// three separate totals/counts, never pre-summed into one number a caller
+// could present as pure. Volume/fees have no such split: the volume
+// engine's own toSwapTokenPrice (lib/onchain/volume/engine.ts) never falls
+// back to an external price mid-calculation, so every volume_usd/fees_usd
+// observation that exists at all is unconditionally NATIVE - see
+// volumeObservationToMetric's own comment above for the same fact applied
+// to a single pool's latest observation.
 export interface NativeCoverageSummary {
-  totalNativeTvlUsd: number;
-  nativeCoveredPoolCount: number; // pools with >=1 tvl_usd observation, any source label
-  totalNativeVolumeUsd24hEquivalent: number; // sum of each pool's OWN latest volume_usd observation - see this function's own comment
+  totalNativeTvlUsd: number; // NATIVE-priced pools only
+  totalHybridTvlUsd: number; // HYBRID-priced pools only - real DeFiHub balance reads, but at least one token's price came from CoinGecko
+  totalExternalTvlUsd: number; // EXTERNAL_FALLBACK-priced pools only - a real on-chain balance read, priced entirely externally
+  nativeTvlPoolCount: number;
+  hybridTvlPoolCount: number;
+  externalTvlPoolCount: number;
+  totalNativeVolumeUsd24hEquivalent: number; // sum of each pool's OWN latest volume_usd observation - always fully native, see this function's own comment
   totalNativeFeesUsd24hEquivalent: number;
   indexedPoolCount: number; // pools with >=1 volume_usd/fees_usd observation
   pools: NativelyTrackedPoolSummary[];
@@ -299,12 +345,18 @@ export async function getNativeCoverageSummary(): Promise<NativeCoverageSummary>
     };
   });
 
-  const nativeCoveredPools = perPool.filter((p) => p.tvlUsd != null);
+  const nativeTvlPools = perPool.filter((p) => p.tvlUsd != null && p.tvlSource === "NATIVE");
+  const hybridTvlPools = perPool.filter((p) => p.tvlUsd != null && p.tvlSource === "HYBRID");
+  const externalTvlPools = perPool.filter((p) => p.tvlUsd != null && p.tvlSource === "EXTERNAL");
   const indexedPools = perPool.filter((p) => p.latestVolumeUsd != null);
 
   return {
-    totalNativeTvlUsd: nativeCoveredPools.reduce((sum, p) => sum + (p.tvlUsd ?? 0), 0),
-    nativeCoveredPoolCount: nativeCoveredPools.length,
+    totalNativeTvlUsd: nativeTvlPools.reduce((sum, p) => sum + (p.tvlUsd ?? 0), 0),
+    totalHybridTvlUsd: hybridTvlPools.reduce((sum, p) => sum + (p.tvlUsd ?? 0), 0),
+    totalExternalTvlUsd: externalTvlPools.reduce((sum, p) => sum + (p.tvlUsd ?? 0), 0),
+    nativeTvlPoolCount: nativeTvlPools.length,
+    hybridTvlPoolCount: hybridTvlPools.length,
+    externalTvlPoolCount: externalTvlPools.length,
     totalNativeVolumeUsd24hEquivalent: indexedPools.reduce((sum, p) => sum + (p.latestVolumeUsd ?? 0), 0),
     totalNativeFeesUsd24hEquivalent: indexedPools.reduce((sum, p) => sum + (p.latestFeesUsd ?? 0), 0),
     indexedPoolCount: indexedPools.length,

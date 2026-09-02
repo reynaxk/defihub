@@ -26,21 +26,36 @@ export interface LatestVolumeObservation {
   value: string;
   timestamp: Date;
   blockNumber: string | null;
+  blockHash: string | null;
+  // recordVolumeObservation (record-volume-observation.ts) always sets
+  // this to "HIGH"|"MEDIUM"|"LOW" (classifyVolumeConfidence, aggregate.ts)
+  // for every volume_usd/fees_usd/revenue_usd row it writes - null here
+  // only for a row that predates that column or some future metric this
+  // engine doesn't produce, never a real gap in current data.
+  confidence: "HIGH" | "MEDIUM" | "LOW" | null;
 }
 
 // The latest still-canonical (reorgInvalidatedAt IS NULL) aggregate
 // observation for one pool/metric - used by engine.ts to feed
-// checkVolumeSpike (quality.ts) a real "previous run" baseline. Same
-// historical_observations_entity_idx index every other "latest observation
-// for this entity" query in this app already relies on (see
-// getNativeTokenPrice, lib/onchain/pricing/queries.ts, for the direct
-// precedent this mirrors).
+// checkVolumeSpike (quality.ts) a real "previous run" baseline, and by
+// Phase 5.12's native-pools.ts to build a NativeMetric with its own real
+// confidence/blockHash rather than the placeholder nulls an earlier version
+// of that contract shipped with. Same historical_observations_entity_idx
+// index every other "latest observation for this entity" query in this app
+// already relies on (see getNativeTokenPrice, lib/onchain/pricing/queries.ts,
+// for the direct precedent this mirrors).
 export async function getLatestVolumeObservation(
   poolId: string,
   metric: "volume_usd" | "fees_usd" | "revenue_usd",
 ): Promise<LatestVolumeObservation | null> {
   const [row] = await db
-    .select({ value: historicalObservations.value, timestamp: historicalObservations.timestamp, blockNumber: historicalObservations.blockNumber })
+    .select({
+      value: historicalObservations.value,
+      timestamp: historicalObservations.timestamp,
+      blockNumber: historicalObservations.blockNumber,
+      blockHash: historicalObservations.blockHash,
+      confidence: historicalObservations.confidence,
+    })
     .from(historicalObservations)
     .where(
       and(
@@ -53,7 +68,8 @@ export async function getLatestVolumeObservation(
     .orderBy(desc(historicalObservations.timestamp))
     .limit(1);
 
-  return row ?? null;
+  if (!row) return null;
+  return { ...row, confidence: row.confidence as "HIGH" | "MEDIUM" | "LOW" | null };
 }
 
 export interface DailyVolumePoint {

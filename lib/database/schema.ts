@@ -546,7 +546,22 @@ export const vaults = pgTable(
 // values for a token whose real balance or price wasn't actually read.
 export interface HistoricalObservationCalculationInput {
   symbol: string;
-  coingeckoId: string;
+  // Phase 5.12: optional, not every priced token has one. A curated
+  // VERIFIED_POOLS token always does (its coingeckoId is hand-configured);
+  // a discovered pool's token generally does NOT (register.ts leaves
+  // poolTokens.coingeckoId null - see that file's own comment) unless it
+  // happens to also be a REFERENCE_ASSET or a top-market-cap token the
+  // separate CoinGecko token-discovery sync already resolved one for. Never
+  // fabricated when absent - see tokenAddress below for the identity a
+  // discovered pool's token always has instead.
+  coingeckoId?: string;
+  // Phase 5.12: the on-chain address this token was actually read from -
+  // always populated for a discovered-pool observation (lib/onchain/
+  // discovery/verify-discovered-pool-tvl.ts), optional for a curated
+  // VERIFIED_POOLS observation (verify-pool.ts) where coingeckoId alone was
+  // already sufficient provenance before this phase. At least one of
+  // coingeckoId/tokenAddress is always present - never both absent.
+  tokenAddress?: string;
   decimals: number;
   balanceRaw: string; // exact on-chain integer balance, as a string (too large for a JS number in general)
   // The exact decimal string the calculation actually used, not a

@@ -84,6 +84,13 @@ export interface PoolTvlObservation {
   // captured (or whose source never had it) - never backfilled or guessed.
   blockHash: string | null;
   priceSource: string | null;
+  // Phase 5.12: the enum-typed twin of priceSource above
+  // ("ONCHAIN_NATIVE"|"EXTERNAL_FALLBACK"|"HYBRID") - null for any row
+  // written before this phase (record-verification.ts never set it until
+  // now) or any observation this engine doesn't produce. Prefer this over
+  // parsing priceSource's free-text string wherever both are available -
+  // see lib/database/queries/native-pools.ts's own comment on why.
+  priceLabel: "ONCHAIN_NATIVE" | "EXTERNAL_FALLBACK" | "HYBRID" | null;
   priceRetrievedAt: Date | null;
   calculationInputs: HistoricalObservationCalculationInput[] | null;
   source: string;
@@ -160,6 +167,7 @@ export async function getPoolTvlHistory(
       blockNumber: historicalObservations.blockNumber,
       blockHash: historicalObservations.blockHash,
       priceSource: historicalObservations.priceSource,
+      priceLabel: historicalObservations.priceLabel,
       priceRetrievedAt: historicalObservations.priceRetrievedAt,
       calculationInputs: historicalObservations.calculationInputs,
       source: historicalObservations.source,
@@ -179,6 +187,7 @@ export async function getPoolTvlHistory(
     blockNumber: r.blockNumber != null ? Number(r.blockNumber) : null,
     blockHash: r.blockHash,
     priceSource: r.priceSource,
+    priceLabel: r.priceLabel as "ONCHAIN_NATIVE" | "EXTERNAL_FALLBACK" | "HYBRID" | null,
     priceRetrievedAt: r.priceRetrievedAt,
     // entityType is filtered to "pool" above - calculationInputs here is
     // always the pool/vault-balance shape, never Phase 5.3's

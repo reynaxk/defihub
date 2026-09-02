@@ -115,3 +115,31 @@ export function priceSourceForTokens(coingeckoIds: readonly string[], nativelyPr
   const someNative = coingeckoIds.some((id) => nativelyPricedIds.has(id));
   return someNative ? `hybrid:onchain-pricing-engine+${externalProviderName}` : externalProviderName;
 }
+
+// Phase 5.12: the enum-typed twin of priceSourceForTokens above, for
+// historicalObservations.priceLabel (schema.ts, "ONCHAIN_NATIVE" |
+// "EXTERNAL_FALLBACK" | "HYBRID") - a column that has existed since Phase
+// 5.3 but was never actually written for pool/vault tvl_usd rows (every
+// pre-Phase-5.12 row has it NULL; only the token price-observation and
+// volume-engine writers ever populated it). Deliberately the SAME
+// native/hybrid/external classification as priceSourceForTokens, computed
+// from the exact same two inputs, rather than re-deriving it from the
+// free-text priceSource string that function returns - parsing "hybrid:"
+// back out of a string built for a debug/display label would couple two
+// independent concerns for no reason when the real classification is a
+// two-line pure function.
+//
+// `tokenKeys` uses whichever identity each token was actually priced by
+// (coingeckoId for a curated VERIFIED_POOLS token, on-chain address for a
+// discovered-pool token with no coingeckoId - see
+// HistoricalObservationCalculationInput's own comment, schema.ts) - the
+// caller passes the SAME keys it used to build both `priceById` and
+// `nativelyPricedKeys`, so this never needs to know which identity scheme a
+// given pool uses.
+export function priceLabelForTokens(tokenKeys: readonly string[], nativelyPricedKeys: ReadonlySet<string>): "ONCHAIN_NATIVE" | "EXTERNAL_FALLBACK" | "HYBRID" {
+  if (tokenKeys.length === 0) return "EXTERNAL_FALLBACK";
+  const allNative = tokenKeys.every((key) => nativelyPricedKeys.has(key));
+  if (allNative) return "ONCHAIN_NATIVE";
+  const someNative = tokenKeys.some((key) => nativelyPricedKeys.has(key));
+  return someNative ? "HYBRID" : "EXTERNAL_FALLBACK";
+}

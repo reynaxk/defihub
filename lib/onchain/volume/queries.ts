@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/database/client";
 import { chains, historicalObservations, pools, swapEvents } from "@/lib/database/schema";
 
@@ -184,6 +184,19 @@ export async function getRecentSwapEvents(poolId: string, limit: number): Promis
     .limit(limit);
 
   return rows;
+}
+
+// Phase 5.12: the pool detail page's "N swaps indexed" figure - same
+// reorg-exclusion condition as getRecentSwapEvents above (a single COUNT,
+// not "fetch everything and measure the array," which would defeat the
+// entire point of this table having no row cap the way that function's own
+// comment explains).
+export async function getSwapEventCount(poolId: string): Promise<number> {
+  const [row] = await db
+    .select({ value: count() })
+    .from(swapEvents)
+    .where(and(eq(swapEvents.poolId, poolId), isNull(swapEvents.reorgInvalidatedAt)));
+  return row?.value ?? 0;
 }
 
 export interface SwapEventRecheckCandidate {

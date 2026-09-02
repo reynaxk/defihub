@@ -291,10 +291,10 @@ describe("pool TVL query functions", () => {
       const tokens: PoolTvlToken[] = row.calculationInputs!.map((i) => ({
         symbol: i.symbol,
         decimals: i.decimals,
-        coingeckoId: i.coingeckoId,
+        coingeckoId: i.coingeckoId!, // this test's own fixtures always set it
       }));
       const balances = row.calculationInputs!.map((i) => BigInt(i.balanceRaw));
-      const priceById = new Map(row.calculationInputs!.map((i) => [i.coingeckoId, i.priceUsd]));
+      const priceById = new Map(row.calculationInputs!.map((i) => [i.coingeckoId!, i.priceUsd]));
       const replayed = computePoolTvl(tokens, balances, priceById);
 
       expect(replayed.ok).toBe(true);
@@ -321,9 +321,9 @@ describe("pool TVL query functions", () => {
       ];
 
       const exactCalculation = computePoolTvl(
-        calculationInputs.map((i) => ({ symbol: i.symbol, decimals: i.decimals, coingeckoId: i.coingeckoId })),
+        calculationInputs.map((i) => ({ symbol: i.symbol, decimals: i.decimals, coingeckoId: i.coingeckoId! })),
         calculationInputs.map((i) => BigInt(i.balanceRaw)),
-        new Map(calculationInputs.map((i) => [i.coingeckoId, i.priceUsd])),
+        new Map(calculationInputs.map((i) => [i.coingeckoId!, i.priceUsd])),
       );
       if (!exactCalculation.ok) throw new Error("expected calculation to succeed");
       expect(exactCalculation.tvlUsd).toBe("0.123456789123");
@@ -351,10 +351,10 @@ describe("pool TVL query functions", () => {
       const tokens: PoolTvlToken[] = row.calculationInputs!.map((i) => ({
         symbol: i.symbol,
         decimals: i.decimals,
-        coingeckoId: i.coingeckoId,
+        coingeckoId: i.coingeckoId!, // this test's own fixtures always set it
       }));
       const balances = row.calculationInputs!.map((i) => BigInt(i.balanceRaw));
-      const priceById = new Map(row.calculationInputs!.map((i) => [i.coingeckoId, i.priceUsd]));
+      const priceById = new Map(row.calculationInputs!.map((i) => [i.coingeckoId!, i.priceUsd]));
       const replayed = computePoolTvl(tokens, balances, priceById);
       if (!replayed.ok) throw new Error("expected replay to succeed");
 

@@ -294,10 +294,10 @@ describe("computePoolTvl", () => {
     const tokens: PoolTvlToken[] = storedInputs.map((i) => ({
       symbol: i.symbol,
       decimals: i.decimals,
-      coingeckoId: i.coingeckoId,
+      coingeckoId: i.coingeckoId!, // this test's own fixtures always set it
     }));
     const balances = storedInputs.map((i) => BigInt(i.balanceRaw));
-    const priceById = new Map(storedInputs.map((i) => [i.coingeckoId, i.priceUsd]));
+    const priceById = new Map(storedInputs.map((i) => [i.coingeckoId!, i.priceUsd]));
 
     const replayed = computePoolTvl(tokens, balances, priceById);
     expect(replayed).toEqual({ ok: true, tvlUsd: "2500" });

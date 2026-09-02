@@ -10,6 +10,7 @@ import {
   getLatestVolumeObservation,
   getPoolIdByConfigKey,
   getRecentSwapEvents,
+  getSwapEventCount,
   getSwapEventsNeedingRecheck,
   markSwapEventsReorged,
 } from "./queries";
@@ -220,6 +221,35 @@ describe("volume queries", () => {
 
     const recent = await getRecentSwapEvents(poolId, 10);
     expect(recent).toHaveLength(2);
+  });
+
+  it("getSwapEventCount excludes reorg-invalidated events - Phase 5.12's pool-detail-page swap count", async () => {
+    const { chainId, poolId } = await makeChainAndPool();
+    for (let i = 0; i < 4; i++) {
+      await db.insert(swapEvents).values({
+        chainId,
+        poolId,
+        sourceKind: "uniswap-v2",
+        transactionHash: `0x${i}${"cc".repeat(31)}`,
+        logIndex: i,
+        blockNumber: String(200 + i),
+        blockHash: "0x" + "ff".repeat(32),
+        blockTimestamp: new Date("2026-08-26T00:00:00.000Z"),
+        amount0In: "0",
+        amount1In: "1000000000000000000",
+        amount0Out: "2500000000",
+        amount1Out: "0",
+      });
+    }
+    const rows = await db.select().from(swapEvents).where(eq(swapEvents.poolId, poolId));
+    await db.update(swapEvents).set({ reorgInvalidatedAt: new Date() }).where(eq(swapEvents.id, rows[0].id));
+
+    expect(await getSwapEventCount(poolId)).toBe(3);
+  });
+
+  it("getSwapEventCount returns 0 for a pool with no swap events at all", async () => {
+    const { poolId } = await makeChainAndPool();
+    expect(await getSwapEventCount(poolId)).toBe(0);
   });
 
   it("getSwapEventsNeedingRecheck groups by block number and marking reorged updates them all", async () => {

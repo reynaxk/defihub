@@ -10,7 +10,7 @@ import { logger } from "@/lib/observability/logger";
 import { VERIFIED_POOLS, type VerifiedPool } from "./config";
 import { syncPoolsFromConfig } from "./pools";
 import { recordVerification } from "./record-verification";
-import { resolveNativePriceOverrides, priceSourceForTokens, type NativePriceOverride } from "./pricing/tvl-integration";
+import { resolveNativePriceOverrides, priceSourceForTokens, priceLabelForTokens, type NativePriceOverride } from "./pricing/tvl-integration";
 
 // Bumped only if the sum-of-balances methodology itself changes (e.g. a
 // future AMM adapter that isn't "sum this contract's own ERC-20 balances")
@@ -75,7 +75,7 @@ export async function getVerificationsForProtocol(
   }));
 }
 
-interface PoolOutcome {
+export interface PoolOutcome {
   key: string;
   ok: boolean;
   error?: string;
@@ -255,7 +255,26 @@ export function roundExactDecimal(value: string, decimals: number): string {
  * getBlockNumber. Mirrors the batching pattern already verified working for
  * the wallet balances route (app/api/wallet/balances/route.ts).
  */
-async function verifyPoolsOnChain(
+// Exported for reuse by lib/onchain/discovery/verify-discovered-pool-tvl.ts
+// (Phase 5.12) - this function's own contract was already generic over any
+// {key, poolAddress, tokens}-shaped pool list on one chain, never actually
+// coupled to VERIFIED_POOLS specifically (VerifiedPool is just the type its
+// signature happened to use, since VERIFIED_POOLS was the only caller
+// before this phase). Reused verbatim rather than duplicated: the exact
+// same multicall batching, block-pinning-with-confirmations, and
+// computePoolTvl invocation now serves both curated and discovered pools,
+// satisfying this phase's own "do NOT create a second TVL engine"
+// instruction at the mechanism level, not just in spirit. A discovered
+// pool's tokens don't have a real coingeckoId (see
+// HistoricalObservationCalculationInput's own comment) - the caller passes
+// each token's lowercased on-chain address AS this parameter's
+// `coingeckoId` field, since this function only ever uses it as an opaque
+// `priceById` lookup key, never validates it as a real CoinGecko id. The
+// caller is responsible for translating that address-keyed
+// calculationInputs back into honest tokenAddress-based provenance before
+// persisting - see resolveDiscoveredPoolTvl's own comment for exactly
+// where that translation happens.
+export async function verifyPoolsOnChain(
   chainSlug: string,
   pools: VerifiedPool[],
   priceById: Map<string, string>,
@@ -377,6 +396,7 @@ export interface PoolVerificationRecord {
   tvlUsdForObservation: string;
   blockHash: string | null;
   priceSource: string;
+  priceLabel: "ONCHAIN_NATIVE" | "EXTERNAL_FALLBACK" | "HYBRID";
   priceRetrievedAt: Date;
   calculationInputs: HistoricalObservationCalculationInput[] | null;
   calculationVersion: string;
@@ -424,6 +444,7 @@ export async function recordPoolVerification(record: PoolVerificationRecord): Pr
     tvlUsdForObservation: record.tvlUsdForObservation,
     blockHash: record.blockHash,
     priceSource: record.priceSource,
+    priceLabel: record.priceLabel,
     priceRetrievedAt: record.priceRetrievedAt,
     calculationInputs: record.calculationInputs,
     calculationVersion: record.calculationVersion,
@@ -460,6 +481,7 @@ export function attachNativeProvenance(
   nativeOverridesByCoingeckoId: Map<string, NativePriceOverride>,
 ): HistoricalObservationCalculationInput[] {
   return calculationInputs.map((input) => {
+    if (!input.coingeckoId) return input; // VERIFIED_POOLS tokens always have one; guard is type-level only
     const override = nativeOverridesByCoingeckoId.get(input.coingeckoId);
     if (!override) return input;
     return {
@@ -604,6 +626,7 @@ export async function verifyAllPools(): Promise<{ key: string; ok: boolean; erro
         // priceSourceForTokens' own comment for why a genuine mix must
         // never be mislabeled as either pure kind.
         priceSource: priceSourceForTokens(pool.tokens.map((t) => t.coingeckoId), nativelyPricedCoingeckoIds, priceProvider.name),
+        priceLabel: priceLabelForTokens(pool.tokens.map((t) => t.coingeckoId), nativelyPricedCoingeckoIds),
         priceRetrievedAt,
         calculationInputs: outcome.calculationInputs ? attachNativeProvenance(outcome.calculationInputs, nativeOverridesByCoingeckoId) : null,
         calculationVersion: TVL_CALCULATION_VERSION,

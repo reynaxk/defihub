@@ -209,6 +209,29 @@ describe("resolveReferenceAssetOutcome", () => {
     expect(included).toHaveLength(1);
     expect(included[0].sourcePoolAddress).toBe("0xpool1");
   });
+
+  describe("Phase 5.13: the optional minLiquidityUsd parameter", () => {
+    it("REGRESSION: defaults to the exact same PRICING_THRESHOLDS.MIN_LIQUIDITY_USD every pre-existing caller relied on when omitted", () => {
+      const resolvedPriceByKey = new Map([["usdc-test", "1.00"]]);
+      const outcome = resolveReferenceAssetOutcome(weth, assetByKey, decoded(), resolvedPriceByKey, NOW, BLOCK_NUMBER, BLOCK_HASH);
+      expect(outcome.ok).toBe(true); // unchanged from the "resolves a derived asset successfully" test above
+    });
+
+    it("a stricter caller-supplied threshold rejects a pool that would have passed the default $10,000 floor - the dynamic-pricing engine's own stricter MIN_LIQUIDITY_USD_DYNAMIC ($25,000) applied to this test's own real ~$20M pool would NOT reject it, so this uses a pool sized specifically between the two floors", () => {
+      // ~$20,053 of USDC-side liquidity (2x one side, per deriveV2Price's
+      // own convention) - clears the default $10,000 floor but not a
+      // stricter $25,000 one.
+      const betweenFloors = decoded({ reserve0: BigInt("8000000000000000000"), reserve1: BigInt("10026500000") });
+      const resolvedPriceByKey = new Map([["usdc-test", "1.00"]]);
+
+      const withDefault = resolveReferenceAssetOutcome(weth, assetByKey, betweenFloors, resolvedPriceByKey, NOW, BLOCK_NUMBER, BLOCK_HASH);
+      expect(withDefault.ok).toBe(true);
+
+      const withStricterFloor = resolveReferenceAssetOutcome(weth, assetByKey, betweenFloors, resolvedPriceByKey, NOW, BLOCK_NUMBER, BLOCK_HASH, "25000");
+      expect(withStricterFloor.ok).toBe(false);
+      expect(withStricterFloor.sources![0].exclusionReason).toMatch(/liquidity/);
+    });
+  });
 });
 
 describe("buildReferenceAssetMulticallCalls", () => {

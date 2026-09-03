@@ -799,10 +799,14 @@ architecture is chain-agnostic, but every real `REFERENCE_ASSETS` entry
 needs its own independently-verified pool address before a second chain is
 added, the same standard of evidence every existing entry in this file
 already requires), and not wired into every price the app shows — only the
-five reference assets above, only where `verifyAllPools` already runs, only
-above the `MEDIUM` confidence bar. See
-[Known limitations](#known-limitations) below for the complete, honest
-accounting.
+reference assets above, only where `verifyAllPools` already runs, only
+above the `MEDIUM` confidence bar. (This section predates Phase 5.7's BNB
+Chain assets and Phase 5.13's dynamic tier — see [Native protocol coverage
+expansion (Phase 5.7)](#native-protocol-coverage-expansion-phase-57) and
+[Native pricing & TVL scale-up (Phase
+5.13)](#native-pricing--tvl-scale-up-phase-513) for what's actually
+current.) See [Known limitations](#known-limitations) below for the
+complete, honest accounting.
 
 ## Native volume/fee/revenue engine (Phase 5.4)
 
@@ -1919,6 +1923,325 @@ exactly as read on-chain.
   pairs, 0 dangling `swap_events.pool_id` references, 0 unexpected
   V2-with-feeTier or active-V3-without-feeTier rows).
 
+## Native pricing & TVL scale-up (Phase 5.13)
+
+Phase 5.12 activated the native TVL pipeline for discovered pools and, in
+doing so, exposed its real remaining bottleneck: native *pricing*
+coverage was stuck at exactly the 7 hand-curated `REFERENCE_ASSETS` (see
+[Native price engine (Phase 5.3)](#native-price-engine-phase-53)) no
+matter how many pools discovery found. Phase 5.13 scales pricing
+coverage past that ceiling without rebuilding the pricing engine - every
+piece of quality/safety machinery below (liquidity floors, staleness
+rejection, outlier rejection, liquidity-weighted aggregation, confidence
+classification, exact-decimal arithmetic) is the exact same code Phase
+5.3 already shipped and this file already documents; Phase 5.13 adds one
+new orchestration layer that feeds it a dynamically-discovered candidate
+set instead of a hardcoded one.
+
+### Where the 7-token ceiling actually came from
+
+`resolveReferenceAssetOutcome` (`engine.ts`) was already a pure, generic
+function - `(asset, assetByKey, decodedPools, resolvedPriceByKey, now,
+blockNumber, blockHash)` in, one priced-or-rejected outcome out - with no
+`REFERENCE_ASSETS` dependency baked into it anywhere. The ceiling was
+entirely in `priceReferenceAssetsOnChain`'s own top-level orchestration,
+which only ever iterated that one hardcoded config array. The smallest
+correct fix was therefore a second orchestration layer, not a new engine:
+`lib/onchain/pricing/dynamic-engine.ts` calls the identical
+`resolveReferenceAssetOutcome` function against dynamically-discovered
+candidates. The function itself gained exactly one new optional
+parameter - `minLiquidityUsd` (defaults to the existing
+`PRICING_THRESHOLDS.MIN_LIQUIDITY_USD`, so every existing caller and
+every existing test is unaffected) - so the dynamic tier can apply its
+own, stricter floor (see below) without a second copy of the resolution
+logic.
+
+### Dynamic candidate discovery - config-free, reuses discovery output
+
+`lib/onchain/pricing/dynamic-candidates.ts`'s `findPricingCandidateEdges`
+does not scan the chain itself; it reads `getActiveDiscoveredPools()` -
+the same discovered-pool data Phase 5.9-5.12's pool-discovery pipeline
+already produces - filtered to Uniswap-V2-style deployments only (a V3
+pool has no `getReserves()`, so `deriveV2Price`'s constant-product math
+doesn't apply to it; V3-native pricing is real, separate future scope,
+not a small extension of this one). This is Part 2's "prefer scalable
+configuration/data-driven discovery over hardcoding individual pools,"
+satisfied by consuming discovery's output directly rather than building
+a second, parallel discovery mechanism.
+
+### Cycle safety, by construction - not by detection
+
+Part 3 is the one requirement this phase treats as non-negotiable: a
+token must never be priced from `A → B → A`. The static 7-asset graph
+already guards this with `reference-graph.ts`'s Kahn's-algorithm cycle
+detection (unchanged, still used for hop 0 below). The dynamic tier uses
+a different, stronger guarantee: resolution proceeds **hop-by-hop**,
+strictly sequential.
+
+- **Hop 0** is the 7 hardcoded `REFERENCE_ASSETS` themselves, seeded from
+  whatever price each currently has on record (`seedTrustedPrices`),
+  gated by the exact same `isNativePriceEligibleForTvl` bar (confidence
+  MEDIUM+, and fresh) the TVL engine already applies - a stale or
+  LOW-confidence reference price can never seed, and therefore can never
+  silently compound into, a new tier of derived prices.
+- **Hop N** only ever considers a discovered pool where **exactly one**
+  side's token is already in the trusted set built from hops `0..N-1`
+  (`findPricingCandidateEdges`'s own contract - a pool with both sides
+  trusted contributes nothing new, a pool with neither side trusted is
+  deferred, possibly forever, possibly to a later hop). The other side -
+  by definition not yet trusted - becomes hop N's *candidate*, and only
+  joins the trusted set (available as a quote asset) once hop N itself
+  successfully prices it.
+
+A token can therefore only ever be assigned to the **first** hop where it
+becomes reachable; once trusted, it can never re-enter as an unresolved
+candidate on a later hop. A genuine cycle is structurally unreachable,
+not merely detected and rejected after the fact. This was proved with a
+concrete adversarial fixture, not just architectural reasoning
+(`dynamic-engine.integration.test.ts`): pool P1 pairs USDC (hop 0)
+against TokenA; pool P2 pairs TokenA against TokenB; pool **P3**
+deliberately pairs TokenB back against TokenA - the adversarial case. The
+test confirms P3 is correctly used as **hop-2 corroboration** for
+TokenB's price (a second, independent pool pricing the same token,
+grouped alongside P2 - real corroboration, Part 8), and that once
+TokenA/TokenB are both trusted, none of P1/P2/P3 can ever produce a new
+edge for anything again - not even for TokenA, the token P3 superficially
+"points back" toward. `PRICING_THRESHOLDS.MAX_PRICING_HOP_DEPTH` (`2`,
+`aggregate.ts`) additionally bounds how many hops one run will ever walk,
+regardless: a token reachable only beyond that depth is left unpriced
+this run, never forced - it becomes reachable again on a later run once
+something upstream of it resolves.
+
+### A stricter liquidity floor stands in for missing human review
+
+Every existing `REFERENCE_ASSETS` entry's source pool was hand-verified
+two ways before being added (see [Native price engine (Phase
+5.3)](#native-price-engine-phase-53)) - a dynamically-discovered
+candidate gets none of that; it was only ever checked by discovery's own
+generic factory-lineage/token-interface validation, which says nothing
+about economic depth. `PRICING_THRESHOLDS.MIN_LIQUIDITY_USD_DYNAMIC`
+(`"25000"`, 2.5x the existing `MIN_LIQUIDITY_USD` of `"10000"`) is the
+one mechanical safeguard standing in for that missing review, per Part
+2's "manipulation resistance" requirement - passed as
+`resolveReferenceAssetOutcome`'s new `minLiquidityUsd` argument, nothing
+else about the resolution changes.
+
+### Multi-pool corroboration - the existing aggregation, not a new algorithm
+
+`groupEdgesByCandidate` (`dynamic-engine.ts`) groups this hop's candidate
+edges by token: when several independent discovered pools price the same
+token, it builds **one** synthetic `ReferenceAsset` with **multiple**
+`sourcePools` entries - the identical shape `REFERENCE_ASSETS`' own
+multi-pool entries (e.g. `wbtc-ethereum`) already use. That synthetic
+asset is fed into the same `resolveReferenceAssetOutcome` →
+`aggregatePrices`/`classifyConfidence` pipeline described in [Multiple
+sources, aggregation, and confidence](#multiple-sources-aggregation-and-confidence)
+above, unmodified: staleness rejection, then outlier rejection against
+the cross-source median, then a liquidity-weighted mean, then confidence
+classification. There is no separate "corroboration algorithm" for the
+dynamic tier - it is the same one, fed more sources.
+
+### A confidence-gated promotion prevents compounding error
+
+A hop's outcome is only promoted into the trusted set for the *next* hop
+when it both succeeded and cleared the same MEDIUM+ confidence bar TVL
+eligibility already requires. A LOW-confidence or failed price is still
+recorded (for auditability - Part 4 explicitly requires LOW-confidence
+prices to be preserved, never deleted) but can never itself become
+another hop's trusted input - a shaky price can never compound across
+hops into a shakier one two hops later.
+
+### Fairness and bounded batches (Part 10) - the existing rotation primitive
+
+Hop 1 candidates (the overwhelming majority of real candidates in
+practice - most discovered pools pair an arbitrary token directly
+against a hop-0 reference asset) are selected via
+`selectRotatingBatch` - the same round-robin fairness primitive already
+used by the volume engine and its reorg-recheck path, previously
+exercised only indirectly through those callers' own tests and now given
+its own direct test file (`lib/indexing/rotation.test.ts`, 11 cases:
+bounded batch size, wraparound, no starvation, near-equal fairness over
+many calls, a failed batch retrying identically, empty lists, zero/
+negative batch sizes, out-of-range offsets, a growing candidate list).
+`CANDIDATES_PER_RUN` (40) bounds each run's hop-1 work; the rotation
+cursor persists per chain via the existing `indexingState` primitive
+under component `"native-pricing:dynamic-hop1"`. Hop 2+ is naturally
+bounded by hop 1's own already-small batch (a hop-2 candidate can only
+exist paired against a token hop 1 just resolved this same run), so it
+needs no separate cursor.
+
+### Wiring: one worker, not a new cron
+
+`priceDynamicAssets()` (`price-dynamic-assets.ts`) runs inside the
+*same* `workers/onchain/price.ts::priceOnchain()` `sync_runs` record,
+immediately after `priceAllReferenceAssets()` - so the dynamic engine's
+own trusted-set seed always sees this run's freshly-written reference
+prices, never yesterday's. This mirrors Phase 5.12's own precedent of
+folding `verifyDiscoveredPoolsTvl` into `verifyOnchain()` rather than
+adding a fourth cron entry. The 7 reference assets' own success/partial
+classification is unaffected by how many dynamic candidates happened to
+price this particular run - a quiet run with few new dynamic prices is
+not a degraded outcome for the foundational job; the run only downgrades
+to `"partial"` on a genuine dynamic-tier failure (an exception), never
+merely "fewer written than skipped" (an expected, common shape - see
+[Live-verified coverage, and the honest reason it didn't move](#live-verified-coverage-and-the-honest-reason-it-didnt-move)
+below).
+
+### Writing a dynamically-priced token - reusing the write path, not duplicating it
+
+A successfully-priced dynamic candidate needs a `tokens` row before a
+`historical_observations` price row can reference it, and an arbitrary
+discovered token has no `workers/tokens/sync.ts` (CoinGecko top-250-only)
+row to reuse. `ensureOnChainTokenRow` (`tokens.ts`) mirrors the existing
+`syncReferenceAssetTokens` upsert pattern with one deliberate difference:
+it **never overwrites an existing `coingeckoId`** on conflict (only sets
+one to `null` on a genuinely new row) - unlike `syncReferenceAssetTokens`,
+which safely overwrites unconditionally only because every
+`REFERENCE_ASSETS` entry's `coingeckoId` is human-verified. A row the
+CoinGecko sync already identified must keep that identity even if this
+engine touches it later for an on-chain price - covered by a dedicated
+regression test (`tokens.integration.test.ts`). The observation itself
+reuses `recordTokenPriceObservation` (Phase 5.3's own atomic write,
+unmodified) tagged `priceSource: "onchain-pricing-engine-dynamic"`,
+`calculationVersion: "dynamic-amm-graph-v1"` - a distinct, filterable tag
+from the 7 reference assets' own `"onchain-pricing-engine"`, so the two
+tiers' observations are always distinguishable in
+`historical_observations` without needing a new column.
+
+### TVL scale-up (Part 5/9) needed zero new TVL code
+
+Phase 5.12's own `resolveDiscoveredTokenPrice`
+(`verify-discovered-pool-tvl.ts`) already calls `getNativeTokenPrice(chainSlug,
+address)` generically for **any** address a discovered pool holds - it
+has no dependency on `REFERENCE_ASSETS` and was never limited to the
+original 7. Any token this phase's dynamic engine successfully prices
+therefore becomes usable for discovered-pool TVL automatically, the
+moment its observation is written - confirmed by direct re-inspection of
+that file's call sites, not merely assumed. The full pipeline Part 9
+asks for - `discovered → validated → registered → price eligible → TVL
+eligible → TVL observed` - was already wired end-to-end by Phase 5.12;
+Phase 5.13 only had to widen what "price eligible" can mean.
+
+### Price provenance, queryable per token (Parts 7/13/14)
+
+`lib/database/queries/native-pools.ts`'s new `getNativePoolTokenPrices(poolId,
+chainSlug)` answers Part 7's "exactly where did the price used for this
+dollar value come from" at the per-token level, for the pool detail page
+(`app/pool/[chainSlug]/[address]/page.tsx`, via the new
+`components/pools/native-token-prices.tsx`) and as the shape of Part
+14's native pricing API. It is a thin, read-only composition over
+already-existing functions - `getNativeTokenPrice` (native, MEDIUM+ and
+fresh), falling back to `getExternalTokenPrice`/`isExternalTokenPriceFresh`
+(a genuine cached-external price, Phase 5.12), falling back to the
+existing `unavailableMetric()` shape - joined against the pool's own
+`pool_tokens` rows, ordered by `position`. No schema change: the
+per-source liquidity/pool evidence Part 14 asks to expose is
+`getNativeTokenPrice`'s existing `sources: PriceSourceObservation[]`
+field (Phase 5.3), already carrying `sourcePoolAddress`,
+`pairedTokenSymbol`, `liquidityUsd`, and `included`/`exclusionReason` per
+source pool considered - not just the ones that won.
+
+### Live-verified coverage, and the honest reason it didn't move
+
+Full validation (`npm run test`, `npx tsc --noEmit`, `npm run lint`, `npm
+run build`, and `npx drizzle-kit generate` confirming zero schema drift -
+this phase adds no migration) all passed clean. The real indexing paths
+were then run against the live tracked dev database
+(`npm run price:onchain`, `npm run verify:onchain`), not synthetic data:
+
+| Metric | Before | After |
+|---|---|---|
+| Registered pools | 185 | 185 |
+| Tokens with a native price on record | 7 | 7 |
+| Native-priced TVL pools | 3 | 3 |
+| Hybrid-priced TVL pools | 3 | 3 |
+| TVL-unavailable pools | 179 | 179 |
+| Dynamic-tier price observations written | 0 | 0 |
+| Dynamic candidates considered this run | - | 157 (59 hop 1, 89 hop 2, across `ethereum` + `bnb-chain`) |
+
+**Post-review correction.** The FIRST version of this run reported "0
+written" for the right eventual conclusion but the wrong immediate reason:
+review caught a genuine orchestration bug (`resolveHop` in
+`dynamic-engine.ts` was calling `resolveReferenceAssetOutcome` with an
+`assetByKey` built from `groupEdgesByCandidate`'s output alone - the
+candidate tokens only, never the TRUSTED quote asset each one pairs
+against). `resolveReferenceAssetOutcome`'s own `assetByKey.get(source.pairedWithKey)`
+lookup (engine.ts) therefore missed on every single source, and every
+candidate was rejected as `"configured pairedWithKey ... is not a known
+reference asset - config error"` regardless of real liquidity - the true
+cause of the original "157 considered, 0 written" result, not the
+liquidity floor this doc's own first version credited. Fixed by
+`resolveHopOutcomes` (`dynamic-engine.ts`), the one place `assetByKey` is
+now assembled as the union of every trusted asset (`TrustedSet.assetByKey`
+- seeded from `REFERENCE_ASSETS` and grown by `trustedAssetFromOutcome` on
+every successful promotion, mirrored 1:1 with `TrustedSet.priceByKey`'s
+own growth) and this hop's own candidates - see that function's own
+comment for the full account, and `dynamic-engine.test.ts`'s "production
+orchestration bug regression" describe block for the regression tests
+(hop-1 candidate resolving against a trusted `REFERENCE_ASSETS` entry,
+hop-2 candidate resolving against a hop-1-derived token, and a cycle-safety
+check confirming an already-trusted token is never re-resolved).
+
+**Re-run after the fix.** `npm run price:onchain` still reports 0 dynamic
+prices written - but this time confirmed genuine, not the bug: a direct
+inspection of every candidate's own `sources[].exclusionReason` this run
+found **zero** occurrences of the `"not a known reference asset"` message
+(the bug's own signature) and, instead, real dollar liquidity figures
+computed from actual on-chain reserves for every rejection (e.g. `"pool
+liquidity $0.0658... is below the $25000 minimum"`). Going further than a
+single rotation batch, `priceDynamicTokensOnChain(chainSlug, 500)` was
+called directly for both chains - large enough to cover each chain's
+*entire* current discovered-pool population (43 Ethereum / 136 BNB Chain)
+in one call, not just one rotation slice. The single highest real
+liquidity found anywhere in that full scan: **$757.36** (an Ethereum
+candidate paired against WETH) - still nowhere near the $25,000 floor. A
+direct listing of the discovered candidates confirms why: tickers like
+`test`, `$VXRA`, `CATE`, `🔥HLVC`, `V4` dominate the currently discovered
+population on both chains. Raw `PairCreated`/`PoolCreated` event scanning
+(Phase 5.9-5.12) captures **every** pair a factory ever deploys, and on
+both Ethereum and BNB Chain today the overwhelming majority of
+freshly-created V2 pairs are spam/honeypot tokens with negligible real
+liquidity - a well-known characteristic of unfiltered DEX factory
+scanning, not something specific to this app's discovery logic.
+`verify:onchain`'s own live run independently confirms the same shape
+from the TVL side: 179/185 registered pools skipped with "no reliable
+price" for their own tokens, for the identical reason.
+
+This is the honest, current shape of "scalable, data-driven discovery"
+without a token-quality filter on top of it: the dynamic engine, the
+liquidity floor, the cycle-safety, and the corroboration logic all work
+correctly - proven both by the (now-fixed) integration test suite and by this live
+run's clean, error-free rejection of every currently-discovered
+candidate - but real coverage growth is presently bottlenecked by the
+*quality* of the discovered-pool population, not by anything in the
+pricing or TVL calculation. See [Known limitations](#known-limitations)
+below for what a future phase would need to change to move this number.
+
+### External dependency rule (Part 17), verified by construction
+
+`price-dynamic-assets.ts`'s entire job is reading already-decoded
+on-chain multicall results (via `priceDynamicTokensOnChain`) and writing
+them - grep-confirmed: nothing in this phase's own files imports
+`priceProvider`, `CoinGeckoProvider`, or any DefiLlama client, directly
+or indirectly. Every dollar value the dynamic tier produces traces back
+to a real `getReserves()` read at a real, recorded block - the native
+pricing path stays fully auditable, exactly as it was before this phase.
+
+### Performance, as actually measured this run
+
+One multicall per hop per chain (not per pool) - `resolveHop` batches
+every hop's candidate pools' `getReserves()`/`token0()`/`token1()` reads
+into the same `buildReferenceAssetMulticallCalls` batching
+`priceReferenceAssetsOnChain` already used, plus one `getBlockNumber()`
+and one `getBlock()` per hop per chain. This run: 2 hops × 2 chains = 4
+multicalls total (plus 4 block reads) to consider all 157 candidates -
+not 157 separate RPC round-trips. `sync-run`'s own duration figure for
+the combined reference-asset-plus-dynamic run was ~2.4 seconds end to
+end. No new in-memory cache was added; the only per-run state held in
+memory is the current run's own trusted-price map and candidate list,
+both bounded by `CANDIDATES_PER_RUN`/discovered-pool count and discarded
+at the end of the run.
+
 ## Known limitations
 
 - Six verified pools across five chains, plus two verified ERC-4626 vaults
@@ -2073,3 +2396,44 @@ exactly as read on-chain.
 - **No new chains or deployments added this phase** - a deliberate choice
   (see "Investigated and deliberately not pursued this phase" above), not
   an oversight or a capability gap discovered and left unfixed.
+- **Dynamic native pricing coverage (Phase 5.13) is currently bottlenecked
+  by discovered-pool quality, not by the pricing/TVL machinery itself** -
+  see [Live-verified coverage, and the honest reason it didn't move](#live-verified-coverage-and-the-honest-reason-it-didnt-move)
+  above for the live numbers and the concrete, independently-verified
+  evidence (a real ~$0.003-liquidity pool, a candidate list dominated by
+  tickers like `test`/`$VXRA`/`🔥HLVC`). Raw `PairCreated`/`PoolCreated`
+  scanning has no concept of "is this a real project" - it finds every
+  pair a factory ever deploys, and most of what exists on Ethereum/BNB
+  Chain today for the deployments this app scans is spam. Growing real
+  coverage from here needs one of: a token-quality signal ahead of the
+  pricing engine (e.g. minimum pool age, a denylist/allowlist, or
+  cross-referencing CoinGecko's own top-market-cap token list before a
+  candidate is even considered), scanning further back in chain history
+  to reach pairs from before a given deployment's spam-heavy period, or
+  simply more elapsed real time for rotation to reach the genuinely-liquid
+  minority as discovery's own coverage grows - none of which this phase
+  attempts, since each is a real, separate scope decision rather than a
+  small extension of the liquidity-floor mechanism already built.
+- **V3 pools are not part of the dynamic pricing candidate set** -
+  `findPricingCandidateEdges` (`dynamic-candidates.ts`) filters to
+  Uniswap-V2-style deployments only, since `deriveV2Price` depends on
+  `getReserves()`'s constant-product invariant, which a concentrated-
+  liquidity V3 pool does not have. A discovered V3 pool can still receive
+  native TVL today if its own tokens happen to be priced by some other
+  means (a hardcoded reference asset, or a dynamically-priced V2-derived
+  token) - only the *V2-candidate-discovery* path is scoped out, not V3
+  TVL itself.
+- **Two hops, not unbounded** - `MAX_PRICING_HOP_DEPTH` (`2`) means a
+  token reachable only via a chain of 3+ discovered pools from a hardcoded
+  reference asset is left unpriced, by design (Part 3's own "bounded
+  traversal" requirement, trading some reachable-in-principle coverage for
+  a hard, simple cap on how far pricing/manipulation error can compound in
+  one run).
+- **The per-token price detail (`getNativePoolTokenPrices`, the pool
+  detail page's "Token prices" card) only ever shows the CURRENT price**,
+  gated by the same freshness/confidence bar the TVL engine uses - it does
+  not expose a historical per-token price chart. `historical_observations`
+  already retains every past `entityType: "token"` observation (nothing is
+  deleted), so a future phase could add one without new data collection;
+  this phase's own scope was the current-price provenance view Part 13/14
+  asked for, not a new chart.

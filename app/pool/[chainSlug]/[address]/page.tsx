@@ -7,7 +7,16 @@ import { StatTile } from "@/components/stats/stat-tile";
 import { TvlAreaChart } from "@/components/charts/tvl-area-chart";
 import { NativeDailyChart } from "@/components/pools/native-daily-chart";
 import { NativeSourceBadge } from "@/components/pools/native-source-badge";
-import { getNativePoolFeesHistory, getNativePoolIdentity, getNativePoolOverview, getNativePoolTvlHistory, getNativePoolVolumeHistory, type NativeMetric } from "@/lib/database/queries/native-pools";
+import { NativeTokenPrices } from "@/components/pools/native-token-prices";
+import {
+  getNativePoolFeesHistory,
+  getNativePoolIdentity,
+  getNativePoolOverview,
+  getNativePoolTokenPrices,
+  getNativePoolTvlHistory,
+  getNativePoolVolumeHistory,
+  type NativeMetric,
+} from "@/lib/database/queries/native-pools";
 import { formatNumber, formatUsd } from "@/lib/format";
 
 export const revalidate = 300;
@@ -64,10 +73,11 @@ export default async function PoolDetailPage({ params }: { params: Promise<{ cha
 
   const { identity, tvl, volume, fees, swapCount, observationCount, earliestObservedAt } = overview;
 
-  const [tvlHistory, volumeHistory, feesHistory] = await Promise.all([
+  const [tvlHistory, volumeHistory, feesHistory, tokenPrices] = await Promise.all([
     getNativePoolTvlHistory(identity.poolId, ninetyDaysAgo()),
     getNativePoolVolumeHistory(identity.poolId),
     getNativePoolFeesHistory(identity.poolId),
+    getNativePoolTokenPrices(identity.poolId, chainSlug),
   ]);
 
   const explorerLink = identity.explorerUrl ? `${identity.explorerUrl}/address/${identity.address}` : null;
@@ -111,6 +121,7 @@ export default async function PoolDetailPage({ params }: { params: Promise<{ cha
       </div>
 
       <div className="mt-8 grid gap-4 sm:grid-cols-1">
+        <NativeTokenPrices tokens={tokenPrices} />
         <Card className="p-4">
           <h2 className="mb-2 text-sm font-medium text-muted-foreground">TVL history (90 days)</h2>
           <TvlAreaChart data={tvlHistory.map((p) => ({ timestamp: p.timestamp, value: p.value }))} />

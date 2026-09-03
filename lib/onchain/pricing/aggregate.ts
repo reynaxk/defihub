@@ -63,6 +63,36 @@ export const PRICING_THRESHOLDS = {
   // observed - a high-confidence price from hours ago is not automatically
   // still correct.
   MAX_NATIVE_PRICE_AGE_FOR_TVL_MS: 60 * 60 * 1000,
+  // Phase 5.13: the dynamic-pricing engine's OWN liquidity floor for a
+  // candidate pool it discovered itself (lib/onchain/pricing/dynamic-engine.ts),
+  // deliberately stricter than MIN_LIQUIDITY_USD above. The 7 hardcoded
+  // REFERENCE_ASSETS' own sourcePools (config.ts) were each individually,
+  // manually verified by a human before being added - a $10k floor there is
+  // a sanity backstop, not the thing actually protecting against a thin/
+  // manipulated pool. A dynamically-discovered pool has no such review: it
+  // was only ever checked by the SAME generic factory-scan validation every
+  // other discovered pool gets (lib/onchain/discovery/validate.ts - genuine
+  // factory lineage, real token interface, nothing about economic depth). A
+  // 2.5x higher floor here is the one mechanical safeguard standing in for
+  // that missing human review, per Section 2's own "manipulation resistance"
+  // requirement.
+  MIN_LIQUIDITY_USD_DYNAMIC: "25000",
+  // Phase 5.13: the hard ceiling on how many pairing hops a dynamically-
+  // discovered token's price may be derived through before this engine
+  // refuses to go further (lib/onchain/pricing/dynamic-engine.ts). Hop 0 is
+  // the 7 hardcoded reference assets themselves (trusted by construction,
+  // config.ts). Hop 1 prices a token directly against a hop-0 asset - the
+  // overwhelming majority of real candidates, live-confirmed during Phase
+  // 5.12's own development (every discovered PancakeSwap V2 pool pairs an
+  // arbitrary token directly against WBNB or USDT). Hop 2 exists so a token
+  // reachable only via one more layer (paired against a hop-1-derived
+  // token, never against a raw hop-0 asset) isn't left permanently
+  // unpriced, without opening the door to unbounded chains where pricing
+  // error and manipulation exposure compound with every additional layer.
+  // A token not reachable within this many hops this run is simply left
+  // unpriced (never forced, never faked) - it becomes reachable again on a
+  // later run once something upstream of it resolves.
+  MAX_PRICING_HOP_DEPTH: 2,
 } as const;
 
 function toScaledBigInt(decimal: string, scale = 30): bigint {

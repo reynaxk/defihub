@@ -59,3 +59,42 @@ export async function getReferenceAssetTokenId(chainSlug: string, address: strin
     .where(and(eq(chains.slug, chainSlug), eq(tokens.address, address.toLowerCase())));
   return row?.id ?? null;
 }
+
+// Phase 5.13: the dynamic-pricing engine's own twin of syncReferenceAssetTokens
+// above, for a token discovered on-chain (lib/onchain/discovery/) rather
+// than hand-configured. recordTokenPriceObservation (record-price-observation.ts)
+// refuses to write a price observation without a real tokens.id - an
+// arbitrary discovered-pool token has no reason to already have one
+// (workers/tokens/sync.ts only ever discovers CoinGecko's own top-market-cap
+// list, and the overwhelming majority of discovered-pool tokens are far
+// outside it), so the dynamic pricing engine must be able to establish this
+// row itself, the same way syncReferenceAssetTokens already does for its
+// own 7 hand-curated tokens.
+//
+// Deliberately NOT identical to that function's own upsert: symbol/decimals
+// here come from an on-chain decimals()/symbol() read (register.ts's own
+// validated discovery data - see this function's own caller), which is
+// exact and safe to overwrite on conflict, matching syncReferenceAssetTokens'
+// own "last write wins" policy for those two columns. coingeckoId is
+// deliberately excluded from the update set (never set to null on
+// conflict): this function has no CoinGecko identity for the token at all,
+// and a row that already exists - from workers/tokens/sync.ts's own
+// CoinGecko-driven discovery, or a previous call to this same function -
+// must never have a real, already-known coingeckoId clobbered back to
+// "unknown" just because this call happens to run later. Only a genuinely
+// NEW row gets coingeckoId: null (honest - not fabricated, not guessed).
+export async function ensureOnChainTokenRow(chainId: string, address: string, symbol: string | null, decimals: number): Promise<string> {
+  const normalizedAddress = address.toLowerCase();
+  const resolvedSymbol = symbol ?? normalizedAddress.slice(0, 10); // same "no real symbol -> short address prefix" fallback register.ts's own pools.label construction already established
+
+  const [row] = await db
+    .insert(tokens)
+    .values({ chainId, address: normalizedAddress, symbol: resolvedSymbol, decimals })
+    .onConflictDoUpdate({
+      target: [tokens.chainId, tokens.address],
+      set: { symbol: resolvedSymbol, decimals },
+    })
+    .returning({ id: tokens.id });
+
+  return row.id;
+}

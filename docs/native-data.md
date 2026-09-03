@@ -2159,20 +2159,50 @@ were then run against the live tracked dev database
 | Dynamic-tier price observations written | 0 | 0 |
 | Dynamic candidates considered this run | - | 157 (59 hop 1, 89 hop 2, across `ethereum` + `bnb-chain`) |
 
-Zero dynamic candidates cleared `MIN_LIQUIDITY_USD_DYNAMIC` this run -
-not a bug. Direct on-chain verification of one rejected candidate
-(`AMGN/WETH`, an Ethereum pool) found a real WETH-side reserve of
-`~5.9e-7 WETH` (worth roughly $0.003 total, against a $25,000 floor) -
-computed independently of the pricing engine, straight from the same raw
-`getReserves()` multicall data it uses. A direct listing of this run's
-discovered candidates confirms this is the norm, not an outlier: tickers
-like `test`, `$VXRA`, `CATE`, `🔥HLVC`, `V4` dominate the currently
-discovered population on both chains. Raw `PairCreated`/`PoolCreated`
-event scanning (Phase 5.9-5.12) captures **every** pair a factory ever
-deploys, and on both Ethereum and BNB Chain today the overwhelming
-majority of freshly-created V2 pairs are spam/honeypot tokens with
-negligible real liquidity - a well-known characteristic of unfiltered DEX
-factory scanning, not something specific to this app's discovery logic.
+**Post-review correction.** The FIRST version of this run reported "0
+written" for the right eventual conclusion but the wrong immediate reason:
+review caught a genuine orchestration bug (`resolveHop` in
+`dynamic-engine.ts` was calling `resolveReferenceAssetOutcome` with an
+`assetByKey` built from `groupEdgesByCandidate`'s output alone - the
+candidate tokens only, never the TRUSTED quote asset each one pairs
+against). `resolveReferenceAssetOutcome`'s own `assetByKey.get(source.pairedWithKey)`
+lookup (engine.ts) therefore missed on every single source, and every
+candidate was rejected as `"configured pairedWithKey ... is not a known
+reference asset - config error"` regardless of real liquidity - the true
+cause of the original "157 considered, 0 written" result, not the
+liquidity floor this doc's own first version credited. Fixed by
+`resolveHopOutcomes` (`dynamic-engine.ts`), the one place `assetByKey` is
+now assembled as the union of every trusted asset (`TrustedSet.assetByKey`
+- seeded from `REFERENCE_ASSETS` and grown by `trustedAssetFromOutcome` on
+every successful promotion, mirrored 1:1 with `TrustedSet.priceByKey`'s
+own growth) and this hop's own candidates - see that function's own
+comment for the full account, and `dynamic-engine.test.ts`'s "production
+orchestration bug regression" describe block for the regression tests
+(hop-1 candidate resolving against a trusted `REFERENCE_ASSETS` entry,
+hop-2 candidate resolving against a hop-1-derived token, and a cycle-safety
+check confirming an already-trusted token is never re-resolved).
+
+**Re-run after the fix.** `npm run price:onchain` still reports 0 dynamic
+prices written - but this time confirmed genuine, not the bug: a direct
+inspection of every candidate's own `sources[].exclusionReason` this run
+found **zero** occurrences of the `"not a known reference asset"` message
+(the bug's own signature) and, instead, real dollar liquidity figures
+computed from actual on-chain reserves for every rejection (e.g. `"pool
+liquidity $0.0658... is below the $25000 minimum"`). Going further than a
+single rotation batch, `priceDynamicTokensOnChain(chainSlug, 500)` was
+called directly for both chains - large enough to cover each chain's
+*entire* current discovered-pool population (43 Ethereum / 136 BNB Chain)
+in one call, not just one rotation slice. The single highest real
+liquidity found anywhere in that full scan: **$757.36** (an Ethereum
+candidate paired against WETH) - still nowhere near the $25,000 floor. A
+direct listing of the discovered candidates confirms why: tickers like
+`test`, `$VXRA`, `CATE`, `🔥HLVC`, `V4` dominate the currently discovered
+population on both chains. Raw `PairCreated`/`PoolCreated` event scanning
+(Phase 5.9-5.12) captures **every** pair a factory ever deploys, and on
+both Ethereum and BNB Chain today the overwhelming majority of
+freshly-created V2 pairs are spam/honeypot tokens with negligible real
+liquidity - a well-known characteristic of unfiltered DEX factory
+scanning, not something specific to this app's discovery logic.
 `verify:onchain`'s own live run independently confirms the same shape
 from the TVL side: 179/185 registered pools skipped with "no reliable
 price" for their own tokens, for the identical reason.
@@ -2180,7 +2210,7 @@ price" for their own tokens, for the identical reason.
 This is the honest, current shape of "scalable, data-driven discovery"
 without a token-quality filter on top of it: the dynamic engine, the
 liquidity floor, the cycle-safety, and the corroboration logic all work
-correctly - proven both by the integration test suite and by this live
+correctly - proven both by the (now-fixed) integration test suite and by this live
 run's clean, error-free rejection of every currently-discovered
 candidate - but real coverage growth is presently bottlenecked by the
 *quality* of the discovered-pool population, not by anything in the

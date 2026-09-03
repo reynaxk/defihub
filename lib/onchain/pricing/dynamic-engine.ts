@@ -77,23 +77,75 @@ export interface DynamicPricingOutcome {
   blockHash?: string;
 }
 
-// Seeds the trusted set from the 7 hardcoded REFERENCE_ASSETS' OWN
-// currently-persisted prices - not re-derived here (that's
-// priceReferenceAssetsOnChain's job, engine.ts, run separately/first in the
-// same cron - see workers/onchain/price.ts). Gated by the exact same
-// isNativePriceEligibleForTvl bar (confidence MEDIUM+ AND fresh) the TVL
-// engine already applies for the identical reason: a stale or LOW-
-// confidence reference price must never be allowed to seed - and therefore
-// silently compound into - a whole new tier of dynamically-derived prices.
-async function seedTrustedPrices(chainSlug: string, now: Date): Promise<Map<string, string>> {
-  const trusted = new Map<string, string>();
+// A trusted token needs TWO things available to resolveReferenceAssetOutcome
+// when it's used as a QUOTE asset (source.pairedWithKey) for some other
+// candidate: its resolved USD price (priceByKey, used for the actual price
+// derivation) AND its own ReferenceAsset record - address/decimals/symbol -
+// which resolveReferenceAssetOutcome reads via `assetByKey.get(source.pairedWithKey)`
+// (engine.ts) to know WHICH on-chain address/decimals the quote side even
+// is. Bug fixed here (production bug report): resolveHop used to pass
+// ONLY the candidate assets (groupEdgesByCandidate's own output) as
+// `assetByKey` into resolveReferenceAssetOutcome - the trusted quote asset
+// itself was never in that map, so `assetByKey.get(source.pairedWithKey)`
+// always missed and every source was excluded as "not a known reference
+// asset - config error," regardless of real liquidity. assetByKey must be
+// the union of every candidate AND every trusted asset - see
+// resolveHopOutcomes below, the one place that union is now built, and the
+// only place this file constructs an assetByKey to hand to
+// resolveReferenceAssetOutcome.
+export interface TrustedSet {
+  priceByKey: Map<string, string>;
+  assetByKey: Map<string, ReferenceAsset>;
+}
+
+// Seeds the trusted set from the 7 hardcoded REFERENCE_ASSETS themselves -
+// their prices are not re-derived here (that's priceReferenceAssetsOnChain's
+// job, engine.ts, run separately/first in the same cron - see
+// workers/onchain/price.ts), but every one of their own ReferenceAsset
+// records IS always included in assetByKey unconditionally, mirroring
+// priceReferenceAssetsOnChain's own assetByKey (engine.ts) exactly - it
+// includes every configured asset regardless of whether pricing it actually
+// succeeds. Whether a given asset's PRICE is trusted this run (priceByKey)
+// is gated by the exact same isNativePriceEligibleForTvl bar (confidence
+// MEDIUM+ AND fresh) the TVL engine already applies - a stale or LOW-
+// confidence reference price must never be allowed to seed, and therefore
+// silently compound into, a whole new tier of dynamically-derived prices.
+// An asset present in assetByKey but absent from priceByKey correctly
+// resolves any source quoting against it to "reference asset has not been
+// resolved yet" (engine.ts) - excluded, never fabricated - rather than the
+// misleading "not a known reference asset" outcome the bug produced.
+async function seedTrustedSet(chainSlug: string, now: Date): Promise<TrustedSet> {
+  const priceByKey = new Map<string, string>();
+  const assetByKey = new Map<string, ReferenceAsset>();
   for (const asset of REFERENCE_ASSETS.filter((a) => a.chainSlug === chainSlug)) {
+    const key = pricingAddressKey(chainSlug, asset.address);
+    assetByKey.set(key, asset);
     const native = await getNativeTokenPrice(chainSlug, asset.address);
     if (native && isNativePriceEligibleForTvl(native.confidence, native.observedAt, now)) {
-      trusted.set(pricingAddressKey(chainSlug, asset.address), native.priceUsd);
+      priceByKey.set(key, native.priceUsd);
     }
   }
-  return trusted;
+  return { priceByKey, assetByKey };
+}
+
+// The synthetic ReferenceAsset record for a candidate that just resolved
+// successfully and was promoted into the trusted set - so a LATER hop can
+// use it as a quote asset via the exact same assetByKey.get(pairedWithKey)
+// lookup a hardcoded REFERENCE_ASSETS entry already gets. `sourcePools` is
+// deliberately omitted/empty: this asset is already resolved (it needs no
+// further pricing of its own), it's only ever looked up here as somebody
+// ELSE's pairedAsset.
+export function trustedAssetFromOutcome(outcome: DynamicPricingOutcome): ReferenceAsset {
+  return {
+    key: outcome.key,
+    chainSlug: outcome.chainSlug,
+    address: outcome.address,
+    symbol: outcome.symbol ?? outcome.key,
+    decimals: outcome.decimals,
+    coingeckoId: "",
+    kind: "derived",
+    sourcePools: [],
+  };
 }
 
 // Groups candidate edges by the token they'd price, so a token reachable
@@ -129,19 +181,69 @@ export function groupEdgesByCandidate(edges: readonly PricingCandidateEdge[]): M
   return assetByKey;
 }
 
-// One hop's worth of chain reads + resolution, given the assets to price
-// this hop and the trusted prices to resolve them against. Mirrors
+// Pure - given this hop's candidate assets, the full trusted set (both
+// prices AND asset records - see TrustedSet's own comment above for why
+// both are required), and already-decoded on-chain reserves, resolves every
+// candidate's outcome. This is the ONE place resolveHop below (and this
+// file's own regression tests) build the assetByKey handed to
+// resolveReferenceAssetOutcome - deliberately extracted as its own pure,
+// directly-testable function (no RPC, no DB - real decodedPools/trusted
+// data can be hand-constructed exactly like engine.test.ts already does for
+// resolveReferenceAssetOutcome itself) so this exact "forgot to include the
+// trusted quote assets" orchestration bug has one single, tested assembly
+// point rather than being free to recur at a second call site later.
+export function resolveHopOutcomes(
+  chainSlug: string,
+  candidateAssetByKey: Map<string, ReferenceAsset>,
+  trusted: TrustedSet,
+  decodedPools: Map<string, DecodedPoolReserves>,
+  now: Date,
+  blockNumber: bigint,
+  blockHash: string,
+): DynamicPricingOutcome[] {
+  // The union of every trusted (hop 0..N-1) asset and this hop's own
+  // candidates - a candidate's own key never collides with a trusted key
+  // (findPricingCandidateEdges' own contract: a candidate is, by
+  // definition, not yet trusted), so ordering here doesn't matter, but
+  // candidates are spread last so a genuine collision would still resolve
+  // in the candidate's favor rather than silently reusing a stale trusted
+  // entry.
+  const fullAssetByKey = new Map<string, ReferenceAsset>([...trusted.assetByKey, ...candidateAssetByKey]);
+
+  return [...candidateAssetByKey.values()].map((asset) => {
+    const outcome = resolveReferenceAssetOutcome(asset, fullAssetByKey, decodedPools, trusted.priceByKey, now, blockNumber, blockHash, PRICING_THRESHOLDS.MIN_LIQUIDITY_USD_DYNAMIC);
+    return {
+      key: asset.key,
+      chainSlug,
+      address: asset.address,
+      symbol: asset.symbol,
+      decimals: asset.decimals,
+      hop: 0, // filled in by the caller, which knows which hop this call belongs to
+      ok: outcome.ok,
+      error: outcome.error,
+      priceUsd: outcome.priceUsd,
+      confidence: outcome.confidence,
+      label: outcome.label,
+      sources: outcome.sources,
+      blockNumber: outcome.blockNumber,
+      blockHash: outcome.blockHash,
+    };
+  });
+}
+
+// One hop's worth of chain reads + resolution, given the candidate assets to
+// price this hop and the full trusted set to resolve them against. Mirrors
 // priceReferenceAssetsOnChain's own block-pinning discipline exactly (same
 // module, engine.ts, same withResilientClient/getBlockNumber/confirmations
 // sequence) - every asset resolved THIS hop, on THIS chain, comes from the
 // same pinned block.
 async function resolveHop(
   chainSlug: string,
-  assetByKey: Map<string, ReferenceAsset>,
-  trustedPriceByKey: Map<string, string>,
+  candidateAssetByKey: Map<string, ReferenceAsset>,
+  trusted: TrustedSet,
   now: Date,
 ): Promise<DynamicPricingOutcome[]> {
-  const assets = [...assetByKey.values()];
+  const assets = [...candidateAssetByKey.values()];
   if (assets.length === 0) return [];
 
   const poolAddresses = [...new Set(assets.flatMap((a) => (a.sourcePools ?? []).map((p) => p.poolAddress.toLowerCase())))];
@@ -174,25 +276,7 @@ async function resolveHop(
     });
   });
 
-  return assets.map((asset) => {
-    const outcome = resolveReferenceAssetOutcome(asset, assetByKey, decodedPools, trustedPriceByKey, now, blockNumber, blockHash, PRICING_THRESHOLDS.MIN_LIQUIDITY_USD_DYNAMIC);
-    return {
-      key: asset.key,
-      chainSlug,
-      address: asset.address,
-      symbol: asset.symbol,
-      decimals: asset.decimals,
-      hop: 0, // filled in by the caller, which knows which hop this call belongs to
-      ok: outcome.ok,
-      error: outcome.error,
-      priceUsd: outcome.priceUsd,
-      confidence: outcome.confidence,
-      label: outcome.label,
-      sources: outcome.sources,
-      blockNumber: outcome.blockNumber,
-      blockHash: outcome.blockHash,
-    };
-  });
+  return resolveHopOutcomes(chainSlug, candidateAssetByKey, trusted, decodedPools, now, blockNumber, blockHash);
 }
 
 export interface DynamicPricingRunResult {
@@ -208,7 +292,7 @@ export async function priceDynamicTokensOnChain(chainSlug: string, batchSize: nu
   if (!VIEM_CHAIN_BY_SLUG.has(chainSlug)) return { outcomes: [], candidatesConsidered: 0 };
 
   const now = new Date();
-  const trustedPriceByKey = await seedTrustedPrices(chainSlug, now);
+  const trusted = await seedTrustedSet(chainSlug, now);
   const outcomes: DynamicPricingOutcome[] = [];
   let candidatesConsidered = 0;
 
@@ -216,21 +300,26 @@ export async function priceDynamicTokensOnChain(chainSlug: string, batchSize: nu
   let rotationOffset = rotationState?.lastProcessedBlock ?? BigInt(0);
 
   for (let hop = 1; hop <= PRICING_THRESHOLDS.MAX_PRICING_HOP_DEPTH; hop++) {
-    const edges = (await findPricingCandidateEdges(new Set(trustedPriceByKey.keys()))).filter((e) => e.chainSlug === chainSlug);
-    let assetByKey = groupEdgesByCandidate(edges);
+    // Candidate discovery stays keyed off priceByKey (not assetByKey): a
+    // reference asset present in assetByKey but without a usable price this
+    // run must not be treated as a valid quote for finding NEW candidates -
+    // a candidate found only against it would just fail resolution anyway
+    // (see seedTrustedSet's own comment), wasting a rotation slot.
+    const edges = (await findPricingCandidateEdges(new Set(trusted.priceByKey.keys()))).filter((e) => e.chainSlug === chainSlug);
+    let candidateAssetByKey = groupEdgesByCandidate(edges);
 
     if (hop === 1) {
-      const candidateKeys = [...assetByKey.keys()];
+      const candidateKeys = [...candidateAssetByKey.keys()];
       const selection = selectRotatingBatch(candidateKeys, batchSize, rotationOffset);
       rotationOffset = selection.nextOffset;
       const selectedKeys = new Set(selection.batch);
-      assetByKey = new Map([...assetByKey].filter(([key]) => selectedKeys.has(key)));
+      candidateAssetByKey = new Map([...candidateAssetByKey].filter(([key]) => selectedKeys.has(key)));
     }
 
-    candidatesConsidered += assetByKey.size;
-    if (assetByKey.size === 0) continue;
+    candidatesConsidered += candidateAssetByKey.size;
+    if (candidateAssetByKey.size === 0) continue;
 
-    const hopOutcomes = await resolveHop(chainSlug, assetByKey, trustedPriceByKey, now);
+    const hopOutcomes = await resolveHop(chainSlug, candidateAssetByKey, trusted, now);
     for (const outcome of hopOutcomes) {
       outcomes.push({ ...outcome, hop });
       // Promoted into the trusted set for the NEXT hop only when this run's
@@ -238,9 +327,13 @@ export async function priceDynamicTokensOnChain(chainSlug: string, batchSize: nu
       // eligibility already requires (isNativePriceEligibleForTvl) - a LOW-
       // confidence or failed price is still recorded for auditability (see
       // price-dynamic-assets.ts) but never allowed to become another hop's
-      // own trusted input, so a shaky price can never compound.
+      // own trusted input, so a shaky price can never compound. Both maps
+      // are updated together - a price with no matching asset record (or
+      // vice versa) would silently reproduce this file's own reported bug
+      // one hop later.
       if (outcome.ok && outcome.confidence && outcome.confidence !== "LOW" && outcome.confidence !== "INVALID") {
-        trustedPriceByKey.set(outcome.key, outcome.priceUsd!);
+        trusted.priceByKey.set(outcome.key, outcome.priceUsd!);
+        trusted.assetByKey.set(outcome.key, trustedAssetFromOutcome(outcome));
       }
     }
 
